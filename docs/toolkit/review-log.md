@@ -1,7 +1,7 @@
 # 多代理 AI 輔助程式開發測試工具包：審查處置紀錄
 
-> **版本**：v1.4.5（四份文件共用版本號）
-> **修訂日期**：2026-10-31（臺灣時間）
+> **版本**：v1.4.6（四份文件共用版本號）
+> **修訂日期**：2026-11-01（臺灣時間）
 > **文件狀態**：架構設計草案，非已實作或已驗證的聲明。
 > **資訊分級**：機密／僅供英業達內部使用；未取得正式文件編號或發布核准
 > **文件組合**：規格 [`spec.md`](spec.md)、設計說明 [`design-notes.md`](design-notes.md)、審查處置紀錄 [`review-log.md`](review-log.md)、《v0.1 最小範圍》 [`v0.1-scope.md`](v0.1-scope.md)
@@ -71,6 +71,7 @@
 | v1.4.3 | 2026-10-31 | 加入自動檢查：`tools/build.py` 新增跨文件 `TK-` 引用、[R] 參考資料（重複、跳號、未定義）、四份文件版本一致、LF 換行，以及「須／不得條文必有驗收」等檢查；新增 `.githooks/pre-commit`（提交前執行 `--check`）、`.github/workflows/docs-check.yml`（push 與 PR 時執行）與 `.gitattributes`（`* text=auto eol=lf`）；README 新增「自動檢查」一節與 `core.hooksPath` 設定方式；`docs/agents/` 三份檔案的工作目錄換行改為 LF。條文內容無變更 |
 | v1.4.4 | 2026-10-31 | 新增 repo 根目錄 `CODING_STANDARDS.md`，收判斷類審查規則（範圍衝突、定義一致、放寬須寫理由、驗收可判定、數字來源、證據等級、三處說法一致）；README 檢查清單原第 6、7 步移入該檔，改為指向它；新增 `.claude/settings.json` 設定 `PYTHONIOENCODING=utf-8`；`CLAUDE.md` 改為只匯入 `AGENTS.md`；`build.py` 的引用與換行檢查涵蓋新檔。條文內容無變更 |
 | v1.4.5 | 2026-10-31 | 重整 `tools/build.py`：檢查與產生集中到 `check_docs`，輸入文件快照、回傳問題清單與需要更新的產生結果，讀寫磁碟只在命令列入口；同一階段的錯誤一次全部列出，並附規則代碼；換行錯誤改為在寫檔前擋下（原本是寫檔後才回報）。新增 `tools/test_build.py`（每條檢查規則一正一反，另含真實 repo 檢查），CI 先跑測試再跑 `--check`；新增 `.gitignore`（排除 `__pycache__/`、`scratch/` 與 `docs/research/*.pdf`）；README「自動檢查」一節補上錯誤回報方式與測試。條文內容無變更 |
+| v1.4.6 | 2026-11-01 | 新增 `docs/adr/0002-implementation-languages-python-rust.md`：工具包以 Python 與 Rust 實作，Python 為預設語言，Rust 用於需要記憶體安全保證、單一靜態執行檔或低延遲的元件，逐張工作票確認；受測樣本專案與外部工具不受此限；Python 與 Rust 的銜接方式留待第一個 Rust 元件決定。設計說明 §5.1 加入「實作語言」段落，表中工具仍為候選。README 開頭改寫，指出原型程式與樣本位置並連結 ADR-0002。條文內容無變更 |
 
 ## 5. 已取消的宣稱
 

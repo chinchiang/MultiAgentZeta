@@ -1,6 +1,6 @@
 # 測試工具包設計文件
 
-本目錄是「多代理 AI 輔助程式開發測試工具包」的設計文件組合，目前只有文件，沒有程式碼。術語以 repo 根目錄的 [`GLOSSARY.md`](../../GLOSSARY.md) 為準；拆分決定見 [`docs/adr/0001-split-architecture-document.md`](../adr/0001-split-architecture-document.md)。
+本目錄是「多代理 AI 輔助程式開發測試工具包」的設計文件組合；原型程式在 repo 根目錄的 `toolkit/`，受測樣本在 `samples/`。術語以 repo 根目錄的 [`GLOSSARY.md`](../../GLOSSARY.md) 為準；拆分決定見 [`docs/adr/0001-split-architecture-document.md`](../adr/0001-split-architecture-document.md)，實作語言見 [`docs/adr/0002-implementation-languages-python-rust.md`](../adr/0002-implementation-languages-python-rust.md)。
 
 ## 四份文件
 
