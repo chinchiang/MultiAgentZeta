@@ -1,0 +1,16 @@
+name: docs-check
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate toolkit docs
+        run: python3 -I docs/toolkit/tools/build.py --check

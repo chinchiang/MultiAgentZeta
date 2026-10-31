@@ -12,9 +12,19 @@ Usage (from anywhere):
   python -I docs/toolkit/tools/build.py          # validate and rewrite outputs
   python -I docs/toolkit/tools/build.py --check  # validate; exit 1 if outputs are stale
 
-Validation failures (exit 2): missing block fields, invalid level or v0.1 value,
-duplicate IDs, gaps in an area's numbering, references to unknown TK- IDs,
-unknown groups, or groups with no members.
+Validation failures (exit 2), checked in both modes:
+  * requirement blocks: missing or empty fields, invalid level or v0.1 value,
+    a 須／不得 requirement whose 驗收 is "—", duplicate IDs, numbering gaps
+  * groups.json: unknown groups or requirements, groups with no members
+  * TK- references to unknown IDs, in spec.md and in every other repo doc
+    (design notes, review log, README, GLOSSARY.md, ADRs, research notes)
+  * [R] references: definitions in design-notes.md must be unique and numbered
+    1..N without gaps; every [Rn] cited in spec, design notes or review log
+    must be defined
+  * the shared version: the header of all four documents and the version
+    sentence in spec.md §0.4 must agree (v0.1-scope.md is covered by --check,
+    since it is generated from spec.md)
+  * line endings: no CR characters in tracked text files of the docs tooling
 """
 import collections
 import json
@@ -24,9 +34,30 @@ from pathlib import Path
 
 TOOLS = Path(__file__).resolve().parent
 DOCS = TOOLS.parent
+REPO = DOCS.parent.parent
 SPEC = DOCS / 'spec.md'
 SCOPE = DOCS / 'v0.1-scope.md'
+DESIGN = DOCS / 'design-notes.md'
+REVIEW = DOCS / 'review-log.md'
 CONFIG = TOOLS / 'groups.json'
+VERSIONED = (SPEC, DESIGN, REVIEW)  # v0.1-scope.md takes its version from spec.md
+
+
+def cross_ref_docs():
+    """Docs other than spec.md that may cite TK- IDs."""
+    files = [DESIGN, REVIEW, DOCS / 'README.md', REPO / 'GLOSSARY.md']
+    files += sorted((REPO / 'docs' / 'adr').glob('*.md'))
+    files += sorted((REPO / 'docs' / 'research').glob('*.md'))
+    return [f for f in files if f.exists()]
+
+
+def lf_files():
+    """Text files that must use LF line endings."""
+    files = sorted(DOCS.glob('*.md')) + sorted(TOOLS.glob('*'))
+    files += [REPO / n for n in ('GLOSSARY.md', 'AGENTS.md', 'CLAUDE.md', '.gitattributes')]
+    for d in ('docs/adr', 'docs/research', 'docs/agents', '.github/workflows', '.githooks'):
+        files += sorted(p for p in (REPO / d).glob('*') if p.suffix != '.pdf')
+    return [f for f in files if f.is_file() and '__pycache__' not in f.parts]
 
 LEVELS = ('須', '不得', '宜', '可')
 V01 = ('必做', '可延後', '不適用')
@@ -66,6 +97,8 @@ def parse_requirements(spec):
             fail(f"{rid}: invalid level {fields['等級']!r}")
         if fields['v0.1'] not in V01:
             fail(f"{rid}: invalid v0.1 value {fields['v0.1']!r}")
+        if fields['等級'] in ('須', '不得') and fields['驗收'].startswith('—'):
+            fail(f"{rid}: {fields['等級']} requirement needs an acceptance check (驗收 is '—')")
         reqs.append(dict(id=rid, area=area, title=title.strip(), level=fields['等級'], v0=fields['v0.1']))
     if not reqs:
         fail('no requirement blocks found in spec.md')
@@ -103,6 +136,43 @@ def validate(reqs, spec, cfg):
         for rid in members:
             if rid not in known:
                 fail(f'overrides: {g} lists unknown requirement {rid}')
+
+
+def validate_repo(reqs):
+    """Checks that span the other documents."""
+    known = {r['id'] for r in reqs}
+    for f in cross_ref_docs():
+        dangling = sorted(set(re.findall(r'TK-[A-Z]{3}-\d{3}', read(f))) - known)
+        if dangling:
+            fail(f'{f.relative_to(REPO).as_posix()}: references to unknown IDs: {dangling}')
+
+    design = read(DESIGN)
+    defined = [int(n) for n in re.findall(r'^- \*\*\[R(\d+)\]\*\*', design, re.M)]
+    dup = sorted(n for n, c in collections.Counter(defined).items() if c > 1)
+    if dup:
+        fail(f'design-notes.md: [R] defined more than once: {dup}')
+    if sorted(defined) != list(range(1, len(defined) + 1)):
+        missing = sorted(set(range(1, max(defined, default=0) + 1)) - set(defined))
+        fail(f'design-notes.md: [R] numbering has gaps: missing {missing}')
+    for f in (SPEC, DESIGN, REVIEW):
+        undefined = sorted({int(n) for n in re.findall(r'\[R(\d+)\]', read(f))} - set(defined))
+        if undefined:
+            fail(f'{f.name}: cites undefined references {[f"R{n}" for n in undefined]}')
+
+    versions = {f.name: header_value(read(f), '版本', r'v\d+\.\d+\.\d+', f.name) for f in VERSIONED}
+    if len(set(versions.values())) != 1:
+        fail(f'document versions disagree: {versions}')
+    version = versions[SPEC.name]
+    m = re.search(r'本文件 (v\d+\.\d+\.\d+) 表示設計文件的修訂；不代表工具包軟體已達 (v\d+\.\d+\.\d+)。', read(SPEC))
+    if not m or m.group(1) != version or m.group(2) != version:
+        found = m.groups() if m else 'sentence not found'
+        fail(f'spec.md §0.4 version sentence must name {version} twice; found {found}')
+
+
+def check_line_endings():
+    crlf = [f.relative_to(REPO).as_posix() for f in lf_files() if b'\r' in f.read_bytes()]
+    if crlf:
+        fail(f'CR characters (use LF line endings) in: {crlf}')
 
 
 def assign_groups(reqs, cfg):
@@ -144,10 +214,10 @@ def replace_marked(spec, name, body):
     return pat.sub(lambda m: m.group(1) + body + m.group(3), spec)
 
 
-def header_value(spec, label, pattern):
-    m = re.search(r'^> \*\*' + label + r'\*\*：.*?(' + pattern + ')', spec, re.M)
+def header_value(text, label, pattern, name='spec.md'):
+    m = re.search(r'^> \*\*' + label + r'\*\*：.*?(' + pattern + ')', text, re.M)
     if not m:
-        fail(f'spec.md header: cannot read {label}')
+        fail(f'{name} header: cannot read {label}')
     return m.group(1)
 
 
@@ -205,6 +275,7 @@ def main(argv):
     cfg = json.loads(read(CONFIG))
     reqs = parse_requirements(spec)
     validate(reqs, spec, cfg)
+    validate_repo(reqs)
     assign_groups(reqs, cfg)
     new_spec = replace_marked(spec, 'AG_TABLE', ag_table(reqs, cfg))
     new_spec = replace_marked(new_spec, 'APPENDIX_A', appendix(reqs, cfg))
@@ -214,6 +285,7 @@ def main(argv):
     cnt = collections.Counter(r['v0'] for r in reqs)
     summary = f"{len(reqs)} requirements (必做 {cnt['必做']} / 可延後 {cnt['可延後']} / 不適用 {cnt['不適用']})"
     if check:
+        check_line_endings()
         if stale:
             print(f'stale: {", ".join(stale)} — run tools/build.py', file=sys.stderr)
             return 1
@@ -222,6 +294,7 @@ def main(argv):
     for p, old, new in outputs:
         if old != new:
             write(p, new)
+    check_line_endings()
     print(f'ok: {summary}; updated: {", ".join(stale) or "nothing"}')
     return 0
 
