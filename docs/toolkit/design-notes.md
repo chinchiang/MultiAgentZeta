@@ -1,6 +1,6 @@
 # 多代理 AI 輔助程式開發測試工具包：設計說明
 
-> **版本**：v1.4.6（四份文件共用版本號，各版變更見審查處置紀錄）  
+> **版本**：v1.4.7（四份文件共用版本號，各版變更見審查處置紀錄）  
 > **修訂日期**：2026-11-01（臺灣時間）  
 > **文件狀態**：架構設計草案，非已實作或已驗證的聲明。  
 > **資訊分級**：機密／僅供英業達內部使用；未取得正式文件編號或發布核准  
@@ -380,7 +380,7 @@ BaxBench、SUSVIBES 與 LSCB 原本主要評估程式碼生成的功能與安全
 
 ### 5.1 候選技術棧
 
-**實作語言：** 工具包本身以 Python 與 Rust 實作（ADR-0002）。Python 是預設語言，用於工作流程、資料契約、模型適配、環境建置與測試；Rust 用於需要記憶體安全保證、單一靜態執行檔或低延遲的元件，例如位於信任邊界上的沙盒啟動與中止路徑、送出前的機密掃描與遮罩，以及解析不可信輸入的元件。哪些元件採用 Rust，在各工作票的測試計畫中逐一確認；Python 與 Rust 的銜接方式在第一個 Rust 元件時決定。受測樣本專案與外部工具（例如 Supabase CLI、Gitleaks）不受此限。下表的工具與函式庫仍是候選，實作時依支援矩陣固定版本（規格 `TK-SCP-001`）。
+**實作語言：** 工具包本身以 Python 與 Rust 實作（ADR-0002）。Python 是預設語言，用於工作流程、資料契約、模型適配、環境建置與測試；選擇 Rust 的主要原因是它在記憶體管理方面的能力：以所有權與借用規則管理記憶體，規則由編譯器在編譯期檢查，違反時程式無法編譯；這些保證只在 unsafe 區塊以外完整成立 [R58]。因此 Rust 主要用於需要記憶體安全保證的元件，其次是需要單一靜態執行檔或低延遲的元件，例如位於信任邊界上的沙盒啟動與中止路徑、送出前的機密掃描與遮罩，以及解析不可信輸入的元件。哪些元件採用 Rust，在各工作票的測試計畫中逐一確認；Python 與 Rust 的銜接方式在第一個 Rust 元件時決定。受測樣本專案與外部工具（例如 Supabase CLI、Gitleaks）不受此限。下表的工具與函式庫仍是候選，實作時依支援矩陣固定版本（規格 `TK-SCP-001`）。
 
 | 功能 | 候選工具 | 選型限制 |
 | :--- | :--- | :--- |
@@ -505,3 +505,4 @@ BaxBench、SUSVIBES 與 LSCB 原本主要評估程式碼生成的功能與安全
 - **[R55]** Vertex AI 內容快取總覽：<https://docs.cloud.google.com/vertex-ai/generative-ai/docs/context-cache/context-cache-overview>
 - **[R56]** Vertex AI 零資料保留：<https://docs.cloud.google.com/vertex-ai/generative-ai/docs/vertex-ai-zero-data-retention>
 - **[R57]** Supabase 官方 Postgres 映像檔原始碼（`postgres` 角色屬性，commit `e2841e5`）：<https://github.com/supabase/postgres/blob/e2841e5fc3afdbb49ac8d52e5e570f7c9da7565a/migrations/db/migrations/10000000000000_demote-postgres.sql>
+- **[R58]** *The Rust Programming Language*（Rust 官方教材，2026-11-01 查閱線上版）：第 4 章〈Understanding Ownership〉，含 §4.1 所有權規則與 §4.2 參考與借用規則 <https://doc.rust-lang.org/book/ch04-00-understanding-ownership.html>；§20.1〈Unsafe Rust〉 <https://doc.rust-lang.org/book/ch20-01-unsafe-rust.html>
