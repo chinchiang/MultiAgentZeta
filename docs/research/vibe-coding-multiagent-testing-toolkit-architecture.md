@@ -86,10 +86,10 @@ flowchart TD
         SRC["Vibe-Coded 原始碼與設定檔"] --> AST["確定性 AST 萃取 (Tree-sitter)<br/>路由、資料庫綱要、中介軟體"]
         SRC --> SEC_SCAN["確定性靜態掃描 (Gitleaks, Semgrep, Trivy)<br/>外洩金鑰、套件幻覺、靜態特徵"]
         AST & SRC --> BLIND_FANOUT["Commander 盲審分派 (去除來源標籤、嚴格 JSON Schema)"]
-        BLIND_FANOUT --> REV_CLAUDE["Reviewer Agent A<br/>(Claude 3.7 / 5.5)"]
+        BLIND_FANOUT --> REV_CLAUDE["Reviewer Agent A<br/>(Claude Opus 5.5 / Sonnet 5.5)"]
         BLIND_FANOUT --> REV_NEMO["Reviewer Agent B<br/>(NVIDIA Nemotron-3 Mamba2/MoE)"]
         BLIND_FANOUT --> REV_GEMINI["Reviewer Agent C<br/>(Gemini 2.5 Pro / 4 Argon)"]
-        BLIND_FANOUT --> REV_OPENAI["Reviewer Agent D<br/>(OpenAI o3 / GPT-5)"]
+        BLIND_FANOUT --> REV_OPENAI["Reviewer Agent D<br/>(OpenAI GPT-6.1 Sol)"]
         REV_CLAUDE & REV_NEMO & REV_GEMINI & REV_OPENAI --> UNION_MERGE["非對稱語意去重與併集聚合 (Asymmetric Synthesis)<br/>保留具體 Trace 的少數派高危告警"]
     end
 
@@ -128,7 +128,7 @@ flowchart TD
      * **Claude (Anthropic)**：擅長程式碼語意脈絡與架構理解。
      * **NVIDIA Nemotron-3 (NIM / Mamba-2 + LatentMoE)**：具備非純 Transformer 的架構多樣性與 NVIDIA 專有強化學習對齊。
      * **Gemini (Google)**：百萬級 Token 原生上下文，長程控制流追蹤。
-     * **OpenAI o3 / GPT 系列**：強邏輯鏈推理。
+     * **OpenAI GPT 系列（gpt-6.1-sol）**：強邏輯鏈推理。
    * 強制 Worker 輸出嚴格 JSON Schema（包含 `cwe_id`, `file`, `line_range`, `sink_trace`, `exploit_hypothesis`, `confidence`）。
 3. **消除自戀偏好（Self-Preference Bias，[arXiv:2404.13076](https://arxiv.org/abs/2404.13076)）**：
    * 寫程式的模型**不得作為唯一審查者**。各審查模型在生成結論前，**互不見面、無對話、不交換意見**，徹底阻斷社交諂媚（Sycophancy）。
@@ -188,7 +188,7 @@ flowchart TD
 |   (Isolated Context Windows)  |                                           |     (Sandboxed Tool Drivers)    |
 |                               |                                           |                                 |
 |  +-------------------------+  |                                           |  +---------------------------+  |
-|  | Agent A: Claude 3.7/5.5 |  |                                           |  | Schemathesis Fuzz Agent   |  |
+|  | Agent A: Claude 5.5     |  |                                           |  | Schemathesis Fuzz Agent   |  |
 |  +-------------------------+  |                                           |  +---------------------------+  |
 |  +-------------------------+  |                                           |  +---------------------------+  |
 |  | Agent B: Nemotron-3 NIM |  |                                           |  | Playwright Authz Agent    |  |
@@ -197,7 +197,7 @@ flowchart TD
 |  | Agent C: Gemini 2.5 Pro |  |                                           |  | Nuclei Runner Agent       |  |
 |  +-------------------------+  |                                           |  +---------------------------+  |
 |  +-------------------------+  |                                           |  +---------------------------+  |
-|  | Agent D: OpenAI o3/GPT  |  |                                           |  | Concurrency Race Agent    |  |
+|  | Agent D: OpenAI GPT-6.1 |  |                                           |  | Concurrency Race Agent    |  |
 |  +-------------------------+  |                                           |  +---------------------------+  |
 +---------------+---------------+                                           +----------------+----------------+
                 |                                                                            |
@@ -238,15 +238,17 @@ flowchart TD
 
 | 模型家族 | 實體驗證之 Model ID | 呼叫端點與方式 | 結構化輸出機制 | 在工具包中的特化分工 |
 | :--- | :--- | :--- | :--- | :--- |
-| **Anthropic Claude** | `claude-sonnet-5-5` / `claude-opus-5-5` | `https://api.anthropic.com/v1/messages` (SDK: `anthropic`) | `anthropic-beta: structured-outputs-2025-11-13` 或 `output_config` JSON Schema | 審查複雜控制流、非同步事件處理、前端 React 狀態陷阱 |
-| **NVIDIA Nemotron** | `nvidia/nemotron-3-super-120b-a12b` 或 `nvidia/llama-3.3-nemotron-super-49b-v1.5` | `https://integrate.api.nvidia.com/v1` (NVIDIA NIM，相容 OpenAI SDK) 或本地 vLLM | OpenAI 相容之 `response_format={"type": "json_schema", ...}` (經 xgrammar 加速) | 提供非純 Transformer 的架構多樣性（Mamba-2/MoE 混合），減少純美系主流模型的對齊盲點 |
+| **Anthropic Claude** | `claude-sonnet-5-5` / `claude-opus-5-5` | `https://api.anthropic.com/v1/messages` (SDK: `anthropic`) | `output_config={"format": {"type": "json_schema", "schema": ...}}`（GA，無需 beta header；舊 `output_format` 參數已棄用），或 SDK `client.messages.parse()` | 審查複雜控制流、非同步事件處理、前端 React 狀態陷阱 |
+| **NVIDIA Nemotron** | `nvidia/nemotron-3-super-120b-a12b`（NIM 託管）；本地 vLLM / SGLang 之 served name 為 `nvidia/nemotron-3-super` | `https://integrate.api.nvidia.com/v1` (NVIDIA NIM，相容 OpenAI SDK) 或本地 vLLM | OpenAI 相容之 `response_format={"type": "json_schema", ...}` | 提供非純 Transformer 的架構多樣性（Mamba-2 + MoE 交錯，搭配少量 Attention 層），減少純美系主流模型的對齊盲點 |
 | **Google Gemini** | `gemini-2.5-pro` / `gemini-4-argon` | `https://generativelanguage.googleapis.com` (SDK: `google-genai`) | `GenerateContentConfig(response_mime_type="application/json", response_schema=PydanticModel)` | 利用超長上下文進行跨多檔案（路由、ORM、Schema、Middleware）全域關聯分析 |
-| **OpenAI GPT / o-Series** | `o3` / `gpt-5.4` / `gpt-6.1-sol` | `https://api.openai.com/v1/responses` 或 `/v1/chat/completions` (SDK: `openai`) | `responses` 之 `text={"format": {"type": "json_schema", ...}}` | 深度多步邏輯演繹、邊界條件極值推演 |
+| **OpenAI GPT** | `gpt-6.1-sol` | `https://api.openai.com/v1/responses` 或 `/v1/chat/completions` (SDK: `openai`) | `responses` 之 `text={"format": {"type": "json_schema", "name": ..., "schema": ..., "strict": True}}` | 深度多步邏輯演繹、邊界條件極值推演 |
+
+> **模型 ID 查證紀錄（2026-10-31）**：已對照各家官方模型清單。移除 `nvidia/llama-3.3-nemotron-super-49b-v1.5`（未列於 NIM 託管模型清單，且為純 Dense Transformer，與本列「非純 Transformer」的選型理由矛盾）；移除 `o3`（已棄用，2026-12-11 停止服務）與 `gpt-5.4`（未列於 OpenAI 模型清單）。
 
 ### 5.2 呼叫適配層（Unified Adapter Layer）的設計防護
 雖然可以使用 [LiteLLM (`BerriAI/litellm`)](https://github.com/BerriAI/litellm) 作為統一轉發層，但本工具包在適配層必須實作三項關鍵防護：
 1. **思考標記分離（Reasoning Content Separation）**：
-   * 當使用具備原生思考能力的模型（如 OpenAI `o3`、Gemini 思考模式、或開啟 `detailed thinking` 的 Nemotron）時，必須確保 `<think>` 內容與最終 JSON 嚴格分流，避免思考文字污染 JSON Schema 解析器造成崩潰。
+   * 當使用具備原生思考能力的模型（如 OpenAI GPT 推理模式、Gemini 思考模式、或開啟 `detailed thinking` 的 Nemotron）時，必須確保 `<think>` 內容與最終 JSON 嚴格分流，避免思考文字污染 JSON Schema 解析器造成崩潰。
 2. **Schema 嚴格性交集處理**：
    * OpenAI 與 Anthropic 嚴格要求 JSON Schema 內必須宣告 `"additionalProperties": false` 且所有欄位列入 `"required"`；Gemini 對預設值較寬容。適配層統一發送最嚴格的 JSON Schema 子集。
 3. **金鑰與網路連線防護**：
