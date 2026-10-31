@@ -45,7 +45,7 @@ v1.3.6 以前的單一文件 `docs/research/vibe-coding-multiagent-testing-toolk
 
 ## 自動檢查
 
-`python -I docs/toolkit/tools/build.py --check` 是這組文件的檢查指令，出錯時以結束碼 2 停止，產生結果過期時以結束碼 1 停止。它檢查：
+`python -I docs/toolkit/tools/build.py --check` 是這組文件的檢查指令，出錯時以結束碼 2 停止，產生結果過期時以結束碼 1 停止；有任何錯誤時不寫入任何檔案。條文區塊或 `groups.json` 無法解析時，只回報這一階段的錯誤；解析成功後，其餘檢查的錯誤一次全部列出，每筆附規則代碼，例如 `[dangling-ref]`。它檢查：
 
 - 條文區塊：欄位齊全且不空白、等級與 v0.1 值合法、「須」「不得」條文的驗收不是「—」、編號不重複也不跳號。
 - 引用：規格與其他文件（設計說明、審查處置紀錄、本檔、`GLOSSARY.md`、ADR、研究筆記）中的 `TK-` 引用都指向存在的條文；[R] 參考資料在設計說明中只定義一次、編號從 1 連續，各文件引用的 [R] 都有定義。
@@ -53,10 +53,12 @@ v1.3.6 以前的單一文件 `docs/research/vibe-coding-multiagent-testing-toolk
 - 換行：文件、工具、ADR、研究筆記與設定檔都是 LF。repo 根目錄的 `.gitattributes`（`* text=auto eol=lf`）讓 Git 在 checkout 時也保持 LF。
 - 產生結果：驗收群組表、附錄 A 與 `v0.1-scope.md` 與條文一致。
 
-兩道防線執行同一個指令：
+兩道防線都執行這個指令：
 
 - **提交前 hook**：`.githooks/pre-commit`。每個複本執行一次 `git config core.hooksPath .githooks` 後啟用。hook 檢查的是工作目錄的內容，所以提交前要先把修改存檔。
-- **CI**：`.github/workflows/docs-check.yml`，在每次 push 與 PR 執行。直接推 `main` 時 CI 是事後警報；事前攔截靠 hook。
+- **CI**：`.github/workflows/docs-check.yml`，在每次 push 與 PR 執行，並先跑工具本身的測試。直接推 `main` 時 CI 是事後警報；事前攔截靠 hook。
+
+工具本身的測試在 `tools/test_build.py`，用 `python -I -m unittest discover -s docs/toolkit/tools` 執行；修改 `build.py` 時，每條檢查規則都要有一正一反的測試。測試透過 `check_docs` 這個入口進行：輸入文件快照（相對路徑對應檔案文字），回傳問題清單與需要更新的產生結果，不直接讀寫磁碟。
 
 ## 每輪修訂的檢查清單
 
