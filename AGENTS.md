@@ -1,3 +1,7 @@
+## Project documents
+
+The toolkit design lives in `docs/toolkit/`; start with `docs/toolkit/README.md` (document roles, shared version rule, requirement ID format, per-revision checklist). Terminology is defined in `GLOSSARY.md`.
+
 ## Agent skills
 
 ### Issue tracker
