@@ -45,7 +45,7 @@ VERSIONED = (SPEC, DESIGN, REVIEW)  # v0.1-scope.md takes its version from spec.
 
 def cross_ref_docs():
     """Docs other than spec.md that may cite TK- IDs."""
-    files = [DESIGN, REVIEW, DOCS / 'README.md', REPO / 'GLOSSARY.md']
+    files = [DESIGN, REVIEW, DOCS / 'README.md', REPO / 'GLOSSARY.md', REPO / 'CODING_STANDARDS.md']
     files += sorted((REPO / 'docs' / 'adr').glob('*.md'))
     files += sorted((REPO / 'docs' / 'research').glob('*.md'))
     return [f for f in files if f.exists()]
@@ -54,7 +54,8 @@ def cross_ref_docs():
 def lf_files():
     """Text files that must use LF line endings."""
     files = sorted(DOCS.glob('*.md')) + sorted(TOOLS.glob('*'))
-    files += [REPO / n for n in ('GLOSSARY.md', 'AGENTS.md', 'CLAUDE.md', '.gitattributes')]
+    files += [REPO / n for n in ('GLOSSARY.md', 'AGENTS.md', 'CLAUDE.md', 'CODING_STANDARDS.md', '.gitattributes')]
+    files += [REPO / '.claude' / 'settings.json']
     for d in ('docs/adr', 'docs/research', 'docs/agents', '.github/workflows', '.githooks'):
         files += sorted(p for p in (REPO / d).glob('*') if p.suffix != '.pdf')
     return [f for f in files if f.is_file() and '__pycache__' not in f.parts]
