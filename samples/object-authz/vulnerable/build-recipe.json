@@ -4,40 +4,87 @@
   "source_build": {
     "source_digest": "sha256:104e40e2e1c484fad527076ff3c44ca85f033b9255de2080ff3cb1d32e763c78",
     "lockfiles": [],
-    "tools": ["supabase-cli"],
+    "tools": [
+      "supabase-cli"
+    ],
     "build_commands": [],
-    "resources": {"memory_gb": 4},
+    "resources": {
+      "memory_gb": 4
+    },
     "download_policy": "service images only from the tags pinned by the supabase-cli version in the support matrix"
   },
   "service_init": {
-    "services": ["db", "auth", "rest", "kong"],
-    "migrations": ["20261031000001_schema.sql", "20261031000002_document_policies.sql"],
-    "extensions": ["pgcrypto"]
+    "services": [
+      "db",
+      "auth",
+      "rest",
+      "kong"
+    ],
+    "migrations": [
+      "20261031000001_schema.sql",
+      "20261031000002_document_policies.sql"
+    ],
+    "extensions": [
+      "pgcrypto"
+    ]
   },
   "test_data": {
     "seed": "supabase/seed.sql",
-    "tenants": ["Tenant A", "Tenant B"],
-    "accounts": ["alice@tenant-a.test", "bob@tenant-a.test", "carol@tenant-b.test"],
-    "roles": ["member"],
+    "tenants": [
+      "Tenant A",
+      "Tenant B"
+    ],
+    "accounts": [
+      "alice@tenant-a.test",
+      "bob@tenant-a.test",
+      "carol@tenant-b.test"
+    ],
+    "roles": [
+      "member"
+    ],
     "sharing_exceptions": [],
-    "related_resources": ["memberships"],
-    "markers": ["MARK-A-ALICE-PRIVATE", "MARK-A-ALICE-SHARED", "MARK-B-CAROL-PRIVATE"]
+    "related_resources": [
+      "memberships"
+    ],
+    "markers": [
+      "MARK-A-ALICE-PRIVATE",
+      "MARK-A-ALICE-SHARED",
+      "MARK-B-CAROL-PRIVATE"
+    ]
   },
   "auth": {
     "identities": [
-      {"name": "anonymous"},
-      {"name": "owner", "email": "alice@tenant-a.test"},
-      {"name": "same_tenant_non_owner", "email": "bob@tenant-a.test"},
-      {"name": "other_tenant_user", "email": "carol@tenant-b.test"}
+      {
+        "name": "anonymous"
+      },
+      {
+        "name": "owner",
+        "email": "alice@tenant-a.test"
+      },
+      {
+        "name": "same_tenant_non_owner",
+        "email": "bob@tenant-a.test"
+      },
+      {
+        "name": "other_tenant_user",
+        "email": "carol@tenant-b.test"
+      }
     ],
     "token_transport": "bearer-header",
     "token_refresh": "refresh_token grant",
     "expiry_revocation_check": "a refresh token stops working after logout"
   },
   "health": {
-    "services_up": ["rest", "auth"],
+    "services_up": [
+      "rest",
+      "auth"
+    ],
     "legit_operations": [
-      {"identity": "owner", "read": "documents", "marker": "MARK-A-ALICE-PRIVATE"}
+      {
+        "identity": "owner",
+        "read": "documents",
+        "marker": "MARK-A-ALICE-PRIVATE"
+      }
     ]
   },
   "snapshot_reset": {
@@ -45,5 +92,10 @@
     "reset_scope": "database: migrations and seed are re-applied",
     "reset_check": "the documents table holds exactly the test_data markers",
     "cleanup": "containers and volumes removed"
+  },
+  "observer": {
+    "select_on": [
+      "public.documents"
+    ]
   }
 }

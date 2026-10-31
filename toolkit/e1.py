@@ -64,6 +64,7 @@ class Environment:
     api_url: str = ''
     anon_key: str = ''
     tokens: dict = field(default_factory=dict)  # identity name -> {'access_token', 'refresh_token'}
+    observer: dict = field(default_factory=dict)  # {'role', 'password'}; control area only (TK-IDN-005)
     usable: bool = True
 
     @property
@@ -280,6 +281,56 @@ def _check_test_data(env):
             raise _Stop(Blocked('test_data', f'related resource table {table!r} is empty'))
 
 
+OBSERVER_ROLE = 'maz_observer'
+
+
+def _create_observer(env):
+    """Dedicated read-only login role for the observer (TK-IDN-012), created by the provisioning identity.
+
+    BYPASSRLS lets it read every row of the judged tables without touching the
+    application's own policies; it gets SELECT on recipe.observer.select_on only.
+    """
+    tables = (env.recipe.get('observer') or {}).get('select_on') or []
+    if not tables:
+        return
+    password = secrets.token_urlsafe(24)
+    grants = ''.join(f'grant select on {t} to {OBSERVER_ROLE};\n' for t in tables)
+    schemas = sorted({t.split('.')[0] for t in tables})
+    usage = ''.join(f'grant usage on schema {s} to {OBSERVER_ROLE};\n' for s in schemas)
+    try:
+        _psql(env, f"""
+do $$ begin
+  if exists (select 1 from pg_roles where rolname = '{OBSERVER_ROLE}') then
+    execute 'drop owned by {OBSERVER_ROLE}';
+    execute 'drop role {OBSERVER_ROLE}';
+  end if;
+end $$;
+create role {OBSERVER_ROLE} login password '{password}' bypassrls nosuperuser nocreatedb nocreaterole noinherit;
+{usage}{grants}""")
+    except RuntimeError as e:
+        raise _Stop(Blocked('auth', f'cannot create the observer role {OBSERVER_ROLE}', str(e)))
+    env.observer = {'role': OBSERVER_ROLE, 'password': password, 'select_on': list(tables),
+                    'host': _db_address(env)}
+
+
+def _db_address(env):
+    """The db container's address on the toolkit network.
+
+    The image trusts connections to 127.0.0.1 inside the container without a
+    password; connections to this address use scram-sha-256, so the observer
+    really authenticates as its own role.
+    """
+    r = _run(['docker', 'inspect', '-f', '{{json .NetworkSettings.Networks}}', f'supabase_db_{env.project_id}'],
+             timeout=60)
+    try:
+        address = json.loads(r.stdout)[env.network]['IPAddress']
+    except (json.JSONDecodeError, KeyError, TypeError):
+        address = ''
+    if not address:
+        raise _Stop(Blocked('auth', f'cannot find the db address on {env.network} for the observer'))
+    return address
+
+
 def _login(env, name, email, password):
     status, body = _http('POST', f'{env.api_url}/auth/v1/token?grant_type=password',
                          {'apikey': env.anon_key}, {'email': email, 'password': password})
@@ -394,6 +445,8 @@ def _profile(env, tools, matrix, health):
         'services': services,
         'identities': identities,
         'health': health,
+        'observer': ({'role': env.observer['role'], 'select_on': env.observer['select_on'], 'bypassrls': True}
+                     if env.observer else None),
         'unsupported': unsupported,
         'known_differences': [f'service disabled in this stack: {d}' for d in disabled] + [
             'E1 local stack: no cloud network, real third-party identity or hosted-only limits; '
@@ -417,6 +470,7 @@ def prepare(project_dir, matrix=None):
         env = Environment(project_dir, _project_config(project_dir)['project_id'], recipe, tools['supabase-cli'])
         _start(env)
         _check_test_data(env)
+        _create_observer(env)
         _check_auth(env)
         health = _check_health(env)
         return Ready(_profile(env, tools, matrix, health), env)
@@ -450,6 +504,7 @@ def reset(env, matrix=None):
             raise _Stop(Blocked('snapshot_reset', f'reset check failed: found {found}, expected {expected}; '
                                                   'environment isolated'))
         env.tokens.clear()
+        _create_observer(env)
         _check_auth(env)
         health = _check_health(env)
         return Ready(_profile(env, {'supabase-cli': env.cli}, matrix, health), env)

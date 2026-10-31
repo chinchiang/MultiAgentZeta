@@ -16,5 +16,9 @@ jobs:
         run: python3 -I -m unittest discover -s docs/toolkit/tools -v
       - name: Validate toolkit docs
         run: python3 -I docs/toolkit/tools/build.py --check
+      - name: Install toolkit dependencies (hash-pinned)
+        run: |
+          python3 -m venv .venv
+          .venv/bin/python -m pip install --require-hashes --only-binary=:all: -r toolkit/requirements.lock
       - name: Test toolkit (fast tests; environment tests need MAZ_ENV_TESTS=1 and Docker)
-        run: python3 -I -m unittest discover -s toolkit/tests -t . -v
+        run: .venv/bin/python -I -m unittest discover -s toolkit/tests -t . -v

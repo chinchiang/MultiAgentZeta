@@ -206,7 +206,8 @@ class PrepareVulnerableEnv(unittest.TestCase):
     def test_profile_holds_no_credentials(self):
         text = json.dumps(self.profile)
         env = self.result.env
-        secrets_held = [env.anon_key] + [t for tokens in env.tokens.values() for t in tokens.values()]
+        secrets_held = ([env.anon_key, env.observer['password']]
+                        + [t for tokens in env.tokens.values() for t in tokens.values()])
         self.assertEqual(len(env.tokens), 3)
         for value in secrets_held:
             self.assertNotIn(value, text)
@@ -424,3 +425,76 @@ class StepFailuresEnv(unittest.TestCase):
             self.assertFalse(ready.env.usable)
             again = e1.reset(ready.env)
             self.assertEqual((again.step, 'must not be reused' in again.reason), ('snapshot_reset', True))
+
+
+def psql_as(env, role, password, sql):
+    """Run SQL as a login role over the network address the observer uses; returns (ok, output).
+
+    Not 127.0.0.1: the db image trusts loopback connections without checking the password.
+    """
+    import subprocess
+    r = subprocess.run(['docker', 'exec', '-e', f'PGPASSWORD={password}', f'supabase_db_{env.project_id}',
+                        'psql', '-h', env.observer['host'], '-U', role, '-d', 'postgres', '-At', '-v', 'ON_ERROR_STOP=1',
+                        '-c', sql], capture_output=True, text=True)
+    return r.returncode == 0, (r.stdout + r.stderr).strip()
+
+
+@needs_env
+class ObserverRoleEnv(unittest.TestCase):
+    """TK-IDN-012: the observer uses a dedicated read-only login role, never service_role."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.result = e1.prepare(SAMPLES / 'patched')
+
+    @classmethod
+    def tearDownClass(cls):
+        if isinstance(cls.result, e1.Ready):
+            e1.destroy(cls.result.env)
+
+    def setUp(self):
+        self.assertIsInstance(self.result, e1.Ready, self.result)
+        self.env = self.result.env
+        self.role, self.password = self.env.observer['role'], self.env.observer['password']
+
+    def query(self, sql):
+        return psql_as(self.env, self.role, self.password, sql)
+
+    def test_profile_records_the_observer_grants(self):
+        self.assertEqual(self.result.profile['observer'],
+                         {'role': 'maz_observer', 'select_on': ['public.documents'], 'bypassrls': True})
+
+    def test_observer_reads_every_row_of_the_judged_table(self):
+        self.assertEqual(self.query('select count(*) from public.documents'), (True, '3'))
+
+    def test_wrong_password_is_refused(self):
+        ok, out = psql_as(self.env, self.role, 'not-the-password', 'select 1')
+        self.assertFalse(ok, out)
+
+    def test_observer_cannot_read_other_tables(self):
+        for table in ('public.memberships', 'public.tenants', 'auth.users'):
+            with self.subTest(table=table):
+                ok, out = self.query(f'select count(*) from {table}')
+                self.assertFalse(ok, out)
+                self.assertIn('permission denied', out)
+
+    def test_observer_cannot_write(self):
+        statements = [
+            "insert into public.documents (tenant_id, owner_id, title, body) select tenant_id, owner_id, 'X', 'x' "
+            "from public.documents limit 1",
+            "update public.documents set body = 'x'",
+            'delete from public.documents',
+        ]
+        for sql in statements:
+            with self.subTest(sql=sql.split()[0]):
+                ok, out = self.query(sql)
+                self.assertFalse(ok, out)
+                self.assertIn('permission denied', out)
+
+    def test_observer_is_not_privileged_and_cannot_become_service_role(self):
+        ok, out = self.query("select rolsuper, rolcreaterole, rolcreatedb from pg_roles where rolname = current_user")
+        self.assertEqual((ok, out), (True, 'f|f|f'))
+        for role in ('service_role', 'postgres', 'authenticated'):
+            with self.subTest(role=role):
+                ok, out = self.query(f'set role {role}')
+                self.assertFalse(ok, out)

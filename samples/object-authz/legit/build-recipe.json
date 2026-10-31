@@ -105,5 +105,10 @@
     "reset_scope": "database: migrations and seed are re-applied",
     "reset_check": "the documents table holds exactly the test_data markers",
     "cleanup": "containers and volumes removed"
+  },
+  "observer": {
+    "select_on": [
+      "public.documents"
+    ]
   }
 }

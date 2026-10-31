@@ -4,3 +4,4 @@ docs/research/*.pdf
 # Supabase CLI state in sample projects
 **/supabase/.temp/
 **/supabase/.branches/
+.venv/

@@ -1,0 +1,65 @@
+{
+  "schema_version": "1",
+  "run_id": "run-20261101-0001",
+  "id": "report-20261101-0001",
+  "created_at": "2026-11-01T10:00:00Z",
+  "source_id": "toolkit.scan",
+  "commit": "a89be51",
+  "status": "completed",
+  "manifest": {"id": "manifest-object-authz-vulnerable", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"},
+  "environment": {"mode": "E1", "profile_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"},
+  "requirements": [
+    {"id": "REQ-DOCUMENT-OWNER-READ",
+     "statement": "Only the owner may read a document that is not shared.",
+     "confirmation": {"by": "app-owner", "at": "2026-11-01T09:00:00Z", "version": "1"}}
+  ],
+  "authorization_matrix": [
+    {"identity": "anonymous", "transport": "apikey-header", "path": "anon API key -> /rest/v1"},
+    {"identity": "owner", "transport": "bearer-header", "path": "password grant -> bearer -> /rest/v1"},
+    {"identity": "same_tenant_non_owner", "transport": "bearer-header", "path": "password grant -> bearer -> /rest/v1"},
+    {"identity": "other_tenant_user", "transport": "bearer-header", "path": "password grant -> bearer -> /rest/v1"}
+  ],
+  "execution_records": [
+    {"schema_version": "1", "run_id": "run-20261101-0001", "id": "exec-0001", "created_at": "2026-11-01T10:00:01Z",
+     "source_id": "toolkit.scan", "commit": "a89be51",
+     "test_id": "AUTHZ-001-same-tenant", "template_id": "cross-user-read-v1", "requirement_id": "REQ-DOCUMENT-OWNER-READ",
+     "actor_ref": "same_tenant_non_owner", "resource_ref": "MARK-A-ALICE-PRIVATE",
+     "started_at": "2026-11-01T10:00:01Z", "ended_at": "2026-11-01T10:00:02Z",
+     "result": "failed", "error": null,
+     "evidence": [
+       {"id": "ev-0001", "channel": "observer", "identity_ref": "observer",
+        "observation": {"resource_exists": true, "shared": false}},
+       {"id": "ev-0002", "channel": "actor", "identity_ref": "owner",
+        "request": {"method": "GET", "path": "/rest/v1/documents?select=title&title=eq.MARK-A-ALICE-PRIVATE"},
+        "response": {"status": 200, "rows": 1}},
+       {"id": "ev-0003", "channel": "actor", "identity_ref": "same_tenant_non_owner",
+        "request": {"method": "GET", "path": "/rest/v1/documents?select=title&title=eq.MARK-A-ALICE-PRIVATE"},
+        "response": {"status": 200, "rows": 1}}
+     ]},
+    {"schema_version": "1", "run_id": "run-20261101-0001", "id": "exec-0002", "created_at": "2026-11-01T10:00:03Z",
+     "source_id": "toolkit.scan", "commit": "a89be51",
+     "test_id": "AUTHZ-001-other-tenant", "template_id": "cross-user-read-v1", "requirement_id": "REQ-DOCUMENT-OWNER-READ",
+     "actor_ref": "other_tenant_user", "resource_ref": "MARK-A-ALICE-PRIVATE",
+     "started_at": "2026-11-01T10:00:03Z", "ended_at": "2026-11-01T10:00:04Z",
+     "result": "passed", "error": null,
+     "evidence": [
+       {"id": "ev-0004", "channel": "observer", "identity_ref": "observer",
+        "observation": {"resource_exists": true, "shared": false}},
+       {"id": "ev-0005", "channel": "actor", "identity_ref": "other_tenant_user",
+        "request": {"method": "GET", "path": "/rest/v1/documents?select=title&title=eq.MARK-A-ALICE-PRIVATE"},
+        "response": {"status": 200, "rows": 0}}
+     ]}
+  ],
+  "findings": [
+    {"schema_version": "1", "run_id": "run-20261101-0001", "id": "finding-0001", "created_at": "2026-11-01T10:00:02Z",
+     "source_id": "toolkit.scan", "commit": "a89be51",
+     "fingerprint": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+     "fingerprint_version": "fp-authz-v1",
+     "requirement_id": "REQ-DOCUMENT-OWNER-READ", "root_cause": "object-ownership-not-enforced",
+     "status": "confirmed", "evidence_type": "dynamic", "execution_record_ids": ["exec-0001"]}
+  ],
+  "coverage": {"schema_version": "1", "run_id": "run-20261101-0001", "id": "coverage-0001", "created_at": "2026-11-01T10:00:05Z",
+               "source_id": "toolkit.scan", "commit": "a89be51",
+               "inventory_source": "fixed test plan (tracer bullet)",
+               "denominator": 2, "executed": 2, "valid_judgements": 2, "blocked": 0, "untested": 0, "unsupported": 0}
+}

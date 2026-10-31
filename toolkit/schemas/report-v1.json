@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/chinchiang/MultiAgentZeta/toolkit/schemas/report-v1.json",
+  "title": "Scan run report, version 1 (TK-EVD-003)",
+  "type": "object",
+  "allOf": [
+    {"$ref": "#/$defs/common"},
+    {
+      "description": "A completed run has a definite result (passed or failed) for every test.",
+      "if": {"properties": {"status": {"const": "completed"}}, "required": ["status"]},
+      "then": {"properties": {"execution_records": {"items": {"properties": {"result": {"enum": ["passed", "failed"]}}}}}}
+    }
+  ],
+  "required": ["status", "execution_records", "findings", "coverage"],
+  "properties": {
+    "status": {
+      "description": "Overall run status (TK-RUN-002): pending 待執行, running 執行中, completed 完整完成, partial 部分完成, blocked 受阻, failed 失敗, cancelled 已取消. completed means every planned item got a definite result; it does not mean the application has no vulnerabilities.",
+      "enum": ["pending", "running", "completed", "partial", "blocked", "failed", "cancelled"]
+    },
+    "status_reason": {"description": "Why the run is not completed.", "$ref": "#/$defs/text"},
+    "execution_records": {"type": "array", "items": {"$ref": "#/$defs/execution_record"}},
+    "findings": {"type": "array", "items": {"$ref": "#/$defs/finding"}},
+    "coverage": {"$ref": "#/$defs/coverage"}
+  },
+  "$defs": {
+    "text": {"type": "string", "minLength": 1},
+    "common": {
+      "description": "〈定義：共用欄位〉 plus the commit the record is bound to (TK-DAT-001).",
+      "type": "object",
+      "required": ["schema_version", "run_id", "id", "created_at", "source_id", "commit"],
+      "properties": {
+        "schema_version": {"const": "1"},
+        "run_id": {"$ref": "#/$defs/text"},
+        "id": {"$ref": "#/$defs/text"},
+        "created_at": {"$ref": "#/$defs/text"},
+        "source_id": {"$ref": "#/$defs/text"},
+        "commit": {"$ref": "#/$defs/text"}
+      }
+    },
+    "execution_record": {
+      "allOf": [{"$ref": "#/$defs/common"}],
+      "required": ["result", "evidence"],
+      "properties": {
+        "evidence": {"type": "array", "items": {"$ref": "#/$defs/evidence"}},
+        "result": {
+          "description": "〈定義：測試結果〉: passed 通過, failed 未通過, blocked 受阻, error 執行錯誤, untested 未測試, unsupported 不支援.",
+          "enum": ["passed", "failed", "blocked", "error", "untested", "unsupported"]
+        }
+      }
+    },
+    "evidence": {
+      "description": "One piece of evidence and the channel it was obtained through (TK-IDN-008): actor = a request made as an actor identity through the application's real path; observer = state read by the read-only observer role.",
+      "type": "object",
+      "required": ["id", "channel", "identity_ref"],
+      "properties": {
+        "id": {"$ref": "#/$defs/text"},
+        "channel": {"enum": ["actor", "observer"]},
+        "identity_ref": {"$ref": "#/$defs/text"}
+      }
+    },
+    "finding": {"allOf": [{"$ref": "#/$defs/common"}]},
+    "coverage": {"allOf": [{"$ref": "#/$defs/common"}]}
+  }
+}
