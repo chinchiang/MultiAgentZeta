@@ -1,6 +1,6 @@
 # 多代理 AI 輔助程式開發測試工具包：設計說明
 
-> **版本**：v1.4.1（四份文件共用版本號，各版變更見審查處置紀錄）  
+> **版本**：v1.4.2（四份文件共用版本號，各版變更見審查處置紀錄）  
 > **修訂日期**：2026-10-31（臺灣時間）  
 > **文件狀態**：架構設計草案，非已實作或已驗證的聲明。  
 > **資訊分級**：機密／僅供英業達內部使用；未取得正式文件編號或發布核准  
@@ -184,7 +184,7 @@ OWASP API Security Top 10 用於分類與檢查提示，不當成完整需求清
 
 Playwright 的不同瀏覽器或請求環境可用於隔離測試狀態 [R22]。實作時應確認 Cookie 與權杖的傳遞方式；載入瀏覽器儲存狀態不代表任意 HTTP 呼叫會自動使用所需的授權標頭（`TK-IDN-003`）。
 
-規格第 7 章拒絕案例驗證中的「狀態變更未發生」「背景副作用符合需求」，只看行為者收到的回應無法判定，必須讀取資料庫等實際狀態。讀取實際狀態的身分通常權限較高，例如可略過 RLS 的角色或 Supabase secret key [R41]；若和測試身分放在同一處，被測腳本或受測應用就可能取得高權限憑證，而判定也可能誤用高權限讀到的資料。因此規格第 7 章把測試相關身分分成行為者、觀測者、建置三類，各走獨立通道（`TK-IDN-004`～`TK-IDN-010`）。
+規格第 7 章拒絕案例驗證中的「狀態變更未發生」「背景副作用符合需求」，只看行為者收到的回應無法判定，必須讀取資料庫等實際狀態。讀取實際狀態的身分通常權限較高，例如可略過 RLS 的角色或 Supabase secret key [R41]；若和測試身分放在同一處，被測腳本或受測應用就可能取得高權限憑證，而判定也可能誤用高權限讀到的資料。因此規格第 7 章把測試相關身分分成行為者、觀測者、建置三類，各走獨立通道（`TK-IDN-004`～`TK-IDN-010`）。依 2026-10-31 的文件查證，Supabase 可以建立只具必要 `SELECT` 權限的專用登入角色，並以 `BYPASSRLS` 或只對該角色生效的 SELECT 原則讀取受 RLS 保護的資料列，因此觀測者不需要使用 `service_role` 或 secret key（`TK-IDN-012`）[R47][R49]。
 
 - `USING (true)` 可是公開資料的合法讀取政策，不自動判定為漏洞 [R19]（`TK-DYN-004`）。
 
@@ -345,13 +345,13 @@ BaxBench、SUSVIBES 與 LSCB 原本主要評估程式碼生成的功能與安全
 | 模型家族 | 本版候選 | 核對與限制 | 整合狀態 |
 | :--- | :--- | :--- | :--- |
 | Anthropic | `claude-sonnet-5-5`、`claude-opus-5-5` | 官方模型文件列有名稱；原生 Messages API 使用 `output_config.format`，SDK 可使用 `messages.parse()` [R24][R25]。這兩個模型不接受強制工具呼叫（`tool_choice` 為 `any` 或 `tool` 時回傳 400），適配層不得以強制工具呼叫取得 JSON [R39] | 待實測 |
-| NVIDIA | `nvidia/nemotron-3-super-120b-a12b` | 官方描述為 Mamba-2 與專家混合層交錯、搭配少量 Attention 層的混合模型 [R26]。2026-10-31 查詢 NIM `/v1/models` 仍列有此模型；原稿「免費端點標示淘汰」尚缺公告日期與連結，列為待驗證 | 需先確認可用部署、端點與淘汰時程，再驗證結構化輸出 |
-| Google | `gemini-4-argon`；`gemini-2.5-pro` 僅限既有帳號 | 依選定模型及 SDK 版本確認上下文與結構化輸出能力；Argon 有官方模型文件 [R27]。官方模型頁註明 Gemini 2.5 系列未棄用，但僅開放給先前使用過的帳號 [R38]，新原型不以其為預設候選 | 待實測 |
+| NVIDIA | `nvidia/nemotron-3-super-120b-a12b` | 官方描述為 Mamba-2 與專家混合層交錯、搭配少量 Attention 層的混合模型 [R26]。2026-10-31 查詢 NIM `/v1/models` 仍列有此模型，官方頁面沒有淘汰公告或日期 [R44]；免費託管端點屬試用服務，條款保留隨時停止服務的權利 [R43]。託管 API 參考文件未列出結構化輸出參數（如 `response_format`、`guided_json`），待以金鑰實測 | 需先確認可用部署與端點；結構化輸出待實測 |
+| Google | `gemini-4-argon`；`gemini-2.5-pro` 僅限既有帳號 | 依選定模型及 SDK 版本確認上下文與結構化輸出能力；Argon 有官方模型文件 [R27]。官方模型頁註明 Gemini 2.5 系列未棄用，但僅開放給先前使用過的帳號 [R38]；棄用頁列 2.5 Pro、Flash 均未公布關閉日期 [R45]。Vertex AI 上的 `gemini-2.5-pro`、`gemini-2.5-flash` 退役日期為 2026-10-20 [R46]。新原型不以 Gemini 2.5 為預設候選 | 待實測 |
 | OpenAI | `gpt-6.1-sol` | 官方模型文件列有名稱；優先採 Responses API；其他端點是否適用應另行確認 [R28] | 待實測 |
 
 模型調整理由：
 
-- 不再以 Llama-3.3-Nemotron-Super-49B-v1.5 支持「非純 Transformer」選型理由；其模型卡描述為稠密解碼器式 Transformer [R31]。此調整不代表該模型不存在。
+- 不再以 Llama-3.3-Nemotron-Super-49B-v1.5 支持「非純 Transformer」選型理由；其模型卡描述為稠密解碼器式 Transformer [R31]。另外，其 NIM 託管端點已於 2026-08-26 生命週期結束，呼叫時回傳 HTTP 410 [R44]；模型權重與模型卡仍存在，但不再列為託管候選。原稿所稱「已標示將淘汰」找不到一手公告，只能由事後的 410 回應確認。
 - `o3` 已公告於 2026-12-11 停止服務，因此不作本版新建原型的預設候選 [R29]；截至修訂日，「已公告淘汰」不等於「已停止服務」。
 - `gpt-5.4` 有官方模型頁與版本識別碼 [R30]；本版僅因選型收斂而不納入，不以「官方不存在」作為理由。
 - 模型能力分工屬待驗證假設。應以相同資料與預算比較，不能僅依品牌印象指定某模型必然較擅長某類漏洞。
@@ -363,6 +363,18 @@ BaxBench、SUSVIBES 與 LSCB 原本主要評估程式碼生成的功能與安全
 `nvidia/nemotron-3-super` 若被採用，應標為本專案的部署別名，不視為 vLLM 或其他引擎的固定官方名稱。各引擎是否支援該權重、結構化輸出與思考內容分流，均須按版本驗證。
 
 離線部署另須驗證模型與套件下載、遙測、更新及備援路由；使用本機模型本身不等於保證資料不外流。
+
+### 4.3 各供應商的提示快取保存條件
+
+以下為 2026-10-31 依官方文件的查證結果（逐條引文見 `docs/research/fact-check-2026-10-31-review-log-6.2.md`），供規格 `TK-REV-010` 與 `TK-MOD-010` 的模型登錄表使用。查證的是文件說法，不是實測。
+
+| 供應商 | 預設狀態 | 保存位置與期限 | 隔離範圍 | 與零資料保留（ZDR）的關係 | 能否關閉 |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| Anthropic | 依請求設定 `cache_control` | 預設存活 5 分鐘，可選 1 小時；ZDR 下只在記憶體保存 KV 快取表示與雜湊，到期後刪除 [R42] | 依平台以工作區或組織隔離 | 文件列為 ZDR 適用 | 不設定即不快取 |
+| OpenAI | 支援的模型預設啟用 | 以加密 KV 張量存放於 GPU 本機儲存，最長保存 24 小時；`gpt-6.1-sol` 等 GPT-5.6 以後的模型以 `prompt_cache_options.ttl` 設定最短保存時間（`30m` 預設，`12h` 僅 Responses API）[R50][R51] | 不跨組織、不跨區域處理邊界共用 | 文件稱所有提示快取功能與 ZDR 相容 | 文件未說明可關閉 |
+| Google Gemini API | 隱式快取預設啟用 | 隱式快取只存在記憶體、TTL 24 小時；顯式快取依使用者設定的 `ttl` 保存，`gemini-4-argon` 起不支援顯式快取 [R52][R53] | 隱式快取以專案隔離 | 文件稱隱式快取不違反 ZDR；需要保證零資料保留時，文件建議改用 Vertex AI | 隱式快取文件未說明可關閉；不使用顯式快取即可 |
+| Google Vertex AI | 預設啟用 | 記憶體層寫入後最晚 24 小時刪除；持久層以 Google 預設加密存放於靜態儲存，不支援客戶自管金鑰（CMEK）[R55][R56] | — | 以 `disableCache` 關閉兩層快取後，不保留快取資料 | 可，以 `disableCache` 關閉 |
+| NVIDIA NIM 託管 API | 未公開 | 未公開；試用條款寫明工作階段結束後不保存內容，但使用情形會為安全與防濫用目的記錄，使用者內容可能用於改善產品 [R43] | 未公開 | 依條款不符合零資料保留 | 未公開 |
 
 ## 5. 技術棧候選與里程碑
 
@@ -476,3 +488,18 @@ BaxBench、SUSVIBES 與 LSCB 原本主要評估程式碼生成的功能與安全
 - **[R40]** Next.js `proxy.js` 檔案慣例（v16 起 Middleware 改名、Server Functions 與 matcher 的關係）：<https://nextjs.org/docs/app/api-reference/file-conventions/proxy>
 - **[R41]** Supabase API 金鑰（新版金鑰格式、舊版金鑰棄用時程、secret key 略過 RLS）：<https://supabase.com/docs/guides/api/api-keys>
 - **[R42]** Anthropic 提示快取（快取存活時間、零資料保留說明、工作區與組織隔離）：<https://platform.claude.com/docs/en/build-with-claude/prompt-caching>
+- **[R43]** NVIDIA API 試用服務條款（§2.3、§2.4、§3.3、§8）：<https://assets.ngc.nvidia.com/products/api-catalog/legal/NVIDIA%20API%20Trial%20Terms%20of%20Service.pdf>
+- **[R44]** NVIDIA NIM 託管 API 實際回應，2026-10-31：`POST https://integrate.api.nvidia.com/v1/chat/completions` 對 `nvidia/llama-3.3-nemotron-super-49b-v1.5` 回傳 HTTP 410；`GET https://integrate.api.nvidia.com/v1/models`。回應原文見 `docs/research/fact-check-2026-10-31-review-log-6.2.md`（F1、F2）
+- **[R45]** Gemini API 棄用時程：<https://ai.google.dev/gemini-api/docs/deprecations>
+- **[R46]** Vertex AI 模型版本與生命週期：<https://docs.cloud.google.com/vertex-ai/generative-ai/docs/learn/model-versions>
+- **[R47]** Supabase Postgres 角色：<https://supabase.com/docs/guides/database/postgres/roles>
+- **[R48]** Supabase 連線至 Postgres（自訂角色經共用連線池的使用者名稱格式）：<https://supabase.com/docs/guides/database/connecting-to-postgres>
+- **[R49]** PostgreSQL CREATE ROLE 與資料列安全原則：<https://www.postgresql.org/docs/current/sql-createrole.html>；<https://www.postgresql.org/docs/current/ddl-rowsecurity.html>
+- **[R50]** OpenAI 提示快取：<https://developers.openai.com/api/docs/guides/prompt-caching>
+- **[R51]** OpenAI 資料控管：<https://developers.openai.com/api/docs/guides/your-data>
+- **[R52]** Gemini API 快取：<https://ai.google.dev/gemini-api/docs/caching>
+- **[R53]** Gemini API 零資料保留：<https://ai.google.dev/gemini-api/docs/zdr>
+- **[R54]** Gemini API 服務條款：<https://ai.google.dev/gemini-api/terms>
+- **[R55]** Vertex AI 內容快取總覽：<https://docs.cloud.google.com/vertex-ai/generative-ai/docs/context-cache/context-cache-overview>
+- **[R56]** Vertex AI 零資料保留：<https://docs.cloud.google.com/vertex-ai/generative-ai/docs/vertex-ai-zero-data-retention>
+- **[R57]** Supabase 官方 Postgres 映像檔原始碼（`postgres` 角色屬性，commit `e2841e5`）：<https://github.com/supabase/postgres/blob/e2841e5fc3afdbb49ac8d52e5e570f7c9da7565a/migrations/db/migrations/10000000000000_demote-postgres.sql>
