@@ -16,3 +16,5 @@ jobs:
         run: python3 -I -m unittest discover -s docs/toolkit/tools -v
       - name: Validate toolkit docs
         run: python3 -I docs/toolkit/tools/build.py --check
+      - name: Test toolkit (fast tests; environment tests need MAZ_ENV_TESTS=1 and Docker)
+        run: python3 -I -m unittest discover -s toolkit/tests -t . -v

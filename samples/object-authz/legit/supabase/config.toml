@@ -1,0 +1,54 @@
+# Object-level authorization sample, legit version. E1 local stack.
+# Services not needed by this sample are disabled; the toolkit records them as
+# known differences in the EnvironmentProfile.
+project_id = "maz-object-authz-legit"
+
+[api]
+enabled = true
+port = 54321
+schemas = ["public"]
+extra_search_path = ["public", "extensions"]
+max_rows = 1000
+
+[db]
+port = 54322
+shadow_port = 54320
+major_version = 17
+
+[db.pooler]
+enabled = false
+
+[db.seed]
+enabled = true
+sql_paths = ["./seed.sql"]
+
+[studio]
+enabled = false
+
+[local_smtp]
+enabled = false
+
+[storage]
+enabled = false
+
+[realtime]
+enabled = false
+
+[analytics]
+enabled = false
+
+[edge_runtime]
+enabled = false
+
+[auth]
+enabled = true
+site_url = "http://127.0.0.1:3000"
+jwt_expiry = 3600
+enable_refresh_token_rotation = true
+enable_signup = false
+
+# The CLI uses auth.email.enable_signup as the switch for the email provider, which
+# password login needs; sign-ups stay closed through auth.enable_signup above.
+[auth.email]
+enable_signup = true
+enable_confirmations = false

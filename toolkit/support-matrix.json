@@ -1,0 +1,24 @@
+{
+  "_說明": "支援矩陣（TK-SCP-001）。版本在原型啟動前固定；執行時偵測到矩陣外版本即標示不支援。",
+  "matrix_version": "1",
+  "tools": {
+    "supabase-cli": {
+      "version": "2.122.0",
+      "source": "https://github.com/supabase/cli/releases/tag/v2.122.0",
+      "archive_sha256": "59ed066847b98d7461c60e9109d40cab6b9756177ce06ebb05b51338519f5136",
+      "binary_sha256": "cb6a371c6ca17c3d2e2fc382348762f570cef2cb94a6da3c69735925adb7a0d0"
+    },
+    "docker-engine": {"version": "29.1.3"}
+  },
+  "_services": "supabase-cli 2.122.0 所使用的服務映像，2026-10-31 於 E1 實際啟動後記錄。",
+  "services": {
+    "db": {"image": "public.ecr.aws/supabase/postgres:17.11.0.006",
+           "digest": "sha256:c141fd17ac6a76c4323e90b3aee8ff1a23d2e89e547c2b963cfadc309c079cc2"},
+    "auth": {"image": "public.ecr.aws/supabase/gotrue:v2.197.0",
+             "digest": "sha256:1736a63078f5922b198c4cbe50f80ab9a2d3b54fe8b7b6cfb2e9dc5dbbc12c6b"},
+    "rest": {"image": "public.ecr.aws/supabase/postgrest:v16.5",
+             "digest": "sha256:1347d7552b88f17832912c06afbf7c43209af6eeeb60834b04aae12c9bd9d5cc"},
+    "kong": {"image": "public.ecr.aws/supabase/kong:2.8.1",
+             "digest": "sha256:1b53405d8680a09d6f44494b7990bf7da2ea43f84a258c59717d4539abf09f6d"}
+  }
+}
