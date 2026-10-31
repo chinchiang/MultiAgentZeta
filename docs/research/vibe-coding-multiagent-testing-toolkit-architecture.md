@@ -239,11 +239,11 @@ flowchart TD
 | 模型家族 | 實體驗證之 Model ID | 呼叫端點與方式 | 結構化輸出機制 | 在工具包中的特化分工 |
 | :--- | :--- | :--- | :--- | :--- |
 | **Anthropic Claude** | `claude-sonnet-5-5` / `claude-opus-5-5` | `https://api.anthropic.com/v1/messages` (SDK: `anthropic`) | `output_config={"format": {"type": "json_schema", "schema": ...}}`（GA，無需 beta header；舊 `output_format` 參數已棄用），或 SDK `client.messages.parse()` | 審查複雜控制流、非同步事件處理、前端 React 狀態陷阱 |
-| **NVIDIA Nemotron** | `nvidia/nemotron-3-super-120b-a12b`（NIM 託管）；本地 vLLM / SGLang 之 served name 為 `nvidia/nemotron-3-super` | `https://integrate.api.nvidia.com/v1` (NVIDIA NIM，相容 OpenAI SDK) 或本地 vLLM | OpenAI 相容之 `response_format={"type": "json_schema", ...}` | 提供非純 Transformer 的架構多樣性（Mamba-2 + MoE 交錯，搭配少量 Attention 層），減少純美系主流模型的對齊盲點 |
+| **NVIDIA Nemotron** | `nvidia/nemotron-3-super-120b-a12b`（NIM 託管）；本地部署時的服務名稱由推論引擎設定（如 vLLM `--served-model-name`），`nvidia/nemotron-3-super` 僅為 NVIDIA 範例所用別名，非固定官方名稱 | `https://integrate.api.nvidia.com/v1` (NVIDIA NIM，相容 OpenAI SDK) 或本地 vLLM | OpenAI 相容之 `response_format={"type": "json_schema", ...}` | 提供非純 Transformer 的架構多樣性（Mamba-2 + MoE 交錯，搭配少量 Attention 層），減少純美系主流模型的對齊盲點 |
 | **Google Gemini** | `gemini-2.5-pro` / `gemini-4-argon` | `https://generativelanguage.googleapis.com` (SDK: `google-genai`) | `GenerateContentConfig(response_mime_type="application/json", response_schema=PydanticModel)` | 利用超長上下文進行跨多檔案（路由、ORM、Schema、Middleware）全域關聯分析 |
 | **OpenAI GPT** | `gpt-6.1-sol` | `https://api.openai.com/v1/responses` 或 `/v1/chat/completions` (SDK: `openai`) | `responses` 之 `text={"format": {"type": "json_schema", "name": ..., "schema": ..., "strict": True}}` | 深度多步邏輯演繹、邊界條件極值推演 |
 
-> **模型 ID 查證紀錄（2026-10-31）**：已對照各家官方模型清單。移除 `nvidia/llama-3.3-nemotron-super-49b-v1.5`（未列於 NIM 託管模型清單，且為純 Dense Transformer，與本列「非純 Transformer」的選型理由矛盾）；移除 `o3`（已棄用，2026-12-11 停止服務）與 `gpt-5.4`（未列於 OpenAI 模型清單）。
+> **模型 ID 查證紀錄（2026-10-31）**：已對照各家官方模型清單。移除 `nvidia/llama-3.3-nemotron-super-49b-v1.5`（未列於 NIM 託管模型清單，且為純 Dense Transformer，與本列「非純 Transformer」的選型理由矛盾）；移除 `o3`（已棄用，2026-12-11 停止服務）；`gpt-5.4` 有官方模型頁（快照 `gpt-5.4-2026-03-05`），本版僅因選型收斂而不納入，並非模型不存在。
 
 ### 5.2 呼叫適配層（Unified Adapter Layer）的設計防護
 雖然可以使用 [LiteLLM (`BerriAI/litellm`)](https://github.com/BerriAI/litellm) 作為統一轉發層，但本工具包在適配層必須實作三項關鍵防護：
