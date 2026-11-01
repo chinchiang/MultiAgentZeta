@@ -676,6 +676,57 @@ class UnknownRequirement(unittest.TestCase):
                 self.assertIn('not confirmed', error)
 
 
+def self_acceptance_manifest(version, template):
+    """A ScanManifest of the S2 template's self-acceptance cases for one sample version (TK-REQ-008).
+
+    Until the confirmation list exists (#40), requirements carry their confirmation inline; here each
+    clause is confirmed by the self-acceptance harness, in this test only.
+    """
+    m = manifest(version)
+    m['id'] = f'manifest-s2-self-acceptance-{version}'
+    m['requirements'] = [{'id': c['id'], 'statement': c['statement'],
+                          'confirmation': {'by': 'template-self-acceptance', 'at': '2026-11-02T00:00:00Z',
+                                           'version': template['version']}}
+                         for c in template['clauses']]
+    m['tests'] = [{'test_id': c['case_id'], 'requirement_id': c['clause'], **c['test']}
+                  for c in template['self_acceptance']['cases']]
+    return m
+
+
+@needs_env
+class TemplateSelfAcceptanceEnv(unittest.TestCase):
+    """TK-REQ-008: the S2 template is enabled only when its own samples give the expected results."""
+
+    def test_every_sample_version_gives_the_expected_results(self):
+        from toolkit import policy
+        template = policy.load_template()
+        acceptance = template['self_acceptance']
+        self.assertEqual(SAMPLES.relative_to(SAMPLES.parents[1]).as_posix(), acceptance['sample'])
+        for version in acceptance['versions']:
+            with self.subTest(version=version):
+                rep = scan.run(self_acceptance_manifest(version, template)).report
+                self.assertEqual(report.validate(rep), [])
+                self.assertEqual(rep['status'], 'completed', rep.get('status_reason'))
+                self.assertEqual(results(rep), {c['case_id']: c['expected'][version] for c in acceptance['cases']})
+
+
+class TemplateFromToolkitOnly(unittest.TestCase):
+    """TK-REQ-008: the S2 template ships with the toolkit; a ScanManifest cannot supply or replace it."""
+
+    def test_manifest_with_its_own_template_is_blocked_before_start(self):
+        for field in ('policy_template', 'policy_template_path'):
+            with self.subTest(field=field):
+                m = manifest('vulnerable')
+                m[field] = {'clauses': []} if field == 'policy_template' else 'my-template.json'
+                rep = scan.run(m).report
+                self.assertEqual(report.validate(rep), [])
+                self.assertEqual(rep['status'], 'blocked')
+                self.assertIn(field, rep['status_reason'])
+                self.assertIn('toolkit', rep['status_reason'])
+                self.assertNotIn('environment', rep)
+                self.assertEqual(set(results(rep).values()), {'blocked'})
+
+
 class UnsupportedIdentity(unittest.TestCase):
     """〈定義：必要輸入〉 測試身分: a matrix cell the recipe has no identity for is a coverage gap."""
 

@@ -1,0 +1,223 @@
+{
+  "_說明": "S2 預設政策範本（〈定義：需求來源〉、TK-REQ-008）。只由工具包提供；內容改變時須升 version，並通過 self_acceptance 的樣本。",
+  "template_id": "nextjs-supabase-object-authz",
+  "version": "1",
+  "stack": {
+    "framework": "nextjs",
+    "baas": "supabase"
+  },
+  "clauses": [
+    {
+      "id": "S2-OWNER-ONLY",
+      "statement": "資源預設僅擁有者可讀寫。",
+      "rule": "deny",
+      "actors": "same-tenant non-owner"
+    },
+    {
+      "id": "S2-TENANT-ISOLATION",
+      "statement": "租戶間預設完全隔離。",
+      "rule": "deny",
+      "actors": "user of another tenant"
+    },
+    {
+      "id": "S2-ANON-NO-ACCESS",
+      "statement": "未登入者預設不可讀寫。",
+      "rule": "deny",
+      "actors": "anonymous"
+    }
+  ],
+  "self_acceptance": {
+    "_說明": "自我驗收樣本（TK-REQ-008）：每個案例在每個樣本版本的預期結果。範本變更須以 MAZ_ENV_TESTS=1 跑過 TemplateSelfAcceptanceEnv 才可啟用。",
+    "sample": "samples/object-authz",
+    "versions": [
+      "vulnerable",
+      "patched",
+      "legit",
+      "lax-update-policy"
+    ],
+    "cases": [
+      {
+        "case_id": "READ-same-tenant",
+        "clause": "S2-OWNER-ONLY",
+        "test": {
+          "owner_ref": "owner",
+          "observation_ref": "document-row-state-v1",
+          "actor_ref": "same_tenant_non_owner",
+          "template_id": "cross-user-read-v1",
+          "resource_ref": "MARK-A-ALICE-PRIVATE"
+        },
+        "expected": {
+          "vulnerable": "failed",
+          "patched": "passed",
+          "legit": "passed",
+          "lax-update-policy": "passed"
+        }
+      },
+      {
+        "case_id": "UPDATE-same-tenant",
+        "clause": "S2-OWNER-ONLY",
+        "test": {
+          "owner_ref": "owner",
+          "observation_ref": "document-row-state-v1",
+          "actor_ref": "same_tenant_non_owner",
+          "template_id": "cross-user-update-v1",
+          "resource_ref": "MARK-A-ALICE-PRIVATE",
+          "control_ref": "MARK-A-ALICE-SHARED"
+        },
+        "expected": {
+          "vulnerable": "failed",
+          "patched": "passed",
+          "legit": "passed",
+          "lax-update-policy": "passed"
+        }
+      },
+      {
+        "case_id": "DELETE-same-tenant",
+        "clause": "S2-OWNER-ONLY",
+        "test": {
+          "owner_ref": "owner",
+          "observation_ref": "document-row-state-v1",
+          "actor_ref": "same_tenant_non_owner",
+          "template_id": "cross-user-delete-v1",
+          "resource_ref": "MARK-A-ALICE-PRIVATE",
+          "control_ref": "MARK-A-ALICE-SHARED"
+        },
+        "expected": {
+          "vulnerable": "failed",
+          "patched": "passed",
+          "legit": "passed",
+          "lax-update-policy": "passed"
+        }
+      },
+      {
+        "case_id": "CREATE-same-tenant",
+        "clause": "S2-OWNER-ONLY",
+        "test": {
+          "owner_ref": "owner",
+          "observation_ref": "document-row-state-v1",
+          "actor_ref": "same_tenant_non_owner",
+          "template_id": "cross-user-create-v1",
+          "resource_ref": "MARK-A-CREATED-AS-ALICE",
+          "control_ref": "MARK-A-OWNER-CONTROL",
+          "claimed_owner_id": "a0000000-0000-4000-8000-00000000a11c",
+          "tenant_id": "7e000000-0000-4000-8000-00000000000a"
+        },
+        "expected": {
+          "vulnerable": "passed",
+          "patched": "passed",
+          "legit": "passed",
+          "lax-update-policy": "passed"
+        }
+      },
+      {
+        "case_id": "READ-other-tenant",
+        "clause": "S2-TENANT-ISOLATION",
+        "test": {
+          "owner_ref": "owner",
+          "observation_ref": "document-row-state-v1",
+          "actor_ref": "other_tenant_user",
+          "template_id": "cross-user-read-v1",
+          "resource_ref": "MARK-A-ALICE-PRIVATE"
+        },
+        "expected": {
+          "vulnerable": "passed",
+          "patched": "passed",
+          "legit": "passed",
+          "lax-update-policy": "passed"
+        }
+      },
+      {
+        "case_id": "UPDATE-other-tenant",
+        "clause": "S2-TENANT-ISOLATION",
+        "test": {
+          "owner_ref": "owner",
+          "observation_ref": "document-row-state-v1",
+          "actor_ref": "other_tenant_user",
+          "template_id": "cross-user-update-v1",
+          "resource_ref": "MARK-A-ALICE-PRIVATE",
+          "control_ref": "MARK-A-ALICE-SHARED"
+        },
+        "expected": {
+          "vulnerable": "passed",
+          "patched": "passed",
+          "legit": "passed",
+          "lax-update-policy": "passed"
+        }
+      },
+      {
+        "case_id": "DELETE-other-tenant",
+        "clause": "S2-TENANT-ISOLATION",
+        "test": {
+          "owner_ref": "owner",
+          "observation_ref": "document-row-state-v1",
+          "actor_ref": "other_tenant_user",
+          "template_id": "cross-user-delete-v1",
+          "resource_ref": "MARK-A-ALICE-PRIVATE",
+          "control_ref": "MARK-A-ALICE-SHARED"
+        },
+        "expected": {
+          "vulnerable": "passed",
+          "patched": "passed",
+          "legit": "passed",
+          "lax-update-policy": "passed"
+        }
+      },
+      {
+        "case_id": "CREATE-other-tenant",
+        "clause": "S2-TENANT-ISOLATION",
+        "test": {
+          "owner_ref": "owner",
+          "observation_ref": "document-row-state-v1",
+          "actor_ref": "other_tenant_user",
+          "template_id": "cross-user-create-v1",
+          "resource_ref": "MARK-A-CREATED-AS-ALICE",
+          "control_ref": "MARK-A-OWNER-CONTROL",
+          "claimed_owner_id": "a0000000-0000-4000-8000-00000000a11c",
+          "tenant_id": "7e000000-0000-4000-8000-00000000000a"
+        },
+        "expected": {
+          "vulnerable": "passed",
+          "patched": "passed",
+          "legit": "passed",
+          "lax-update-policy": "passed"
+        }
+      },
+      {
+        "case_id": "READ-anonymous-anon-jwt",
+        "clause": "S2-ANON-NO-ACCESS",
+        "test": {
+          "owner_ref": "owner",
+          "observation_ref": "document-row-state-v1",
+          "actor_ref": "anonymous",
+          "api_key": "anon-jwt",
+          "template_id": "cross-user-read-v1",
+          "resource_ref": "MARK-A-ALICE-PRIVATE"
+        },
+        "expected": {
+          "vulnerable": "passed",
+          "patched": "passed",
+          "legit": "passed",
+          "lax-update-policy": "passed"
+        }
+      },
+      {
+        "case_id": "READ-anonymous-publishable",
+        "clause": "S2-ANON-NO-ACCESS",
+        "test": {
+          "owner_ref": "owner",
+          "observation_ref": "document-row-state-v1",
+          "actor_ref": "anonymous",
+          "api_key": "publishable",
+          "template_id": "cross-user-read-v1",
+          "resource_ref": "MARK-A-ALICE-PRIVATE"
+        },
+        "expected": {
+          "vulnerable": "passed",
+          "patched": "passed",
+          "legit": "passed",
+          "lax-update-policy": "passed"
+        }
+      }
+    ]
+  }
+}

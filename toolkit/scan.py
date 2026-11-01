@@ -487,6 +487,16 @@ def _input_problems(manifest):
     return problems
 
 
+TEMPLATE_OVERRIDES = ('policy_template', 'policy_template_path')
+
+
+def _template_override_problems(manifest):
+    """TK-REQ-008: the S2 template comes from the toolkit only (toolkit.policy.load_template); a
+    ScanManifest that brings its own is refused rather than silently ignored."""
+    return [f'{name}: the S2 template is provided by the toolkit only; a ScanManifest cannot supply '
+            f'or replace it' for name in TEMPLATE_OVERRIDES if name in manifest]
+
+
 def run(manifest):
     """Run the manifest's tests against its project and return the report and its Markdown.
 
@@ -499,6 +509,9 @@ def run(manifest):
     if missing:
         return _blocked(manifest, records, 'required inputs missing; nothing was started: ' + '; '.join(missing),
                         stage='preflight')
+    overrides = _template_override_problems(manifest)
+    if overrides:
+        return _blocked(manifest, records, 'nothing was started: ' + '; '.join(overrides), stage='preflight')
     project = manifest['target']['project']
     pinned, actual = manifest['target']['source_digest'], e1.source_digest(project)
     if pinned != actual:
