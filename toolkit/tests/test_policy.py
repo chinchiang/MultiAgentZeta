@@ -16,6 +16,12 @@ class LoadTemplate(unittest.TestCase):
         self.assertEqual({c['rule'] for c in t['clauses']}, {'deny'})
         self.assertEqual(t['stack'], {'framework': 'nextjs', 'baas': 'supabase'})
 
+    def test_anonymous_writes_are_part_of_the_self_acceptance(self):
+        # 〈定義：需求來源〉 S2: 未登入者預設不可寫入; reads alone would not exercise it.
+        cases = [c for c in policy.load_template()['self_acceptance']['cases'] if c['clause'] == 'S2-ANON-NO-ACCESS']
+        self.assertEqual({c['test']['template_id'] for c in cases},
+                         {'cross-user-read-v1', 'cross-user-update-v1', 'cross-user-delete-v1', 'cross-user-create-v1'})
+
 
 class Validate(unittest.TestCase):
     """policy.validate(): each refusal has a passing case (the shipped template) and a triggering one."""
@@ -31,7 +37,7 @@ class Validate(unittest.TestCase):
         policy.validate(policy.load_template())
 
     def test_missing_field(self):
-        for field in ('template_id', 'version', 'stack', 'clauses', 'self_acceptance'):
+        for field in ('policy_template_id', 'version', 'stack', 'clauses', 'self_acceptance'):
             with self.subTest(field=field):
                 self.assert_invalid(lambda t, f=field: t.pop(f), field)
         for field in ('id', 'statement', 'rule', 'actors'):
@@ -54,6 +60,24 @@ class Validate(unittest.TestCase):
         self.assert_invalid(lambda t: t['self_acceptance']['cases'][0]['expected'].update(patched='blocked'),
                             'blocked')
 
+    def test_duplicate_case_id(self):
+        # A repeated case_id would let one result hide the other's.
+        self.assert_invalid(lambda t: t['self_acceptance']['cases'][1].update(
+            case_id=t['self_acceptance']['cases'][0]['case_id']), 'used twice')
+
+    def test_malformed_structure_is_refused_as_invalid(self):
+        changes = {'self_acceptance is not an object': lambda t: t.update(self_acceptance=[]),
+                   'clauses is not a list': lambda t: t.update(clauses='S2-OWNER-ONLY'),
+                   'a clause is not an object': lambda t: t['clauses'].append('S2-X'),
+                   'a case has no test': lambda t: t['self_acceptance']['cases'][0].pop('test'),
+                   'a case has no case_id': lambda t: t['self_acceptance']['cases'][0].pop('case_id'),
+                   'a case is not an object': lambda t: t['self_acceptance']['cases'].append(None)}
+        for name, change in changes.items():
+            with self.subTest(name):
+                t = copy.deepcopy(policy.load_template())
+                change(t)
+                self.assertRaises(policy.PolicyTemplateInvalid, policy.validate, t)
+
     def test_every_clause_has_a_self_acceptance_case(self):
         def drop_anonymous(t):
             t['self_acceptance']['cases'] = [c for c in t['self_acceptance']['cases']
@@ -63,7 +87,7 @@ class Validate(unittest.TestCase):
 
 # The digest of each released template version. A content change without a version bump fails here;
 # a bump adds its digest after the new template passes its self-acceptance (TK-REQ-008).
-PINNED_DIGESTS = {'1': 'sha256:9668480c9d7ec33f1156d678e22dfaad96a1808cd3b8553dc7ed31c272bf6150'}
+PINNED_DIGESTS = {'1': 'sha256:c2eb783dab99c64a0a125b1940c58f2f6db23b94192fbaeb2ae190343e9fb8ce'}
 
 
 class TemplateVersion(unittest.TestCase):

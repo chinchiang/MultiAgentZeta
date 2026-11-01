@@ -491,8 +491,10 @@ TEMPLATE_OVERRIDES = ('policy_template', 'policy_template_path')
 
 
 def _template_override_problems(manifest):
-    """TK-REQ-008: the S2 template comes from the toolkit only (toolkit.policy.load_template); a
-    ScanManifest that brings its own is refused rather than silently ignored."""
+    """TK-REQ-008: the S2 template comes from the toolkit only (toolkit.policy.load_template), which
+    never reads the ScanManifest. These field names, the ones a ScanManifest would use to bring a
+    template, are refused so the run does not look as if it used them; other unknown fields are
+    not checked here."""
     return [f'{name}: the S2 template is provided by the toolkit only; a ScanManifest cannot supply '
             f'or replace it' for name in TEMPLATE_OVERRIDES if name in manifest]
 

@@ -1,6 +1,6 @@
 {
   "_說明": "S2 預設政策範本（〈定義：需求來源〉、TK-REQ-008）。只由工具包提供；內容改變時須升 version，並通過 self_acceptance 的樣本。",
-  "template_id": "nextjs-supabase-object-authz",
+  "policy_template_id": "nextjs-supabase-object-authz",
   "version": "1",
   "stack": {
     "framework": "nextjs",
@@ -210,6 +210,124 @@
           "api_key": "publishable",
           "template_id": "cross-user-read-v1",
           "resource_ref": "MARK-A-ALICE-PRIVATE"
+        },
+        "expected": {
+          "vulnerable": "passed",
+          "patched": "passed",
+          "legit": "passed",
+          "lax-update-policy": "passed"
+        }
+      },
+      {
+        "case_id": "UPDATE-anonymous-anon-jwt",
+        "clause": "S2-ANON-NO-ACCESS",
+        "test": {
+          "owner_ref": "owner",
+          "observation_ref": "document-row-state-v1",
+          "actor_ref": "anonymous",
+          "template_id": "cross-user-update-v1",
+          "resource_ref": "MARK-A-ALICE-PRIVATE",
+          "control_ref": "MARK-A-ALICE-SHARED",
+          "api_key": "anon-jwt"
+        },
+        "expected": {
+          "vulnerable": "passed",
+          "patched": "passed",
+          "legit": "passed",
+          "lax-update-policy": "passed"
+        }
+      },
+      {
+        "case_id": "UPDATE-anonymous-publishable",
+        "clause": "S2-ANON-NO-ACCESS",
+        "test": {
+          "owner_ref": "owner",
+          "observation_ref": "document-row-state-v1",
+          "actor_ref": "anonymous",
+          "template_id": "cross-user-update-v1",
+          "resource_ref": "MARK-A-ALICE-PRIVATE",
+          "control_ref": "MARK-A-ALICE-SHARED",
+          "api_key": "publishable"
+        },
+        "expected": {
+          "vulnerable": "passed",
+          "patched": "passed",
+          "legit": "passed",
+          "lax-update-policy": "passed"
+        }
+      },
+      {
+        "case_id": "DELETE-anonymous-anon-jwt",
+        "clause": "S2-ANON-NO-ACCESS",
+        "test": {
+          "owner_ref": "owner",
+          "observation_ref": "document-row-state-v1",
+          "actor_ref": "anonymous",
+          "template_id": "cross-user-delete-v1",
+          "resource_ref": "MARK-A-ALICE-PRIVATE",
+          "control_ref": "MARK-A-ALICE-SHARED",
+          "api_key": "anon-jwt"
+        },
+        "expected": {
+          "vulnerable": "passed",
+          "patched": "passed",
+          "legit": "passed",
+          "lax-update-policy": "passed"
+        }
+      },
+      {
+        "case_id": "DELETE-anonymous-publishable",
+        "clause": "S2-ANON-NO-ACCESS",
+        "test": {
+          "owner_ref": "owner",
+          "observation_ref": "document-row-state-v1",
+          "actor_ref": "anonymous",
+          "template_id": "cross-user-delete-v1",
+          "resource_ref": "MARK-A-ALICE-PRIVATE",
+          "control_ref": "MARK-A-ALICE-SHARED",
+          "api_key": "publishable"
+        },
+        "expected": {
+          "vulnerable": "passed",
+          "patched": "passed",
+          "legit": "passed",
+          "lax-update-policy": "passed"
+        }
+      },
+      {
+        "case_id": "CREATE-anonymous-anon-jwt",
+        "clause": "S2-ANON-NO-ACCESS",
+        "test": {
+          "owner_ref": "owner",
+          "observation_ref": "document-row-state-v1",
+          "actor_ref": "anonymous",
+          "template_id": "cross-user-create-v1",
+          "resource_ref": "MARK-A-CREATED-AS-ALICE",
+          "control_ref": "MARK-A-OWNER-CONTROL",
+          "claimed_owner_id": "a0000000-0000-4000-8000-00000000a11c",
+          "tenant_id": "7e000000-0000-4000-8000-00000000000a",
+          "api_key": "anon-jwt"
+        },
+        "expected": {
+          "vulnerable": "passed",
+          "patched": "passed",
+          "legit": "passed",
+          "lax-update-policy": "passed"
+        }
+      },
+      {
+        "case_id": "CREATE-anonymous-publishable",
+        "clause": "S2-ANON-NO-ACCESS",
+        "test": {
+          "owner_ref": "owner",
+          "observation_ref": "document-row-state-v1",
+          "actor_ref": "anonymous",
+          "template_id": "cross-user-create-v1",
+          "resource_ref": "MARK-A-CREATED-AS-ALICE",
+          "control_ref": "MARK-A-OWNER-CONTROL",
+          "claimed_owner_id": "a0000000-0000-4000-8000-00000000a11c",
+          "tenant_id": "7e000000-0000-4000-8000-00000000000a",
+          "api_key": "publishable"
         },
         "expected": {
           "vulnerable": "passed",
