@@ -15,10 +15,20 @@
 
 v1.3.6 以前的單一文件 `docs/research/vibe-coding-multiagent-testing-toolkit-architecture-v1.3.md` 已凍結，不再更新；舊審查意見引用的章節號以該檔為準。
 
+## 每輪修訂的檢查清單
+
+1. 四份文件的檔頭版本號與修訂日期一起更新，規格第 0.4 節的版本句也一起改。
+2. 新條文接續該領域的最後一個編號；在 `review-log.md` 第 4 章加一列修訂紀錄。
+3. 改完條文後執行 `python -I docs/toolkit/tools/build.py`，自動產生規格的驗收群組表（第 14 章）、附錄 A 追溯表與 `v0.1-scope.md`；不要手動編輯這三處。工具同時執行下方「自動檢查」的全部檢查。
+4. 新條文的驗收群組預設依領域決定；要改歸其他群組，或新增群組、新增領域，編輯 `tools/groups.json` 後再執行第 3 步。
+5. 新參考資料接續 [R] 編號，寫進 `design-notes.md` 第 7 章。
+6. 依 repo 根目錄的 [`CODING_STANDARDS.md`](../../CODING_STANDARDS.md) 審查本輪 diff。
+7. `python -I docs/toolkit/tools/build.py --check` 結束碼為 0，且 `CODING_STANDARDS.md` 每條規則都有結論，才提交。
+
 ## 版本規則
 
 - 四份文件共用一個版本號，寫在每份文件的檔頭。
-- 任何一份改動，四份一起升版；沒改內容的文件只改檔頭版本號與修訂日期。
+- 改動 `docs/toolkit/`（含本檔與 `tools/`）、`GLOSSARY.md`、`docs/adr/`、`CODING_STANDARDS.md` 或代理指示檔（`AGENTS.md`、`docs/agents/`）時，四份文件一起升版；沒改內容的文件只改檔頭版本號與修訂日期。`toolkit/` 與 `samples/` 的程式改動不升版。
 - 結構性變更（拆分、重新分章）升第二位數；一般修訂升第三位數。
 - 修訂紀錄只記在 `review-log.md` 第 4 章，寫明改了哪幾份。
 
@@ -45,7 +55,7 @@ v1.3.6 以前的單一文件 `docs/research/vibe-coding-multiagent-testing-toolk
 
 ## 自動檢查
 
-`python -I docs/toolkit/tools/build.py --check` 是這組文件的檢查指令，出錯時以結束碼 2 停止，產生結果過期時以結束碼 1 停止；有任何錯誤時不寫入任何檔案。條文區塊或 `groups.json` 無法解析時，只回報這一階段的錯誤；解析成功後，其餘檢查的錯誤一次全部列出，每筆附規則代碼，例如 `[dangling-ref]`。它檢查：
+`python -I docs/toolkit/tools/build.py --check` 是這組文件的檢查指令，出錯時以結束碼 2 停止，產生結果過期時以結束碼 1 停止；有任何錯誤時不寫入任何檔案；錯誤的回報方式見 `tools/build.py` 開頭說明。它檢查：
 
 - 條文區塊：欄位齊全且不空白、等級與 v0.1 值合法、「須」「不得」條文的驗收不是「—」、編號不重複也不跳號。
 - 引用：規格與其他文件（設計說明、審查處置紀錄、本檔、`GLOSSARY.md`、ADR、研究筆記）中的 `TK-` 引用都指向存在的條文；[R] 參考資料在設計說明中只定義一次、編號從 1 連續，各文件引用的 [R] 都有定義。
@@ -55,16 +65,7 @@ v1.3.6 以前的單一文件 `docs/research/vibe-coding-multiagent-testing-toolk
 
 兩道防線都執行這個指令：
 
-- **提交前 hook**：`.githooks/pre-commit`。每個複本執行一次 `git config core.hooksPath .githooks` 後啟用。hook 檢查的是工作目錄的內容，所以提交前要先把修改存檔。
+- **提交前 hook**：`.githooks/pre-commit`。每個複本執行一次 `git config core.hooksPath .githooks` 後啟用。hook 檢查的是工作目錄，不是暫存區：只暫存部分修改時，檢查通過不代表提交的內容通過。
 - **CI**：`.github/workflows/docs-check.yml`，在每次 push 與 PR 執行，並先跑工具本身的測試。直接推 `main` 時 CI 是事後警報；事前攔截靠 hook。
 
-工具本身的測試在 `tools/test_build.py`，用 `python -I -m unittest discover -s docs/toolkit/tools` 執行；修改 `build.py` 時，每條檢查規則都要有一正一反的測試。測試透過 `check_docs` 這個入口進行：輸入文件快照（相對路徑對應檔案文字），回傳問題清單與需要更新的產生結果，不直接讀寫磁碟。
-
-## 每輪修訂的檢查清單
-
-1. 四份文件的檔頭版本號與修訂日期一起更新，規格第 0.4 節的版本句也一起改。
-2. 新條文接續該領域的最後一個編號；在 `review-log.md` 第 4 章加一列修訂紀錄。
-3. 改完條文後執行 `python -I docs/toolkit/tools/build.py`，自動產生規格的驗收群組表（第 14 章）、附錄 A 追溯表與 `v0.1-scope.md`；不要手動編輯這三處。工具同時執行上方「自動檢查」的全部檢查。
-4. 新條文的驗收群組預設依領域決定；要改歸其他群組，或新增群組、新增領域，編輯 `tools/groups.json` 後再執行第 3 步。
-5. 新參考資料接續 [R] 編號，寫進 `design-notes.md` 第 7 章。
-6. 提交前依 repo 根目錄的 [`CODING_STANDARDS.md`](../../CODING_STANDARDS.md) 審查本輪 diff。該檔收工具查不到、需要判斷的規則，例如條文範圍衝突、定義一致、放寬要寫理由、數字來源與證據等級；`/code-review` 的「標準」面向也會讀它。
+工具本身的測試在 `tools/test_build.py`，用 `python -I -m unittest discover -s docs/toolkit/tools` 執行；修改 `build.py` 時依 `CODING_STANDARDS.md` 第 14 條補測試。

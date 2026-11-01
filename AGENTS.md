@@ -1,17 +1,15 @@
 ## Project documents
 
-The toolkit design lives in `docs/toolkit/`; start with `docs/toolkit/README.md` (document roles, shared version rule, requirement ID format, per-revision checklist). Terminology is defined in `GLOSSARY.md`.
+Before editing `docs/toolkit/`, `GLOSSARY.md`, or `docs/adr/`, read `docs/toolkit/README.md`: document roles, shared version rule, `TK-` requirement format, per-revision checklist. Terms follow `GLOSSARY.md`.
+
+Before committing doc changes, run `python -I docs/toolkit/tools/build.py --check` and review the diff against `CODING_STANDARDS.md`. The pre-commit hook needs `git config core.hooksPath .githooks` once per clone.
+
+## Toolkit prototype
+
+Code lives in `toolkit/`, samples in `samples/`. Fast tests: `python -I -m unittest discover -s toolkit/tests -t .` (install from the hash-pinned `toolkit/requirements.lock`). Environment tests need `MAZ_ENV_TESTS=1` and Docker.
 
 ## Agent skills
 
-### Issue tracker
-
-Issues and specs are tracked in GitHub Issues (`chinchiang/MultiAgentZeta`) via the `gh` CLI. See `docs/agents/issue-tracker.md`.
-
-### Triage labels
-
-Default canonical triage labels (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
-
-### Domain docs
-
-Single-context layout (`GLOSSARY.md` and `docs/adr/` at the repo root). See `docs/agents/domain.md`.
+- **Issue tracker**: GitHub Issues (`chinchiang/MultiAgentZeta`). See `docs/agents/issue-tracker.md`.
+- **Triage labels**: canonical names, unchanged. See `docs/agents/triage-labels.md`.
+- **Domain docs**: single-context (`GLOSSARY.md`, `docs/adr/` at the root). Before exploring or naming a domain concept, see `docs/agents/domain.md`.
