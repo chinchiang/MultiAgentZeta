@@ -9,6 +9,7 @@ import json
 import re
 import secrets
 import socket
+import string
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -84,16 +85,78 @@ def _request(env, identity, method, path, body=None, api_key='anon-jwt', prefer=
 # The four checks of a denial case (TK-DYN-001).
 CHECKS = ('resource_and_control', 'identity', 'no_disclosure_or_change', 'response_and_side_effects')
 
-# Denial-case templates: the HTTP method of the attempt, and the responses that the
-# contract accepts as a denial (TK-DYN-002: a status code alone is not enough).
+# Request targets of denial-case templates, filled in from the test's fields.
+RESOURCE_ROWS = '/rest/v1/documents?title=eq.{resource_ref}&select=title,body'
+CONTROL_ROWS = '/rest/v1/documents?title=eq.{control_ref}&select=title'
+DOCUMENTS = '/rest/v1/documents'
+
+# Denial-case templates (TK-DYN-001). Each one gives:
+#   method    HTTP method of both the owner's control operation and the actor's attempt
+#   denials   responses the contract accepts as a denial (TK-DYN-002: a status code alone is not enough)
+#   control   (path, body) of the owner's control operation, which must succeed on exactly one row
+#   attempt   (path, body) of the actor's attempt
+#   resource  the resource state the case needs before the attempt and must keep after it
+#             (see RESOURCE_STATES)
+#   params    typed test parameters beyond resource_ref (always a marker) that the template
+#             fills in (TK-IDN-006); every {field} in control and attempt must be one of them
+# Write attempts ask for return=minimal, so PostgREST answers 204 whether or not a row
+# changed: the verdict on a write rests on the observer's state, not on what the actor sees.
 DENIAL_TEMPLATES = {
-    'cross-user-read-v1': {'method': 'GET', 'denials': {200, 401, 403, 404}, 'writes': False},
-    # Write attempts ask for return=minimal, so PostgREST answers 204 whether or not a row
-    # changed: the verdict on a write rests on the observer's state, not on what the actor sees.
-    'cross-user-update-v1': {'method': 'PATCH', 'denials': {204, 401, 403, 404}, 'writes': True},
-    'cross-user-delete-v1': {'method': 'DELETE', 'denials': {204, 401, 403, 404}, 'writes': True},
-    'cross-user-create-v1': {'method': 'POST', 'denials': {401, 403}, 'writes': True},
+    'cross-user-read-v1': {'method': 'GET', 'denials': {200, 401, 403, 404}, 'writes': False, 'resource': 'existing',
+                           'params': {}, 'control': (RESOURCE_ROWS, None), 'attempt': (RESOURCE_ROWS, None)},
+    'cross-user-update-v1': {'method': 'PATCH', 'denials': {204, 401, 403, 404}, 'writes': True,
+                             'resource': 'existing', 'params': {'control_ref': 'marker'},
+                             'control': (CONTROL_ROWS, {'body': 'owner control'}),
+                             'attempt': (RESOURCE_ROWS, {'body': 'tampered by the actor'})},
+    'cross-user-delete-v1': {'method': 'DELETE', 'denials': {204, 401, 403, 404}, 'writes': True,
+                             'resource': 'existing', 'params': {'control_ref': 'marker'},
+                             'control': (CONTROL_ROWS, None), 'attempt': (RESOURCE_ROWS, None)},
+    # TK-DYN-007: creating a row in another user's name and tenant.
+    'cross-user-create-v1': {'method': 'POST', 'denials': {401, 403}, 'writes': True, 'resource': 'absent',
+                             'params': {'control_ref': 'marker', 'claimed_owner_id': 'uuid', 'tenant_id': 'uuid'},
+                             'control': (DOCUMENTS, {'tenant_id': '{tenant_id}', 'owner_id': '{claimed_owner_id}',
+                                                     'title': '{control_ref}', 'body': 'owner control'}),
+                             'attempt': (DOCUMENTS, {'tenant_id': '{tenant_id}', 'owner_id': '{claimed_owner_id}',
+                                                     'title': '{resource_ref}', 'body': 'attempt'})},
 }
+
+# Resource states a denial case can need (TK-DYN-001 items 1 and 3), from the observer's
+# before and after states: (ready before the attempt, changed by the attempt).
+RESOURCE_STATES = {
+    # A private row that exists and must stay as it was.
+    'existing': (lambda before: before['resource_exists'] and not before['shared'],
+                 lambda before, after: (after['resource_exists'], after.get('state_digest'))
+                 != (True, before['state_digest'])),
+    # A row that does not exist and must not appear.
+    'absent': (lambda before: not before['resource_exists'],
+               lambda before, after: after['resource_exists']),
+}
+
+
+def _fill(value, test):
+    """A template path or body with the test's fields filled in."""
+    if isinstance(value, dict):
+        return {k: _fill(v, test) for k, v in value.items()}
+    return value.format(**test) if isinstance(value, str) else value
+
+
+def _fields(value):
+    """The {field} names a template path or body uses."""
+    if isinstance(value, dict):
+        return {f for v in value.values() for f in _fields(v)}
+    return {f for _, f, _, _ in string.Formatter().parse(value) if f} if isinstance(value, str) else set()
+
+
+# Only typed, validated parameters reach a request path or body (TK-IDN-006). A kind other
+# than these would escape validation in _plan_problem, so it is refused here.
+PARAM_KINDS = {'marker', 'uuid'}
+for _name, _t in DENIAL_TEMPLATES.items():
+    _untyped = {f for part in (_t['control'], _t['attempt']) for f in _fields(part)} - {'resource_ref', *_t['params']}
+    if _untyped:
+        raise ValueError(f'denial template {_name} fills in untyped parameters {sorted(_untyped)}')
+    _unknown = set(_t['params'].values()) - PARAM_KINDS
+    if _unknown:
+        raise ValueError(f'denial template {_name} has parameters of unknown kind {sorted(_unknown)}')
 
 
 def _timeout(test):
@@ -132,8 +195,9 @@ def _denial_case(env, test, evidence):
     only from the observer channel (TK-IDN-008).
     """
     template = DENIAL_TEMPLATES[test['template_id']]
+    method = template['method']
+    ready, changed_by = RESOURCE_STATES[template['resource']]
     marker = test['resource_ref']
-    rows_path = f'/rest/v1/documents?title=eq.{marker}&select=title,body'
     checks = dict.fromkeys(CHECKS, False)
 
     def actor(identity, method, path, body=None, prefer='return=representation'):
@@ -152,26 +216,11 @@ def _denial_case(env, test, evidence):
         return state
 
     # 1. The owner's control operation succeeds, and the resource is in the expected state.
-    owner = test['owner_ref']
-    if test['template_id'] == 'cross-user-read-v1':
-        status, rows, _ = actor(owner, 'GET', rows_path)
-    elif test['template_id'] == 'cross-user-create-v1':
-        status, rows, _ = actor(owner, 'POST', '/rest/v1/documents', {
-            'tenant_id': test['tenant_id'], 'owner_id': test['claimed_owner_id'],
-            'title': test['control_ref'], 'body': 'owner control'})
-    else:
-        control_path = f'/rest/v1/documents?title=eq.{test["control_ref"]}&select=title'
-        if template['method'] == 'PATCH':
-            status, rows, _ = actor(owner, 'PATCH', control_path, {'body': 'owner control'})
-        else:
-            status, rows, _ = actor(owner, 'DELETE', control_path)
+    path, body = (_fill(v, test) for v in template['control'])
+    status, rows, _ = actor(test['owner_ref'], method, path, body)
     control_ok = status in (200, 201) and rows is not None and len(rows) == 1
     before = observe('before')
-    if test['template_id'] == 'cross-user-create-v1':
-        resource_ok = not before['resource_exists']
-    else:
-        resource_ok = before['resource_exists'] and not before['shared']
-    checks['resource_and_control'] = control_ok and resource_ok
+    checks['resource_and_control'] = control_ok and ready(before)
     if not checks['resource_and_control']:
         return 'blocked', checks
 
@@ -186,23 +235,12 @@ def _denial_case(env, test, evidence):
         return 'blocked', checks
 
     # The attempt, then 3. no leak and no change, and 4. response and side effects.
-    minimal = 'return=minimal'
-    if test['template_id'] == 'cross-user-create-v1':
-        status, rows, _ = actor(test['actor_ref'], 'POST', '/rest/v1/documents', {
-            'tenant_id': test['tenant_id'], 'owner_id': test['claimed_owner_id'], 'title': marker, 'body': 'attempt'},
-            prefer=minimal)
-    elif template['method'] == 'PATCH':
-        status, rows, _ = actor(test['actor_ref'], 'PATCH', rows_path, {'body': 'tampered by the actor'}, prefer=minimal)
-    elif template['method'] == 'DELETE':
-        status, rows, _ = actor(test['actor_ref'], 'DELETE', rows_path, prefer=minimal)
-    else:
-        status, rows, _ = actor(test['actor_ref'], 'GET', rows_path)
+    path, body = (_fill(v, test) for v in template['attempt'])
+    prefer = 'return=minimal' if template['writes'] else 'return=representation'
+    status, rows, _ = actor(test['actor_ref'], method, path, body, prefer=prefer)
     after = observe('after')
     disclosed = any(isinstance(r, dict) and r.get('title') == marker for r in rows or [])
-    if test['template_id'] == 'cross-user-create-v1':
-        changed = after['resource_exists']
-    else:
-        changed = (after['resource_exists'], after.get('state_digest')) != (True, before['state_digest'])
+    changed = changed_by(before, after)
     checks['no_disclosure_or_change'] = not disclosed and not changed
     response_ok = status in template['denials'] and (status != 200 or rows == [])
     side_effect = after['table_digest'] != before['table_digest']
@@ -253,9 +291,12 @@ TEST_TEMPLATES = {**{name: {'document-row-state-v1'} for name in DENIAL_TEMPLATE
                   **{name: {None} for name in ALLOWED_TEMPLATES}}  # allowed cases make no observation
 IDENTIFIER = observer.MARKER
 UUID = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
-MARKER_PARAMS = {'cross-user-update-v1': ['control_ref'], 'cross-user-delete-v1': ['control_ref'],
-                 'cross-user-create-v1': ['control_ref']}
-UUID_PARAMS = {'cross-user-create-v1': ['claimed_owner_id', 'tenant_id']}
+
+
+def _typed_params(template, kind):
+    """Names of a template's parameters of one kind ('marker' or 'uuid')."""
+    params = DENIAL_TEMPLATES.get(template, {}).get('params', {})
+    return [name for name, k in params.items() if k == kind]
 
 
 def _identity_problem(test, identities):
@@ -309,7 +350,7 @@ def _plan_problem(test):
         return f'template_id {template!r} is not an allow-listed test template'
     if test.get('observation_ref') not in TEST_TEMPLATES[template]:
         return f'observation_ref {test.get("observation_ref")!r} is not an allow-listed observation template for {template}'
-    for name in ['resource_ref'] + MARKER_PARAMS.get(template, []):
+    for name in ['resource_ref'] + _typed_params(template, 'marker'):
         if not isinstance(test.get(name), str) or not IDENTIFIER.match(test[name]):
             return f'{name} must be a resource marker identifier (A-Z, 0-9, -)'
     if test.get('fault') is not None and test['fault'] not in FAULTS:
@@ -319,7 +360,7 @@ def _plan_problem(test):
         return 'limits.timeout_seconds must be a positive number'
     if test.get('api_key', 'anon-jwt') not in API_KEY_FORMATS:
         return f'api_key must be one of {list(API_KEY_FORMATS)}'
-    for name in UUID_PARAMS.get(template, []):
+    for name in _typed_params(template, 'uuid'):
         if not isinstance(test.get(name), str) or not UUID.match(test[name]):
             return f'{name} must be a UUID'
     return None
