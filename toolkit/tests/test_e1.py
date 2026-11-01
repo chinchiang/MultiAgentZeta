@@ -243,14 +243,14 @@ class OutsideSupportMatrixEnv(unittest.TestCase):
 
 
 class SampleVersions(unittest.TestCase):
-    """TK-VAL-001: the three versions differ only in their document policies."""
+    """TK-VAL-001: the sample versions differ only in their document policies."""
 
     SHARED = ['supabase/migrations/20261031000001_schema.sql', 'supabase/seed.sql']
 
     def test_shared_schema_and_seed_are_identical(self):
         for rel in self.SHARED:
             with self.subTest(file=rel):
-                contents = {v: (SAMPLES / v / rel).read_bytes() for v in ('vulnerable', 'patched', 'legit')}
+                contents = {v: (SAMPLES / v / rel).read_bytes() for v in ('vulnerable', 'patched', 'legit', 'lax-update-policy')}
                 self.assertEqual(len(set(contents.values())), 1, rel)
 
 

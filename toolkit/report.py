@@ -110,5 +110,8 @@ def render_markdown(doc):
     c = doc['coverage']
     lines += ['', '## 覆蓋', '', f'- 盤點來源：{c.get("inventory_source", "")}',
               f'- 分母 {c.get("denominator")}、已執行 {c.get("executed")}、有效判定 {c.get("valid_judgements")}、'
-              f'受阻 {c.get("blocked")}、未測 {c.get("untested")}、不支援 {c.get("unsupported")}', '']
+              f'受阻 {c.get("blocked")}、未測 {c.get("untested")}、不支援 {c.get("unsupported")}']
+    for u in c.get('unsupported_items', []):
+        lines.append(f'  - 不支援：`{u["scope"]}`（{u["reason"]}）')
+    lines.append('')
     return '\n'.join(lines)

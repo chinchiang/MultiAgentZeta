@@ -38,9 +38,46 @@
       }
     },
     "execution_record": {
-      "allOf": [{"$ref": "#/$defs/common"}],
+      "allOf": [
+        {"$ref": "#/$defs/common"},
+        {
+          "description": "TK-DYN-001: a passed denial case carries all four checks.",
+          "if": {"properties": {"result": {"const": "passed"}, "case_kind": {"not": {"const": "allowed"}}},
+                 "required": ["result"]},
+          "then": {
+            "required": ["checks"],
+            "properties": {"checks": {
+              "required": ["resource_and_control", "identity", "no_disclosure_or_change", "response_and_side_effects"],
+              "additionalProperties": {"const": true}
+            }}
+          }
+        },
+        {
+          "description": "A passed allowed case (the requirement permits the access) shows the access was granted.",
+          "if": {"properties": {"result": {"const": "passed"}, "case_kind": {"const": "allowed"}},
+                 "required": ["result", "case_kind"]},
+          "then": {"required": ["checks"], "properties": {"checks": {"required": ["access_granted"],
+                                                                     "properties": {"access_granted": {"const": true}}}}}
+        }
+      ],
       "required": ["result", "evidence"],
       "properties": {
+        "checks": {
+          "description": "TK-DYN-001: resource exists and the control operation succeeds; the identity is valid and used; no disclosure and no unwanted state change; response and side effects meet the requirement.",
+          "type": "object",
+          "properties": {
+            "resource_and_control": {"type": "boolean"},
+            "identity": {"type": "boolean"},
+            "no_disclosure_or_change": {"type": "boolean"},
+            "response_and_side_effects": {"type": "boolean"},
+            "access_granted": {"type": "boolean"}
+          },
+          "additionalProperties": false
+        },
+        "case_kind": {
+          "description": "denial: the requirement forbids the access (TK-DYN-001 checks apply); allowed: the requirement permits it. Absent means denial.",
+          "enum": ["denial", "allowed"]
+        },
         "evidence": {"type": "array", "items": {"$ref": "#/$defs/evidence"}},
         "result": {
           "description": "〈定義：測試結果〉: passed 通過, failed 未通過, blocked 受阻, error 執行錯誤, untested 未測試, unsupported 不支援.",
@@ -55,10 +92,26 @@
       "properties": {
         "id": {"$ref": "#/$defs/text"},
         "channel": {"enum": ["actor", "observer"]},
-        "identity_ref": {"$ref": "#/$defs/text"}
-      }
+        "identity_ref": {"$ref": "#/$defs/text"},
+        "point": {
+          "description": "TK-IDN-010: when the observation was made: before 執行前, after 執行後, after_background 背景工作完成後.",
+          "enum": ["before", "after", "after_background"]
+        }
+      },
+      "if": {"properties": {"channel": {"const": "observer"}}, "required": ["channel"]},
+      "then": {"required": ["point"]}
     },
     "finding": {"allOf": [{"$ref": "#/$defs/common"}]},
-    "coverage": {"allOf": [{"$ref": "#/$defs/common"}]}
+    "coverage": {
+      "allOf": [{"$ref": "#/$defs/common"}],
+      "properties": {
+        "unsupported_items": {
+          "description": "Scope without a verified test method; counted in unsupported and in the denominator (AG-07).",
+          "type": "array",
+          "items": {"type": "object", "required": ["scope", "reason"],
+                    "properties": {"scope": {"$ref": "#/$defs/text"}, "reason": {"$ref": "#/$defs/text"}}}
+        }
+      }
+    }
   }
 }

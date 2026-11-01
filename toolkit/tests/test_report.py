@@ -181,3 +181,91 @@ class Evidence(unittest.TestCase):
         doc = valid_report()
         del doc['execution_records'][0]['evidence'][1]['identity_ref']
         self.assertTrue(any('identity_ref' in p for p in report.validate(doc)))
+
+
+class DenialChecks(unittest.TestCase):
+    """TK-DYN-001: a denial case passes only when all four checks were made and hold."""
+
+    # The four checks of TK-DYN-001, in the spec's order.
+    CHECKS = ['resource_and_control', 'identity', 'no_disclosure_or_change', 'response_and_side_effects']
+
+    def passed_record(self, doc):
+        return next(e for e in doc['execution_records'] if e['result'] == 'passed')
+
+    def test_passed_record_missing_any_check_is_rejected(self):
+        for check in self.CHECKS:
+            with self.subTest(removed=check):
+                doc = valid_report()
+                del self.passed_record(doc)['checks'][check]
+                problems = report.validate(doc)
+                self.assertTrue(any(check in p for p in problems), problems)
+
+    def test_passed_record_without_checks_is_rejected(self):
+        doc = valid_report()
+        del self.passed_record(doc)['checks']
+        self.assertTrue(any('checks' in p for p in report.validate(doc)))
+
+    def test_passed_record_with_a_failing_check_is_rejected(self):
+        for check in self.CHECKS:
+            with self.subTest(failing=check):
+                doc = valid_report()
+                self.passed_record(doc)['checks'][check] = False
+                problems = report.validate(doc)
+                self.assertTrue(any(check in p for p in problems), problems)
+
+    def test_failed_record_may_hold_failing_checks(self):
+        doc = valid_report()
+        failed = next(e for e in doc['execution_records'] if e['result'] == 'failed')
+        self.assertIn(False, failed['checks'].values())
+        self.assertEqual(report.validate(doc), [])
+
+    def test_check_values_are_booleans(self):
+        doc = valid_report()
+        doc['execution_records'][0]['checks']['identity'] = 'yes'
+        self.assertNotEqual(report.validate(doc), [])
+
+
+class ObservationPoints(unittest.TestCase):
+    """TK-IDN-010: the ExecutionRecord states when each observation was made."""
+
+    def observer_evidence(self, doc):
+        return next(ev for ev in doc['execution_records'][0]['evidence'] if ev['channel'] == 'observer')
+
+    def test_observation_without_a_point_is_rejected(self):
+        doc = valid_report()
+        del self.observer_evidence(doc)['point']
+        self.assertTrue(any('point' in p for p in report.validate(doc)))
+
+    def test_observation_points_of_the_spec_are_accepted(self):
+        for point in ('before', 'after', 'after_background'):  # 執行前、執行後、背景工作完成後
+            with self.subTest(point=point):
+                doc = valid_report()
+                self.observer_evidence(doc)['point'] = point
+                self.assertEqual(report.validate(doc), [])
+
+    def test_unknown_observation_point_is_rejected(self):
+        doc = valid_report()
+        self.observer_evidence(doc)['point'] = 'whenever'
+        self.assertNotEqual(report.validate(doc), [])
+
+
+class AllowedCases(unittest.TestCase):
+    """A case whose requirement allows the access (e.g. public data) passes when access was granted."""
+
+    def allowed(self, doc, granted=True):
+        e = doc['execution_records'][1]
+        e['case_kind'] = 'allowed'
+        e['checks'] = {'access_granted': granted}
+        return doc
+
+    def test_passed_allowed_case_needs_no_denial_checks(self):
+        self.assertEqual(report.validate(self.allowed(valid_report())), [])
+
+    def test_passed_allowed_case_needs_granted_access(self):
+        self.assertNotEqual(report.validate(self.allowed(valid_report(), granted=False)), [])
+
+    def test_denial_case_still_needs_its_four_checks(self):
+        doc = valid_report()
+        doc['execution_records'][1]['case_kind'] = 'denial'
+        doc['execution_records'][1]['checks'] = {'access_granted': True}
+        self.assertNotEqual(report.validate(doc), [])

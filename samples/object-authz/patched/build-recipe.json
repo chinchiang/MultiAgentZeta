@@ -2,7 +2,7 @@
   "recipe_version": "1",
   "sample": "object-authz/patched",
   "source_build": {
-    "source_digest": "sha256:b4d7d9b9867dfcab3e2dea95172e124209a80dc03eb6589892b739d3f6787a49",
+    "source_digest": "sha256:1e208d60ac77860be6ff91d86f24baa42fca4d7059c9768c629638b5313ff3c8",
     "lockfiles": [],
     "tools": [
       "supabase-cli"

@@ -34,3 +34,6 @@ insert into public.documents (id, tenant_id, owner_id, title, body, shared) valu
    'a0000000-0000-4000-8000-00000000a11c', 'MARK-A-ALICE-SHARED', 'alice shared note', true),
   ('d0000000-0000-4000-8000-0000000000b1', '7e000000-0000-4000-8000-00000000000b',
    'b0000000-0000-4000-8000-0000000ca201', 'MARK-B-CAROL-PRIVATE', 'carol private note', false);
+
+insert into public.announcements (id, title, body) values
+  ('a1000000-0000-4000-8000-000000000001', 'MARK-PUBLIC-ANNOUNCEMENT', 'maintenance window on Sunday');

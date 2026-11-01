@@ -65,6 +65,7 @@ class Environment:
     anon_key: str = ''
     tokens: dict = field(default_factory=dict)  # identity name -> {'access_token', 'refresh_token'}
     observer: dict = field(default_factory=dict)  # {'role', 'password'}; control area only (TK-IDN-005)
+    api_keys: dict = field(default_factory=dict)  # public API key format -> key
     usable: bool = True
 
     @property
@@ -261,6 +262,9 @@ def _read_status(env):
         raise _Stop(Blocked('service_init', 'cannot read the stack status', _tail(r.stdout + r.stderr)))
     env.api_url = status.get('API_URL', '')
     env.anon_key = status.get('ANON_KEY') or status.get('PUBLISHABLE_KEY', '')
+    # Public API keys in both formats (TK-DYN-004): legacy anon JWT and sb_publishable_.
+    env.api_keys = {f: k for f, k in (('anon-jwt', status.get('ANON_KEY')),
+                                      ('publishable', status.get('PUBLISHABLE_KEY'))) if k}
     if not env.api_url or not env.anon_key:
         raise _Stop(Blocked('service_init', 'stack status lacks the API URL or anon key'))
 

@@ -35,3 +35,18 @@ create policy "members read their tenants" on public.tenants
 create policy "users read their memberships" on public.memberships
   for select to authenticated
   using (user_id = auth.uid());
+
+-- Public data: announcements are readable by anyone, signed in or not. USING (true) is the
+-- legitimate read policy here (TK-DYN-004), not a vulnerability.
+create table public.announcements (
+  id uuid primary key default gen_random_uuid(),
+  title text not null,
+  body text not null
+);
+
+alter table public.announcements enable row level security;
+grant select on public.announcements to anon, authenticated;
+
+create policy "anyone reads announcements" on public.announcements
+  for select to anon, authenticated
+  using (true);

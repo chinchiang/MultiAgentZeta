@@ -2,7 +2,7 @@
   "recipe_version": "1",
   "sample": "object-authz/vulnerable",
   "source_build": {
-    "source_digest": "sha256:104e40e2e1c484fad527076ff3c44ca85f033b9255de2080ff3cb1d32e763c78",
+    "source_digest": "sha256:75785e122335c64f0efcbff6722c82754a5f519eca83663b7e03acf9cfc13503",
     "lockfiles": [],
     "tools": [
       "supabase-cli"

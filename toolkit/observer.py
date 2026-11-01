@@ -28,13 +28,18 @@ def _query(env, sql):
 
 
 def document_row_state(env, marker):
-    """Template document-row-state-v1: existence, sharing flag and a digest of the row."""
+    """Template document-row-state-v1: the target row (existence, sharing flag, digest) and a digest
+    of the whole documents table, so that changes to other rows are seen as side effects."""
     if not MARKER.match(marker):
         raise ObservationFailed(f'invalid resource marker {marker!r}')
     rows = _query(env, "select owner_id, tenant_id, shared, md5(title || body) from public.documents "
                        f"where title = '{marker}'")
+    table = _query(env, "select count(*), coalesce(md5(string_agg(id::text || owner_id || tenant_id || title "
+                        "|| body || shared::text, '|' order by id)), '') from public.documents")
+    state = {'template': 'document-row-state-v1', 'table_rows': int(table[0][0]),
+             'table_digest': hashlib.sha256(table[0][1].encode()).hexdigest()}
     if not rows:
-        return {'template': 'document-row-state-v1', 'resource_exists': False}
+        return {**state, 'resource_exists': False}
     owner, tenant, shared, digest = rows[0]
-    return {'template': 'document-row-state-v1', 'resource_exists': True, 'shared': shared == 't',
+    return {**state, 'resource_exists': True, 'shared': shared == 't',
             'state_digest': hashlib.sha256(f'{owner}|{tenant}|{shared}|{digest}'.encode()).hexdigest()}

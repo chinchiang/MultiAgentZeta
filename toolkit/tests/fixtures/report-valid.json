@@ -26,8 +26,10 @@
      "actor_ref": "same_tenant_non_owner", "resource_ref": "MARK-A-ALICE-PRIVATE",
      "started_at": "2026-11-01T10:00:01Z", "ended_at": "2026-11-01T10:00:02Z",
      "result": "failed", "error": null,
+     "checks": {"resource_and_control": true, "identity": true, "no_disclosure_or_change": false,
+                "response_and_side_effects": false},
      "evidence": [
-       {"id": "ev-0001", "channel": "observer", "identity_ref": "observer",
+       {"id": "ev-0001", "channel": "observer", "identity_ref": "observer", "point": "before",
         "observation": {"resource_exists": true, "shared": false}},
        {"id": "ev-0002", "channel": "actor", "identity_ref": "owner",
         "request": {"method": "GET", "path": "/rest/v1/documents?select=title&title=eq.MARK-A-ALICE-PRIVATE"},
@@ -42,8 +44,10 @@
      "actor_ref": "other_tenant_user", "resource_ref": "MARK-A-ALICE-PRIVATE",
      "started_at": "2026-11-01T10:00:03Z", "ended_at": "2026-11-01T10:00:04Z",
      "result": "passed", "error": null,
+     "checks": {"resource_and_control": true, "identity": true, "no_disclosure_or_change": true,
+                "response_and_side_effects": true},
      "evidence": [
-       {"id": "ev-0004", "channel": "observer", "identity_ref": "observer",
+       {"id": "ev-0004", "channel": "observer", "identity_ref": "observer", "point": "before",
         "observation": {"resource_exists": true, "shared": false}},
        {"id": "ev-0005", "channel": "actor", "identity_ref": "other_tenant_user",
         "request": {"method": "GET", "path": "/rest/v1/documents?select=title&title=eq.MARK-A-ALICE-PRIVATE"},
