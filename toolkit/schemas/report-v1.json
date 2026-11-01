@@ -11,8 +11,24 @@
       "then": {"properties": {"execution_records": {"items": {"properties": {"result": {"enum": ["passed", "failed"]}}}}}}
     }
   ],
-  "required": ["status", "execution_records", "findings", "coverage"],
+  "required": ["status", "stages", "execution_records", "findings", "coverage"],
   "properties": {
+    "stages": {
+      "description": "TK-RUN-001, 〈定義：工作階段〉: preflight 前置檢查, static_analysis 靜態與架構分析, model_review 模型審查, threat_planning 威脅與測試規劃, dynamic_execution 動態執行, judgement_report 判定與報告. validate() also requires every stage to be listed.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["stage", "status"],
+        "properties": {
+          "stage": {"enum": ["preflight", "static_analysis", "model_review", "threat_planning",
+                             "dynamic_execution", "judgement_report"]},
+          "status": {"enum": ["completed", "failed", "blocked", "not_run"]},
+          "reason": {"$ref": "#/$defs/text"}
+        },
+        "if": {"properties": {"status": {"not": {"const": "completed"}}}},
+        "then": {"required": ["reason"]}
+      }
+    },
     "status": {
       "description": "Overall run status (TK-RUN-002): pending 待執行, running 執行中, completed 完整完成, partial 部分完成, blocked 受阻, failed 失敗, cancelled 已取消. completed means every planned item got a definite result; it does not mean the application has no vulnerabilities.",
       "enum": ["pending", "running", "completed", "partial", "blocked", "failed", "cancelled"]

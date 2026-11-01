@@ -498,3 +498,15 @@ class ObserverRoleEnv(unittest.TestCase):
             with self.subTest(role=role):
                 ok, out = self.query(f'set role {role}')
                 self.assertFalse(ok, out)
+
+
+class ResetWithoutRecovery(unittest.TestCase):
+    """復原方式: a recipe that declares no reset is never reset (nothing is touched)."""
+
+    def test_reset_refuses_when_the_recipe_declares_none(self):
+        recipe = full_recipe()
+        recipe['snapshot_reset']['reset_scope'] = 'none'
+        env = e1.Environment(Path('.'), 'maz-never-started', recipe, cli='/nonexistent/supabase')
+        result = e1.reset(env)
+        self.assertEqual((type(result), result.step), (e1.Blocked, 'snapshot_reset'))
+        self.assertIn('no reset', result.reason)

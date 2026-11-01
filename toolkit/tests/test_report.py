@@ -269,3 +269,36 @@ class AllowedCases(unittest.TestCase):
         doc['execution_records'][1]['case_kind'] = 'denial'
         doc['execution_records'][1]['checks'] = {'access_granted': True}
         self.assertNotEqual(report.validate(doc), [])
+
+
+class Stages(unittest.TestCase):
+    """TK-RUN-001: the report records every stage of 〈定義：工作階段〉 and its status."""
+
+    # 前置檢查、靜態與架構分析、模型審查、威脅與測試規劃、動態執行、判定與報告.
+    STAGES = ['preflight', 'static_analysis', 'model_review', 'threat_planning', 'dynamic_execution',
+              'judgement_report']
+
+    def test_report_without_stages_is_rejected(self):
+        doc = valid_report()
+        del doc['stages']
+        self.assertTrue(any('stages' in p for p in report.validate(doc)))
+
+    def test_every_spec_stage_must_be_listed(self):
+        for stage in self.STAGES:
+            with self.subTest(missing=stage):
+                doc = valid_report()
+                doc['stages'] = [s for s in doc['stages'] if s['stage'] != stage]
+                problems = report.validate(doc)
+                self.assertTrue(any(stage in p for p in problems), problems)
+
+    def test_unknown_stage_status_is_rejected(self):
+        doc = valid_report()
+        doc['stages'][0]['status'] = 'probably-fine'
+        self.assertNotEqual(report.validate(doc), [])
+
+    def test_stage_that_did_not_complete_needs_a_reason(self):
+        for status in ('failed', 'blocked', 'not_run'):
+            with self.subTest(status=status):
+                doc = valid_report()
+                doc['stages'][4] = {'stage': 'dynamic_execution', 'status': status}
+                self.assertNotEqual(report.validate(doc), [])

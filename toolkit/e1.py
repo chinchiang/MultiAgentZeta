@@ -494,6 +494,8 @@ def reset(env, matrix=None):
     Returns a fresh Ready (the reset invalidates every session). If anything
     fails, the environment is isolated (stopped) and must not be reused.
     """
+    if env.recipe['snapshot_reset'].get('reset_scope') == 'none':
+        return Blocked('snapshot_reset', 'the BuildRecipe declares no reset (reset_scope "none"); nothing was touched')
     if not env.usable:
         return Blocked('snapshot_reset', 'environment was isolated earlier and must not be reused')
     matrix = load_matrix(matrix)

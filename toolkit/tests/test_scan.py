@@ -65,6 +65,15 @@ ALL_PASSED = {t['test_id']: 'passed' for t in TESTS}
 DENIAL_TESTS = [t for t in TESTS if t['template_id'] in scan.DENIAL_TEMPLATES]
 
 
+# 〈定義：必要輸入〉 受測範圍: endpoints, allowed operations and data scope.
+SCOPE = {'endpoints': ['/rest/v1/documents', '/rest/v1/announcements', '/auth/v1/user'],
+         'allowed_operations': ['GET', 'POST', 'PATCH', 'DELETE'],
+         'data_scope': 'synthetic sample data of samples/object-authz only'}
+# 〈定義：必要輸入〉 執行限制: cost, time, request volume, concurrency, model providers, network allow-list.
+LIMITS = {'max_cost_usd': 0, 'max_duration_seconds': 3600, 'max_requests': 500, 'max_concurrency': 1,
+          'model_providers': [], 'network_allowlist': ['127.0.0.1']}
+
+
 def manifest(version):
     from toolkit import e1
     project = SAMPLES / version
@@ -74,6 +83,8 @@ def manifest(version):
         'commit': 'test-commit-0001',
         'target': {'project': str(project), 'source_digest': e1.source_digest(project)},
         'requirements': [copy.deepcopy(REQUIREMENT), copy.deepcopy(PUBLIC_REQUIREMENT)],
+        'scope': copy.deepcopy(SCOPE),
+        'limits': copy.deepcopy(LIMITS),
         'tests': copy.deepcopy(TESTS),
     }
 
@@ -412,4 +423,229 @@ class MixedPlanEnv(unittest.TestCase):
         blocked = next(e for e in rep['execution_records'] if e['test_id'] == 'READ-raw-sql')
         self.assertEqual(blocked['evidence'], [])
         self.assertIn('observation_ref', blocked['error'])
+        self.assertEqual(rep['status'], 'partial')
+
+
+class RequiredInputs(unittest.TestCase):
+    """TK-SCP-002: a missing required input is handled as 〈定義：必要輸入〉 says; nothing is started."""
+
+    def assert_blocked_before_start(self, m, reason_part):
+        rep = scan.run(m).report
+        self.assertEqual(report.validate(rep), [])
+        self.assertEqual(rep['status'], 'blocked')
+        self.assertIn(reason_part, rep['status_reason'])
+        self.assertNotIn('environment', rep)
+        self.assertEqual(set(results(rep).values()), {'blocked'})
+
+    def test_missing_scope_blocks_dynamic_testing(self):
+        m = manifest('vulnerable')
+        del m['scope']
+        self.assert_blocked_before_start(m, 'scope')
+
+    def test_each_part_of_the_scope_is_required(self):
+        for part in SCOPE:
+            with self.subTest(missing=part):
+                m = manifest('vulnerable')
+                del m['scope'][part]
+                self.assert_blocked_before_start(m, f'scope.{part}')
+
+    def test_missing_limits_block_the_run(self):
+        m = manifest('vulnerable')
+        del m['limits']
+        self.assert_blocked_before_start(m, 'limits')
+
+    def test_each_limit_is_required_and_no_unlimited_default_is_used(self):
+        for name in LIMITS:
+            with self.subTest(missing=name):
+                m = manifest('vulnerable')
+                del m['limits'][name]
+                self.assert_blocked_before_start(m, f'limits.{name}')
+
+    def test_limits_must_be_bounded(self):
+        invalid = {'max_duration_seconds': [0, -1, None, 'unlimited'], 'max_requests': [0, 1.5, None],
+                   'max_concurrency': [0, None], 'max_cost_usd': [-1, None, 'unlimited'],
+                   'model_providers': [None, 'any'], 'network_allowlist': [[], None, '*']}
+        for name, values in invalid.items():
+            for value in values:
+                with self.subTest(limit=name, value=value):
+                    m = manifest('vulnerable')
+                    m['limits'][name] = value
+                    self.assert_blocked_before_start(m, f'limits.{name}')
+
+
+def preflight_manifest(d):
+    """A full manifest aimed at an empty project. Preflight decisions do not depend on the project,
+    and without a preflight check the run stops at the BuildRecipe step instead (fast, no Docker)."""
+    from toolkit import e1
+    m = manifest('vulnerable')
+    m['target'] = {'project': d, 'source_digest': e1.source_digest(d)}
+    return m
+
+
+class UnknownRequirement(unittest.TestCase):
+    """需求不明: a test whose requirement is missing or unconfirmed is not run and never passes (TK-REQ-005)."""
+
+    def errors(self, m):
+        rep = scan.run(m).report
+        self.assertEqual(report.validate(rep), [])
+        self.assertEqual(rep['stages'][0], {'stage': 'preflight', 'status': 'blocked',
+                                            'reason': rep['status_reason']})
+        return {e['test_id']: (e['result'], e['error']) for e in rep['execution_records']}
+
+    def test_test_citing_an_unknown_requirement_is_blocked(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            m = preflight_manifest(d)
+            for t in m['tests']:
+                t['requirement_id'] = 'REQ-NOT-IN-THE-MANIFEST'
+            for result, error in self.errors(m).values():
+                self.assertEqual(result, 'blocked')
+                self.assertIn('REQ-NOT-IN-THE-MANIFEST', error)
+
+    def test_test_citing_an_unconfirmed_requirement_is_blocked(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            m = preflight_manifest(d)
+            for r in m['requirements']:
+                del r['confirmation']
+            for result, error in self.errors(m).values():
+                self.assertEqual(result, 'blocked')
+                self.assertIn('not confirmed', error)
+
+
+class UnsupportedIdentity(unittest.TestCase):
+    """〈定義：必要輸入〉 測試身分: a matrix cell the recipe has no identity for is a coverage gap."""
+
+    def test_identity_missing_from_the_recipe_is_unsupported(self):
+        import tempfile
+        from toolkit import e1
+        from toolkit.tests.test_e1 import failing_copy
+        with tempfile.TemporaryDirectory() as d:
+            # The untrusted tool makes the BuildRecipe fail fast if the run ever gets that far.
+            src = failing_copy(d, recipe_change=lambda r: r['source_build'].update(tools=['no-such-tool']))
+            m = manifest('vulnerable')
+            m['target'] = {'project': str(src), 'source_digest': e1.source_digest(src)}
+            for t in m['tests']:
+                t['actor_ref'] = 'tenant_admin'
+            rep = scan.run(m).report
+        self.assertEqual(report.validate(rep), [])
+        for e in rep['execution_records']:
+            self.assertEqual(e['result'], 'unsupported', e)
+            self.assertIn('tenant_admin', e['error'])
+        gaps = {u['scope'] for u in rep['coverage']['unsupported_items']}
+        self.assertIn('identity:tenant_admin', gaps)
+
+
+class NoRecovery(unittest.TestCase):
+    """〈定義：必要輸入〉 復原方式: a test that cannot be restored safely is not run."""
+
+    def test_write_cases_are_not_run_without_a_reset(self):
+        import tempfile
+        from toolkit import e1
+        from toolkit.tests.test_e1 import failing_copy
+
+        def no_reset(r):
+            r['snapshot_reset']['reset_scope'] = 'none'
+            r['source_build']['tools'] = ['no-such-tool']  # fail fast if the run ever gets that far
+        with tempfile.TemporaryDirectory() as d:
+            src = failing_copy(d, recipe_change=no_reset)
+            m = manifest('vulnerable')
+            m['target'] = {'project': str(src), 'source_digest': e1.source_digest(src)}
+            m['tests'] = [t for t in m['tests'] if scan.DENIAL_TEMPLATES.get(t['template_id'], {}).get('writes')]
+            rep = scan.run(m).report
+        self.assertEqual(report.validate(rep), [])
+        self.assertEqual(len(rep['execution_records']), 6)
+        for e in rep['execution_records']:
+            self.assertEqual(e['result'], 'blocked', e)
+            self.assertIn('restored safely', e['error'])
+
+
+class StagesOfBlockedRuns(unittest.TestCase):
+    """TK-RUN-001, 〈定義：工作階段〉 失敗處理: a failed stage stops dependent work and says so."""
+
+    NOT_IMPLEMENTED = ('static_analysis', 'model_review', 'threat_planning')
+
+    def stages(self, rep):
+        return {s['stage']: s['status'] for s in rep['stages']}
+
+    def test_preflight_failure_stops_dependent_work(self):
+        m = manifest('vulnerable')
+        m['target']['source_digest'] = 'sha256:' + '0' * 64
+        stages = self.stages(scan.run(m).report)
+        self.assertEqual((stages['preflight'], stages['dynamic_execution'], stages['judgement_report']),
+                         ('blocked', 'not_run', 'completed'))
+        self.assertEqual({stages[s] for s in self.NOT_IMPLEMENTED}, {'not_run'})
+
+    def test_environment_failure_blocks_dynamic_execution(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            stages = self.stages(scan.run(preflight_manifest(d)).report)  # empty project: no BuildRecipe
+        self.assertEqual((stages['preflight'], stages['dynamic_execution'], stages['judgement_report']),
+                         ('completed', 'blocked', 'completed'))
+
+
+@needs_env
+class UndeterminableCasesEnv(unittest.TestCase):
+    """TK-VAL-001 無法判定案例 and TK-IDN-009: lost login, unavailable observer and timeouts never pass.
+
+    The faults are injected on purpose (self-validation); the records say so.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        m = manifest('patched')
+        read = next(t for t in m['tests'] if t['test_id'] == 'READ-other-tenant')
+        m['tests'] = [
+            dict(read, test_id='READ-normal'),
+            dict(read, test_id='READ-observer-down', fault='observer-unavailable'),
+            dict(read, test_id='READ-timeout', limits={'timeout_seconds': 0.000001}),
+            dict(read, test_id='READ-session-revoked', fault='session-revoked'),  # last: the actor stays logged out
+        ]
+        cls.report = scan.run(m).report
+        cls.by_id = {e['test_id']: e for e in cls.report['execution_records']}
+
+    def test_report_is_valid_and_partial(self):
+        self.assertEqual(report.validate(self.report), [])
+        self.assertEqual(self.report['status'], 'partial')
+
+    def test_normal_case_still_passes(self):
+        self.assertEqual(self.by_id['READ-normal']['result'], 'passed')
+
+    def test_revoked_session_is_blocked_on_the_identity_check(self):
+        e = self.by_id['READ-session-revoked']
+        self.assertEqual((e['result'], e['checks']['identity'], e['fault']), ('blocked', False, 'session-revoked'))
+
+    def test_unavailable_observer_blocks_the_case(self):
+        e = self.by_id['READ-observer-down']
+        self.assertEqual((e['result'], e['fault']), ('blocked', 'observer-unavailable'))
+        self.assertIn('observation failed', e['error'])
+
+    def test_timeout_is_an_execution_error(self):
+        e = self.by_id['READ-timeout']
+        self.assertEqual(e['result'], 'error')
+        self.assertIn('timeout', e['error'])
+
+    def test_stages_record_the_run(self):
+        stages = {s['stage']: s['status'] for s in self.report['stages']}
+        self.assertEqual((stages['preflight'], stages['dynamic_execution'], stages['judgement_report']),
+                         ('completed', 'completed', 'completed'))
+
+
+@needs_env
+class NoRecoveryMixedPlanEnv(unittest.TestCase):
+    """復原方式 missing: reads still run, writes are not run; the run is partial."""
+
+    def test_reads_run_and_writes_are_blocked(self):
+        import tempfile
+        from toolkit import e1
+        from toolkit.tests.test_e1 import failing_copy
+        with tempfile.TemporaryDirectory() as d:
+            src = failing_copy(d, version='patched',
+                               recipe_change=lambda r: r['snapshot_reset'].update(reset_scope='none'))
+            m = manifest('patched')
+            m['target'] = {'project': str(src), 'source_digest': e1.source_digest(src)}
+            m['tests'] = [t for t in m['tests'] if t['test_id'] in ('READ-same-tenant', 'UPDATE-same-tenant')]
+            rep = scan.run(m).report
+        self.assertEqual(report.validate(rep), [])
+        self.assertEqual(results(rep), {'READ-same-tenant': 'passed', 'UPDATE-same-tenant': 'blocked'})
         self.assertEqual(rep['status'], 'partial')

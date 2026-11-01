@@ -8,6 +8,14 @@
   "status": "completed",
   "manifest": {"id": "manifest-object-authz-vulnerable", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"},
   "environment": {"mode": "E1", "profile_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"},
+  "stages": [
+    {"stage": "preflight", "status": "completed"},
+    {"stage": "static_analysis", "status": "not_run", "reason": "not implemented in this toolkit version"},
+    {"stage": "model_review", "status": "not_run", "reason": "not implemented in this toolkit version"},
+    {"stage": "threat_planning", "status": "not_run", "reason": "not implemented in this toolkit version"},
+    {"stage": "dynamic_execution", "status": "completed"},
+    {"stage": "judgement_report", "status": "completed"}
+  ],
   "requirements": [
     {"id": "REQ-DOCUMENT-OWNER-READ",
      "statement": "Only the owner may read a document that is not shared.",

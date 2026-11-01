@@ -31,8 +31,14 @@ def _records(doc):
         yield 'coverage', doc['coverage']
 
 
+STAGES = ('preflight', 'static_analysis', 'model_review', 'threat_planning', 'dynamic_execution', 'judgement_report')
+
+
 def _cross_record_problems(doc):
     problems = []
+    listed = {s.get('stage') for s in _list(doc, 'stages') if isinstance(s, dict)}
+    if isinstance(doc, dict) and 'stages' in doc:
+        problems += [f'stages: stage {s!r} of 〈定義：工作階段〉 is not listed' for s in STAGES if s not in listed]
     if isinstance(doc, dict):
         for label, r in _records(doc):
             for field in ('run_id', 'commit'):
