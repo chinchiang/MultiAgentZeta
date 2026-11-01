@@ -2,11 +2,11 @@
 
 Before editing `docs/toolkit/`, `GLOSSARY.md`, or `docs/adr/`, read `docs/toolkit/README.md`: document roles, shared version rule, `TK-` requirement format, per-revision checklist. Terms follow `GLOSSARY.md`.
 
-Before committing doc changes, run `python -I docs/toolkit/tools/build.py --check` and review the diff against `CODING_STANDARDS.md`. The pre-commit hook needs `git config core.hooksPath .githooks` once per clone.
+Before committing doc changes, run `python3 -I docs/toolkit/tools/build.py --check` and review the diff against `CODING_STANDARDS.md`. The pre-commit hook needs `git config core.hooksPath .githooks` once per clone.
 
 ## Toolkit prototype
 
-Code lives in `toolkit/`, samples in `samples/`. Fast tests: `python -I -m unittest discover -s toolkit/tests -t .` (install from the hash-pinned `toolkit/requirements.lock`). Environment tests need `MAZ_ENV_TESTS=1` and Docker.
+Code lives in `toolkit/`, samples in `samples/`. Fast tests: `python3 -I -m unittest discover -s toolkit/tests -t .` (install from the hash-pinned `toolkit/requirements.lock`). Environment tests need `MAZ_ENV_TESTS=1` and Docker.
 
 ## Agent skills
 

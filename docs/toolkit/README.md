@@ -17,13 +17,13 @@ v1.3.6 以前的單一文件 `docs/research/vibe-coding-multiagent-testing-toolk
 
 ## 每輪修訂的檢查清單
 
-1. 四份文件的檔頭版本號與修訂日期一起更新，規格第 0.4 節的版本句也一起改。
+1. 執行 `python3 -I docs/toolkit/tools/build.py --bump v<新版本>`：一次更新四份文件檔頭的版本號與修訂日期（預設為今天的臺灣時間，可用 `--date YYYY-MM-DD` 指定）及規格第 0.4 節的版本句，並重新產生第 3 步的產生結果。新版本須比目前版本新；文件未通過檢查時不升版。
 2. 新條文接續該領域的最後一個編號；在 `review-log.md` 第 4 章加一列修訂紀錄。
-3. 改完條文後執行 `python -I docs/toolkit/tools/build.py`，自動產生規格的驗收群組表（第 14 章）、附錄 A 追溯表與 `v0.1-scope.md`；不要手動編輯這三處。工具同時執行下方「自動檢查」的全部檢查。
+3. 改完條文後執行 `python3 -I docs/toolkit/tools/build.py`，自動產生規格的驗收群組表（第 14 章）、附錄 A 追溯表與 `v0.1-scope.md`；不要手動編輯這三處。工具同時執行下方「自動檢查」的全部檢查。
 4. 新條文的驗收群組預設依領域決定；要改歸其他群組，或新增群組、新增領域，編輯 `tools/groups.json` 後再執行第 3 步。
 5. 新參考資料接續 [R] 編號，寫進 `design-notes.md` 第 7 章。
 6. 依 repo 根目錄的 [`CODING_STANDARDS.md`](../../CODING_STANDARDS.md) 審查本輪 diff。
-7. `python -I docs/toolkit/tools/build.py --check` 結束碼為 0，且 `CODING_STANDARDS.md` 每條規則都有結論，才提交。
+7. `python3 -I docs/toolkit/tools/build.py --check` 結束碼為 0，且 `CODING_STANDARDS.md` 每條規則都有結論，才提交。
 
 ## 版本規則
 
@@ -55,7 +55,7 @@ v1.3.6 以前的單一文件 `docs/research/vibe-coding-multiagent-testing-toolk
 
 ## 自動檢查
 
-`python -I docs/toolkit/tools/build.py --check` 是這組文件的檢查指令，出錯時以結束碼 2 停止，產生結果過期時以結束碼 1 停止；有任何錯誤時不寫入任何檔案；錯誤的回報方式見 `tools/build.py` 開頭說明。它檢查：
+`python3 -I docs/toolkit/tools/build.py --check` 是這組文件的檢查指令，出錯時以結束碼 2 停止，產生結果過期時以結束碼 1 停止；有任何錯誤時不寫入任何檔案；錯誤的回報方式見 `tools/build.py` 開頭說明。它檢查：
 
 - 條文區塊：欄位齊全且不空白、等級與 v0.1 值合法、「須」「不得」條文的驗收不是「—」、編號不重複也不跳號。
 - 引用：規格與其他文件（設計說明、審查處置紀錄、本檔、`GLOSSARY.md`、ADR、研究筆記）中的 `TK-` 引用都指向存在的條文；這些文件、`docs/agents/` 與 `toolkit/` 的程式和 schema 中的〈定義：〇〇〉引用，都有對應的「定義：〇〇」小節（`samples/` 不檢查）；[R] 參考資料在設計說明中只定義一次、編號從 1 連續，各文件引用的 [R] 都有定義。
@@ -68,4 +68,4 @@ v1.3.6 以前的單一文件 `docs/research/vibe-coding-multiagent-testing-toolk
 - **提交前 hook**：`.githooks/pre-commit`。每個複本執行一次 `git config core.hooksPath .githooks` 後啟用。hook 檢查的是工作目錄，不是暫存區：只暫存部分修改時，檢查通過不代表提交的內容通過。
 - **CI**：`.github/workflows/docs-check.yml`，在每次 push 與 PR 執行，並先跑工具本身的測試。直接推 `main` 時 CI 是事後警報；事前攔截靠 hook。
 
-工具本身的測試在 `tools/test_build.py`，用 `python -I -m unittest discover -s docs/toolkit/tools` 執行；修改 `build.py` 時依 `CODING_STANDARDS.md` 第 14 條補測試。
+工具本身的測試在 `tools/test_build.py`，用 `python3 -I -m unittest discover -s docs/toolkit/tools` 執行；修改 `build.py` 時依 `CODING_STANDARDS.md` 第 14 條補測試。

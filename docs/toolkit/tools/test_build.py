@@ -1,7 +1,7 @@
 """Tests for build.py, through its interface: check_docs(snapshot).
 
 Run (from anywhere):
-  python -I -m unittest discover -s docs/toolkit/tools -v
+  python3 -I -m unittest discover -s docs/toolkit/tools -v
 """
 import json
 import sys
@@ -68,8 +68,8 @@ def make(reqs=None, cfg=None, **files):
     reqs = DEFAULT_REQS if reqs is None else reqs
     snap = {
         build.SPEC: SPEC.format(reqs='\n'.join(REQ.format(**r) for r in reqs)),
-        build.DESIGN: '# 設計說明\n\n> **版本**：v9.9.9\n\n見 [R1]。\n\n- **[R1]** 參考資料。\n',
-        build.REVIEW: '# 審查處置紀錄\n\n> **版本**：v9.9.9\n',
+        build.DESIGN: '# 設計說明\n\n> **版本**：v9.9.9\n> **修訂日期**：2026-01-01（臺灣時間）\n\n見 [R1]。\n\n- **[R1]** 參考資料。\n',
+        build.REVIEW: '# 審查處置紀錄\n\n> **版本**：v9.9.9\n> **修訂日期**：2026-01-01（臺灣時間）\n',
         build.CONFIG: json.dumps(CONFIG if cfg is None else cfg, ensure_ascii=False),
     }
     for key, text in files.items():
@@ -297,6 +297,76 @@ class Versions(unittest.TestCase):
         for f in build.VERSIONED:
             snap[f] = snap[f].replace('v9.9.9', 'v9.9.10')
         self.assertEqual(set(build.check_docs(snap).updates), {build.SCOPE})
+
+
+class Bump(unittest.TestCase):
+    """bump(): a new revision's version and date, then the regenerated outputs."""
+
+    def bumped(self, version='v9.9.10', date='2026-02-03', snap=None):
+        return build.bump(regenerated(make()) if snap is None else snap, version, date)
+
+    def test_bump_sets_every_header_and_the_version_sentence(self):
+        result = self.bumped()
+        self.assertEqual(result.problems, [])
+        self.assertEqual(set(result.updates), {build.SPEC, build.DESIGN, build.REVIEW, build.SCOPE})
+        for f in (build.SPEC, build.DESIGN, build.REVIEW, build.SCOPE):
+            with self.subTest(file=f):
+                text = result.updates[f]
+                self.assertIn('> **版本**：v9.9.10', text)
+                self.assertIn('> **修訂日期**：2026-02-03（臺灣時間）', text)
+                self.assertNotIn('v9.9.9', text)
+        self.assertIn('本文件 v9.9.10 表示設計文件的修訂；不代表工具包軟體已達 v9.9.10。', result.updates[build.SPEC])
+        after = build.check_docs({**regenerated(make()), **result.updates})
+        self.assertEqual((after.problems, after.updates), ([], {}))
+
+    def test_bump_compares_versions_numerically(self):
+        self.assertEqual(self.bumped(version='v10.0.0').problems, [])
+
+    def test_version_must_be_well_formed(self):
+        for version in ('1.4.14', 'v1.4', 'v1.4.14a', ''):
+            with self.subTest(version=version):
+                result = self.bumped(version=version)
+                self.assertEqual({p.rule for p in result.problems}, {'bump-version'})
+                self.assertEqual(result.updates, {})
+
+    def test_version_must_be_newer(self):
+        for version in ('v9.9.9', 'v9.9.8', 'v9.8.10'):
+            with self.subTest(version=version):
+                self.assertEqual({p.rule for p in self.bumped(version=version).problems}, {'bump-version'})
+
+    def test_date_must_be_a_real_date(self):
+        for date in ('2026-2-3', '2026-02-30', '', '2026/02/03'):
+            with self.subTest(date=date):
+                self.assertEqual({p.rule for p in self.bumped(date=date).problems}, {'bump-date'})
+
+    def test_a_missing_date_header_stops_the_bump(self):
+        snap = regenerated(make())
+        snap[build.REVIEW] = '# 審查處置紀錄\n\n> **版本**：v9.9.9\n'
+        result = self.bumped(snap=snap)
+        self.assertEqual({(p.rule, p.file) for p in result.problems}, {('header-missing', build.REVIEW)})
+        self.assertEqual(result.updates, {})
+
+    def test_a_snapshot_that_fails_the_check_is_not_bumped(self):
+        snap = regenerated(make())
+        snap[build.DESIGN] = snap[build.DESIGN].replace('v9.9.9', 'v9.9.8')
+        self.assertEqual({p.rule for p in self.bumped(snap=snap).problems}, {'version-mismatch'})
+
+    def test_command_line_writes_the_bump(self):
+        import contextlib, io, tempfile
+        with tempfile.TemporaryDirectory() as d:
+            for path, text in regenerated(make()).items():
+                Path(d, path).parent.mkdir(parents=True, exist_ok=True)
+                Path(d, path).write_text(text, encoding='utf-8')
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(build.main(['--bump', 'v9.9.10', '--date', '2026-02-03'], repo=Path(d)), 0)
+            self.assertIn('v9.9.10', Path(d, build.DESIGN).read_text(encoding='utf-8'))
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(build.main(['--bump', 'v9.9.11', '--check'], repo=Path(d)), 2)
+                self.assertEqual(build.main(['--bump', 'v9.9.11', '--date'], repo=Path(d)), 2)
+            self.assertIn('[bump-check]', err.getvalue())
+            self.assertIn('[bump-date]', err.getvalue())
+            self.assertIn('v9.9.10', Path(d, build.DESIGN).read_text(encoding='utf-8'))
 
 
 class LineEndings(unittest.TestCase):

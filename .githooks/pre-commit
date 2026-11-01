@@ -8,7 +8,7 @@ if [ -z "$PY" ]; then
 fi
 "$PY" -I docs/toolkit/tools/build.py --check || {
   echo "pre-commit: docs check failed. Fix the error above, or run" >&2
-  echo "  python -I docs/toolkit/tools/build.py" >&2
+  echo "  python3 -I docs/toolkit/tools/build.py" >&2
   echo "to regenerate stale outputs, then stage the changes again." >&2
   exit 1
 }

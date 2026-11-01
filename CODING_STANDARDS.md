@@ -1,6 +1,6 @@
 # 審查標準
 
-審查每輪修訂的 diff 時，依 diff 涉及的範圍，逐條套用對應章節的規則；每條規則都給結論：符合、違反（附位置與原文）或不適用（附一句理由）。本檔只收需要判斷、工具查不到的規則；欄位、編號、引用、版本與換行等機械性檢查由 `python -I docs/toolkit/tools/build.py --check` 負責（見 `docs/toolkit/README.md`「自動檢查」）。
+審查每輪修訂的 diff 時，依 diff 涉及的範圍，逐條套用對應章節的規則；每條規則都給結論：符合、違反（附位置與原文）或不適用（附一句理由）。本檔只收需要判斷、工具查不到的規則；欄位、編號、引用、版本與換行等機械性檢查由 `python3 -I docs/toolkit/tools/build.py --check` 負責（見 `docs/toolkit/README.md`「自動檢查」）。
 
 - **文件**（第一部分）：`docs/toolkit/` 的四份文件、`GLOSSARY.md` 與 `docs/adr/`。
 - **程式**（第二部分）：`toolkit/` 與 `docs/toolkit/tools/`。
@@ -72,4 +72,4 @@ diff 新增或修改的每個例外處理、提早返回與預設值分支，結
 
 ## 14. 檢查規則一正一反
 
-`docs/toolkit/tools/build.py` 新增或修改的每條檢查規則，在 `tools/test_build.py` 都有一個通過的案例與一個觸發該規則的案例，測試透過 `check_docs` 入口進行。
+`docs/toolkit/tools/build.py` 新增或修改的每條檢查規則，在 `tools/test_build.py` 都有一個通過的案例與一個觸發該規則的案例，測試透過 `check_docs` 入口進行；`bump` 的每條拒絕規則同樣一正一反，透過 `bump` 入口進行。

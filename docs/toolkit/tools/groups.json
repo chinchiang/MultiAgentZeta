@@ -1,5 +1,5 @@
 {
-  "_說明": "驗收群組設定。area_default：各領域條文的預設群組；overrides：個別條文改歸其他群組。修改後執行 python -I docs/toolkit/tools/build.py。",
+  "_說明": "驗收群組設定。area_default：各領域條文的預設群組；overrides：個別條文改歸其他群組。修改後執行 python3 -I docs/toolkit/tools/build.py。",
   "groups": [
     {
       "id": "AG-01",

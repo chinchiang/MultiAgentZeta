@@ -9,8 +9,11 @@ Generated outputs:
   * v0.1-scope.md (whole file)
 
 Usage (from anywhere):
-  python -I docs/toolkit/tools/build.py          # validate and rewrite outputs
-  python -I docs/toolkit/tools/build.py --check  # validate; exit 1 if outputs are stale
+  python3 -I docs/toolkit/tools/build.py          # validate and rewrite outputs
+  python3 -I docs/toolkit/tools/build.py --check  # validate; exit 1 if outputs are stale
+  python3 -I docs/toolkit/tools/build.py --bump v1.4.14 [--date 2026-11-02]
+      # set the shared version and revision date (default: today in Taiwan time)
+      # in every document header and the spec §0.4 sentence, then rewrite outputs
 
 Exit codes: 0 ok; 1 outputs stale (--check only); 2 validation problems.
 Nothing is written while any problem is reported.
@@ -18,7 +21,9 @@ Nothing is written while any problem is reported.
 Structure: ``check_docs(snapshot)`` is the whole check. It takes a snapshot
 (repo-relative POSIX path -> file text, CR characters preserved) and returns
 the problems, the outputs that need rewriting, and requirement counts. It reads
-no files itself. ``load_snapshot`` (disk) and the tests (in memory) build
+no files itself. ``bump(snapshot, version, date)`` is the same over a snapshot,
+for a new revision: it returns the header and §0.4 edits plus the regenerated
+outputs, or the problems that stop the bump. ``load_snapshot`` (disk) and the tests (in memory) build
 snapshots; ``main`` turns the result into output, writes and an exit code.
 
 Problems are reported per stage: if requirement blocks or groups.json cannot be
@@ -42,6 +47,7 @@ and all its problems are reported together. Checks:
   * generated outputs: exactly one BEGIN/END marker pair per generated region
 """
 import collections
+import datetime
 import json
 import os
 import re
@@ -399,6 +405,65 @@ def check_docs(snapshot):
     return Result([], updates, counts)
 
 
+VERSION = re.compile(r'v(\d+)\.(\d+)\.(\d+)')
+DATE = re.compile(r'\d{4}-\d{2}-\d{2}')
+
+
+def _replace_header(text, label, pattern, value, file):
+    """Replace the first value of a '> **label**：' header line; Invalid if the line is missing."""
+    header = re.compile(r'^(> \*\*' + label + r'\*\*：.*?)' + pattern, re.M)
+    if not header.search(text):
+        raise Invalid('header-missing', file, f'header: cannot read {label}')
+    return header.sub(lambda m: m.group(1) + value, text, count=1)
+
+
+def bump(snapshot, version, date):
+    """Set the shared version and revision date for a new revision (README 每輪修訂的檢查清單, step 1).
+
+    Edits the 版本 and 修訂日期 headers of spec, design notes and review log, and the
+    §0.4 version sentence; v0.1-scope.md follows when the outputs are regenerated.
+    Returns Result like check_docs, with updates holding every file to write. The
+    snapshot must pass check_docs first, and version must be newer than the current one.
+    """
+    problems = []
+    if not VERSION.fullmatch(version):
+        problems.append(Problem('bump-version', '', f'version must look like v1.4.14; got {version!r}'))
+    try:
+        datetime.date.fromisoformat(date)
+        if not DATE.fullmatch(date):
+            raise ValueError
+    except ValueError:
+        problems.append(Problem('bump-date', '', f'date must be a real YYYY-MM-DD date; got {date!r}'))
+    if problems:
+        return Result(problems, {}, None)
+    before = check_docs(snapshot)
+    if before.problems:
+        return before
+    current = header_value(snapshot[SPEC], '版本', VERSION.pattern, SPEC)
+    as_tuple = lambda v: tuple(int(n) for n in VERSION.fullmatch(v).groups())
+    if as_tuple(version) <= as_tuple(current):
+        return Result([Problem('bump-version', '', f'{version} is not newer than the current {current}')], {}, None)
+    edited = {}
+    try:
+        for f in VERSIONED:
+            text = _replace_header(snapshot[f], '版本', VERSION.pattern, version, f)
+            edited[f] = _replace_header(text, '修訂日期', DATE.pattern, date, f)
+    except Invalid as e:
+        return Result([e.problem], {}, None)
+    edited[SPEC] = VERSION_SENTENCE.sub(
+        f'本文件 {version} 表示設計文件的修訂；不代表工具包軟體已達 {version}。', edited[SPEC], count=1)
+    after = check_docs({**snapshot, **edited})
+    if after.problems:
+        return after
+    updates = {**edited, **after.updates}
+    return Result([], {p: t for p, t in updates.items() if snapshot.get(p) != t}, after.counts)
+
+
+def taiwan_today():
+    """Today's date in Taiwan time (UTC+8, no daylight saving), the zone the headers use."""
+    return datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).date().isoformat()
+
+
 # --- disk adapter and command line --------------------------------------------
 
 SKIP_DIRS = {'.git', '__pycache__'}
@@ -424,9 +489,26 @@ def format_problem(p):
     return f'error: {where}{p.message} [{p.rule}]'
 
 
+def _option(argv, name):
+    """The value after name in argv, None if name is absent, '' if it has no value."""
+    if name not in argv:
+        return None
+    i = argv.index(name) + 1
+    return argv[i] if i < len(argv) else ''
+
+
 def main(argv, repo=REPO):
     check = '--check' in argv
-    result = check_docs(load_snapshot(repo))
+    version = _option(argv, '--bump')
+    if version is not None:
+        if check:
+            print(format_problem(Problem('bump-check', '', '--bump writes files; it cannot be combined with --check')),
+                  file=sys.stderr)
+            return 2
+        date = _option(argv, '--date')
+        result = bump(load_snapshot(repo), version, taiwan_today() if date is None else date)
+    else:
+        result = check_docs(load_snapshot(repo))
     if result.problems:
         for p in result.problems:
             print(format_problem(p), file=sys.stderr)

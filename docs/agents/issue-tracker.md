@@ -27,6 +27,7 @@ Create a GitHub issue in this repo's ticket format:
 - **Title**: `v0.1-NN：<正體中文標題>`, numbered after the last existing ticket.
 - **Body sections**, in order: `## Parent` (the spec issue, e.g. `#1`), `## What to build`, `## Acceptance criteria` (checkbox list), `## 對應條文` (the `TK-` numbers).
 - Cite requirements by `TK-` number; the spec is authoritative, so the issue carries the number, not the requirement text.
+- Before publishing, read the spec text of every requirement listed in `## 對應條文`, and check each acceptance criterion against it: a criterion is stricter, looser or different from its requirement only when the ticket says why. Drafts from earlier sessions or handoffs are the usual source of a mismatch.
 - Write the body in 正體中文, using `GLOSSARY.md` terms.
 - Link the ticket to its parent as a sub-issue and add its blockers as native dependencies.
 
