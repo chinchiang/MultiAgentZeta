@@ -253,17 +253,18 @@ def _denial_case(env, test, evidence):
 
 
 # Allowed-case templates: the requirement permits the access, so the case passes when it is granted.
-ALLOWED_TEMPLATES = {'public-read-v1': {'table': 'announcements'}}
+ALLOWED_TEMPLATES = {'public-read-v1': {'method': 'GET', 'table': 'announcements'}}
 
 
 def _allowed_case(env, test, evidence):
     """Template public-read-v1 (e.g. USING (true) on public data, TK-DYN-004). Returns (result, checks)."""
+    template = ALLOWED_TEMPLATES[test['template_id']]
     marker, key = test['resource_ref'], test.get('api_key', 'anon-jwt')
-    path = f'/rest/v1/{ALLOWED_TEMPLATES[test["template_id"]]["table"]}?title=eq.{marker}&select=title'
-    status, data = _request(env, test['actor_ref'], 'GET', path, api_key=key, timeout=_timeout(test))
+    path = f'/rest/v1/{template["table"]}?title=eq.{marker}&select=title'
+    status, data = _request(env, test['actor_ref'], template['method'], path, api_key=key, timeout=_timeout(test))
     rows = data if isinstance(data, list) else None
     evidence.append({'channel': 'actor', 'identity_ref': test['actor_ref'], 'api_key_format': key,
-                     'request': {'method': 'GET', 'path': path},
+                     'request': {'method': template['method'], 'path': path},
                      'response': {'status': status, 'rows': len(rows) if rows is not None else None}})
     granted = status == 200 and rows == [{'title': marker}]
     return ('passed' if granted else 'failed'), {'access_granted': granted}
@@ -345,6 +346,12 @@ def _requirement_problem(test, manifest):
 
 def _plan_problem(test):
     """Why a test from the manifest cannot run, or None."""
+    # Fields that name the test in its ExecutionRecord: an unusable one blocks the test before anything
+    # starts (TK-IDN-009), instead of reaching the environment. template_id and resource_ref are
+    # checked below against their allow-lists.
+    for name in ('test_id', 'requirement_id', 'actor_ref'):
+        if not isinstance(test.get(name), str) or not test[name]:
+            return f'{name} must be a non-empty string'
     template = test.get('template_id')
     if template not in TEST_TEMPLATES:
         return f'template_id {template!r} is not an allow-listed test template'

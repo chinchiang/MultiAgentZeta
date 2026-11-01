@@ -1,0 +1,260 @@
+{
+  "schema_version": "1",
+  "run_id": "run-20261101-0001",
+  "id": "report-20261101-0002",
+  "created_at": "2026-11-01T10:00:00Z",
+  "source_id": "toolkit.scan",
+  "commit": "a89be51",
+  "status": "partial",
+  "manifest": {
+    "id": "manifest-object-authz-vulnerable",
+    "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+  },
+  "environment": {
+    "mode": "E1",
+    "profile_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+  },
+  "stages": [
+    {
+      "stage": "preflight",
+      "status": "completed"
+    },
+    {
+      "stage": "static_analysis",
+      "status": "not_run",
+      "reason": "not implemented in this toolkit version"
+    },
+    {
+      "stage": "model_review",
+      "status": "not_run",
+      "reason": "not implemented in this toolkit version"
+    },
+    {
+      "stage": "threat_planning",
+      "status": "not_run",
+      "reason": "not implemented in this toolkit version"
+    },
+    {
+      "stage": "dynamic_execution",
+      "status": "completed"
+    },
+    {
+      "stage": "judgement_report",
+      "status": "completed"
+    }
+  ],
+  "requirements": [
+    {
+      "id": "REQ-DOCUMENT-OWNER-READ",
+      "statement": "Only the owner may read a document that is not shared.",
+      "confirmation": {
+        "by": "app-owner",
+        "at": "2026-11-01T09:00:00Z",
+        "version": "1"
+      }
+    }
+  ],
+  "authorization_matrix": [
+    {
+      "identity": "anonymous",
+      "transport": "apikey-header",
+      "path": "anon API key -> /rest/v1"
+    },
+    {
+      "identity": "owner",
+      "transport": "bearer-header",
+      "path": "password grant -> bearer -> /rest/v1"
+    },
+    {
+      "identity": "same_tenant_non_owner",
+      "transport": "bearer-header",
+      "path": "password grant -> bearer -> /rest/v1"
+    },
+    {
+      "identity": "other_tenant_user",
+      "transport": "bearer-header",
+      "path": "password grant -> bearer -> /rest/v1"
+    }
+  ],
+  "execution_records": [
+    {
+      "schema_version": "1",
+      "run_id": "run-20261101-0001",
+      "id": "exec-0001",
+      "created_at": "2026-11-01T10:00:01Z",
+      "source_id": "toolkit.scan",
+      "commit": "a89be51",
+      "test_id": "AUTHZ-001-same-tenant",
+      "template_id": "cross-user-read-v1",
+      "requirement_id": "REQ-DOCUMENT-OWNER-READ",
+      "actor_ref": "same_tenant_non_owner",
+      "resource_ref": "MARK-A-ALICE-PRIVATE",
+      "started_at": "2026-11-01T10:00:01Z",
+      "ended_at": "2026-11-01T10:00:02Z",
+      "result": "failed",
+      "error": null,
+      "checks": {
+        "resource_and_control": true,
+        "identity": true,
+        "no_disclosure_or_change": false,
+        "response_and_side_effects": false
+      },
+      "evidence": [
+        {
+          "id": "ev-0001",
+          "channel": "observer",
+          "identity_ref": "observer",
+          "point": "before",
+          "observation": {
+            "template": "document-row-state-v1",
+            "table_rows": 6,
+            "table_digest": "4444444444444444444444444444444444444444444444444444444444444444",
+            "resource_exists": true,
+            "shared": false,
+            "state_digest": "5555555555555555555555555555555555555555555555555555555555555555"
+          }
+        },
+        {
+          "id": "ev-0002",
+          "channel": "actor",
+          "identity_ref": "owner",
+          "api_key_format": "anon-jwt",
+          "request": {
+            "method": "GET",
+            "path": "/rest/v1/documents?select=title&title=eq.MARK-A-ALICE-PRIVATE"
+          },
+          "response": {
+            "status": 200,
+            "rows": 1
+          }
+        },
+        {
+          "id": "ev-0003",
+          "channel": "actor",
+          "identity_ref": "same_tenant_non_owner",
+          "api_key_format": "anon-jwt",
+          "request": {
+            "method": "GET",
+            "path": "/rest/v1/documents?select=title&title=eq.MARK-A-ALICE-PRIVATE"
+          },
+          "response": {
+            "status": 200,
+            "rows": 1
+          }
+        }
+      ]
+    },
+    {
+      "schema_version": "1",
+      "run_id": "run-20261101-0001",
+      "id": "exec-0002",
+      "created_at": "2026-11-01T10:00:03Z",
+      "source_id": "toolkit.scan",
+      "commit": "a89be51",
+      "test_id": "AUTHZ-001-other-tenant-session-revoked",
+      "template_id": "cross-user-read-v1",
+      "requirement_id": "REQ-DOCUMENT-OWNER-READ",
+      "actor_ref": "other_tenant_user",
+      "resource_ref": "MARK-A-ALICE-PRIVATE",
+      "started_at": "2026-11-01T10:00:03Z",
+      "ended_at": "2026-11-01T10:00:04Z",
+      "result": "blocked",
+      "error": null,
+      "checks": {
+        "resource_and_control": true,
+        "identity": false,
+        "no_disclosure_or_change": false,
+        "response_and_side_effects": false
+      },
+      "evidence": [
+        {
+          "id": "ev-0004",
+          "channel": "actor",
+          "identity_ref": "owner",
+          "api_key_format": "anon-jwt",
+          "request": {
+            "method": "GET",
+            "path": "/rest/v1/documents?title=eq.MARK-A-ALICE-PRIVATE&select=title,body",
+            "prefer": "return=representation"
+          },
+          "response": {
+            "status": 200,
+            "rows": 1
+          }
+        },
+        {
+          "id": "ev-0005",
+          "channel": "observer",
+          "identity_ref": "observer",
+          "point": "before",
+          "observation": {
+            "template": "document-row-state-v1",
+            "table_rows": 6,
+            "table_digest": "4444444444444444444444444444444444444444444444444444444444444444",
+            "resource_exists": true,
+            "shared": false,
+            "state_digest": "5555555555555555555555555555555555555555555555555555555555555555"
+          }
+        },
+        {
+          "id": "ev-0006",
+          "channel": "actor",
+          "identity_ref": "other_tenant_user",
+          "api_key_format": "anon-jwt",
+          "request": {
+            "method": "GET",
+            "path": "/auth/v1/user",
+            "prefer": "return=representation"
+          },
+          "response": {
+            "status": 401,
+            "rows": null
+          }
+        }
+      ],
+      "fault": "session-revoked",
+      "case_kind": "denial"
+    }
+  ],
+  "findings": [
+    {
+      "schema_version": "1",
+      "run_id": "run-20261101-0001",
+      "id": "finding-0001",
+      "created_at": "2026-11-01T10:00:02Z",
+      "source_id": "toolkit.scan",
+      "commit": "a89be51",
+      "fingerprint": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "fingerprint_version": "fp-authz-v1",
+      "requirement_id": "REQ-DOCUMENT-OWNER-READ",
+      "root_cause": "object-ownership-not-enforced",
+      "status": "confirmed",
+      "evidence_type": "dynamic",
+      "execution_record_ids": [
+        "exec-0001"
+      ]
+    }
+  ],
+  "coverage": {
+    "schema_version": "1",
+    "run_id": "run-20261101-0001",
+    "id": "coverage-0001",
+    "created_at": "2026-11-01T10:00:05Z",
+    "source_id": "toolkit.scan",
+    "commit": "a89be51",
+    "inventory_source": "fixed test plan (tracer bullet)",
+    "denominator": 3,
+    "executed": 1,
+    "valid_judgements": 1,
+    "blocked": 1,
+    "untested": 0,
+    "unsupported": 1,
+    "unsupported_items": [
+      {
+        "scope": "rls-views",
+        "reason": "no verified test method for views in this toolkit version"
+      }
+    ]
+  },
+  "status_reason": "self-validation: 1 case was undeterminable (session revoked) and is blocked, not counted as passed"
+}

@@ -74,10 +74,33 @@
                  "required": ["result", "case_kind"]},
           "then": {"required": ["checks"], "properties": {"checks": {"required": ["access_granted"],
                                                                      "properties": {"access_granted": {"const": true}}}}}
+        },
+        {
+          "description": "TK-IDN-009 and 〈定義：測試結果〉: a test that could not run is still recorded, as blocked or unsupported, with test_id, template_id, requirement_id, actor_ref and resource_ref as given in the ScanManifest, even when they are unusable. Any other result names its test with non-empty text.",
+          "if": {"properties": {"result": {"enum": ["blocked", "unsupported"]}}, "required": ["result"]},
+          "else": {"properties": {
+            "test_id": {"$ref": "#/$defs/text"},
+            "template_id": {"$ref": "#/$defs/text"},
+            "requirement_id": {"$ref": "#/$defs/text"},
+            "actor_ref": {"$ref": "#/$defs/text"},
+            "resource_ref": {"$ref": "#/$defs/text"}
+          }}
         }
       ],
       "required": ["result", "evidence"],
+      "unevaluatedProperties": false,
       "properties": {
+        "test_id": {},
+        "template_id": {},
+        "requirement_id": {},
+        "actor_ref": {},
+        "resource_ref": {},
+        "started_at": {"$ref": "#/$defs/text"},
+        "ended_at": {"$ref": "#/$defs/text"},
+        "error": {
+          "description": "Why the case did not run normally, e.g. an observation failure (TK-IDN-009) or a timeout (執行錯誤, 〈定義：測試結果〉); null when it did.",
+          "type": ["string", "null"]
+        },
         "checks": {
           "description": "TK-DYN-001: resource exists and the control operation succeeds; the identity is valid and used; no disclosure and no unwanted state change; response and side effects meet the requirement.",
           "type": "object",
@@ -95,6 +118,10 @@
           "enum": ["denial", "allowed"]
         },
         "evidence": {"type": "array", "items": {"$ref": "#/$defs/evidence"}},
+        "fault": {
+          "description": "TK-VAL-001: the fault a self-validation run injected to make the case undeterminable.",
+          "enum": ["session-revoked", "observer-unavailable"]
+        },
         "result": {
           "description": "〈定義：測試結果〉: passed 通過, failed 未通過, blocked 受阻, error 執行錯誤, untested 未測試, unsupported 不支援.",
           "enum": ["passed", "failed", "blocked", "error", "untested", "unsupported"]
@@ -112,17 +139,64 @@
         "point": {
           "description": "TK-IDN-010: when the observation was made: before 執行前, after 執行後, after_background 背景工作完成後.",
           "enum": ["before", "after", "after_background"]
+        },
+        "api_key_format": {
+          "description": "TK-DYN-004: the API key format of an actor request: anon-jwt (legacy anon JWT) or publishable (sb_publishable_).",
+          "enum": ["anon-jwt", "publishable"]
+        },
+        "observation": {"$ref": "#/$defs/observation"},
+        "request": {
+          "description": "The actor request as sent through the application's real path (TK-IDN-008).",
+          "type": "object",
+          "required": ["method", "path"],
+          "properties": {
+            "method": {"enum": ["GET", "POST", "PATCH", "DELETE"]},
+            "path": {"$ref": "#/$defs/text"},
+            "prefer": {"$ref": "#/$defs/text"}
+          },
+          "additionalProperties": false
+        },
+        "response": {
+          "description": "What the actor saw: the status code and, when the body was a list, its row count (null otherwise). Judged against the contract, not by status code alone (TK-DYN-002).",
+          "type": "object",
+          "required": ["status"],
+          "properties": {
+            "status": {"type": "integer"},
+            "rows": {"type": ["integer", "null"], "minimum": 0}
+          },
+          "additionalProperties": false
         }
       },
-      "if": {"properties": {"channel": {"const": "observer"}}, "required": ["channel"]},
-      "then": {"required": ["point"]}
+      "additionalProperties": false,
+      "allOf": [
+        {"description": "TK-IDN-010: an observation states when it was made.",
+         "if": {"properties": {"channel": {"const": "observer"}}, "required": ["channel"]},
+         "then": {"required": ["point"]}},
+        {"description": "TK-DYN-004: an actor request states the API key format it used.",
+         "if": {"properties": {"channel": {"const": "actor"}}, "required": ["channel"]},
+         "then": {"required": ["api_key_format"]}}
+      ]
+    },
+    "observation": {
+      "description": "State read by an observation template (TK-IDN-006). table_rows and table_digest cover the whole table, so changes to rows other than the target show as side effects (TK-DYN-001 item 4).",
+      "type": "object",
+      "required": ["template", "resource_exists", "table_rows", "table_digest"],
+      "properties": {
+        "template": {"$ref": "#/$defs/text"},
+        "resource_exists": {"type": "boolean"},
+        "shared": {"type": "boolean"},
+        "state_digest": {"$ref": "#/$defs/text"},
+        "table_rows": {"type": "integer", "minimum": 0},
+        "table_digest": {"$ref": "#/$defs/text"}
+      },
+      "additionalProperties": false
     },
     "finding": {"allOf": [{"$ref": "#/$defs/common"}]},
     "coverage": {
       "allOf": [{"$ref": "#/$defs/common"}],
       "properties": {
         "unsupported_items": {
-          "description": "Scope without a verified test method; counted in unsupported and in the denominator (AG-07).",
+          "description": "Scope without a verified test method; counted in unsupported and in the denominator, never dropped silently (TK-EVD-008, AG-07).",
           "type": "array",
           "items": {"type": "object", "required": ["scope", "reason"],
                     "properties": {"scope": {"$ref": "#/$defs/text"}, "reason": {"$ref": "#/$defs/text"}}}

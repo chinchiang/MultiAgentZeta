@@ -38,11 +38,14 @@
                 "response_and_side_effects": false},
      "evidence": [
        {"id": "ev-0001", "channel": "observer", "identity_ref": "observer", "point": "before",
-        "observation": {"resource_exists": true, "shared": false}},
-       {"id": "ev-0002", "channel": "actor", "identity_ref": "owner",
+        "observation": {"template": "document-row-state-v1", "table_rows": 6,
+                        "table_digest": "4444444444444444444444444444444444444444444444444444444444444444",
+                        "resource_exists": true, "shared": false,
+                        "state_digest": "5555555555555555555555555555555555555555555555555555555555555555"}},
+       {"id": "ev-0002", "channel": "actor", "identity_ref": "owner", "api_key_format": "anon-jwt",
         "request": {"method": "GET", "path": "/rest/v1/documents?select=title&title=eq.MARK-A-ALICE-PRIVATE"},
         "response": {"status": 200, "rows": 1}},
-       {"id": "ev-0003", "channel": "actor", "identity_ref": "same_tenant_non_owner",
+       {"id": "ev-0003", "channel": "actor", "identity_ref": "same_tenant_non_owner", "api_key_format": "anon-jwt",
         "request": {"method": "GET", "path": "/rest/v1/documents?select=title&title=eq.MARK-A-ALICE-PRIVATE"},
         "response": {"status": 200, "rows": 1}}
      ]},
@@ -56,8 +59,11 @@
                 "response_and_side_effects": true},
      "evidence": [
        {"id": "ev-0004", "channel": "observer", "identity_ref": "observer", "point": "before",
-        "observation": {"resource_exists": true, "shared": false}},
-       {"id": "ev-0005", "channel": "actor", "identity_ref": "other_tenant_user",
+        "observation": {"template": "document-row-state-v1", "table_rows": 6,
+                        "table_digest": "4444444444444444444444444444444444444444444444444444444444444444",
+                        "resource_exists": true, "shared": false,
+                        "state_digest": "5555555555555555555555555555555555555555555555555555555555555555"}},
+       {"id": "ev-0005", "channel": "actor", "identity_ref": "other_tenant_user", "api_key_format": "publishable",
         "request": {"method": "GET", "path": "/rest/v1/documents?select=title&title=eq.MARK-A-ALICE-PRIVATE"},
         "response": {"status": 200, "rows": 0}}
      ]}
@@ -73,5 +79,6 @@
   "coverage": {"schema_version": "1", "run_id": "run-20261101-0001", "id": "coverage-0001", "created_at": "2026-11-01T10:00:05Z",
                "source_id": "toolkit.scan", "commit": "a89be51",
                "inventory_source": "fixed test plan (tracer bullet)",
-               "denominator": 2, "executed": 2, "valid_judgements": 2, "blocked": 0, "untested": 0, "unsupported": 0}
+               "denominator": 3, "executed": 2, "valid_judgements": 2, "blocked": 0, "untested": 0, "unsupported": 1,
+               "unsupported_items": [{"scope": "rls-views", "reason": "no verified test method for views in this toolkit version"}]}
 }

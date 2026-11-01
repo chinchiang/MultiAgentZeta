@@ -426,6 +426,43 @@ class MixedPlanEnv(unittest.TestCase):
         self.assertEqual(rep['status'], 'partial')
 
 
+class SchemaCodes(unittest.TestCase):
+    """CODING_STANDARDS.md rule 10: the codes the scan writes are the ones the report schema defines."""
+
+    defs = report.SCHEMA['$defs']
+
+    def test_fault_codes_match_the_schema(self):
+        self.assertEqual(set(scan.FAULTS), set(self.defs['execution_record']['properties']['fault']['enum']))
+
+    def test_api_key_formats_match_the_schema(self):
+        self.assertEqual(set(scan.API_KEY_FORMATS), set(self.defs['evidence']['properties']['api_key_format']['enum']))
+
+    def test_request_methods_are_in_the_schema(self):
+        methods = {t['method'] for t in [*scan.DENIAL_TEMPLATES.values(), *scan.ALLOWED_TEMPLATES.values()]}
+        self.assertLessEqual(methods, set(self.defs['evidence']['properties']['request']['properties']['method']['enum']))
+
+
+class MalformedTestFields(unittest.TestCase):
+    """TK-IDN-009 / 〈定義：測試結果〉: a test whose own fields are unusable is blocked before anything
+    starts, with the values as given; the run still produces a valid report (TK-EVD-003)."""
+
+    FIELDS = ('test_id', 'template_id', 'requirement_id', 'actor_ref', 'resource_ref')
+
+    def test_unusable_field_blocks_the_test_before_the_environment_starts(self):
+        for field in self.FIELDS:
+            for value in (None, '', 7):
+                with self.subTest(field=field, value=value):
+                    m = manifest('vulnerable')
+                    m['tests'] = [dict(m['tests'][0], **{field: value})]
+                    rep = scan.run(m).report
+                    self.assertEqual(report.validate(rep), [])
+                    self.assertNotIn('environment', rep)
+                    (ex,) = rep['execution_records']
+                    self.assertEqual((ex['result'], ex[field]), ('blocked', value))
+                    # Rejected by the test's own check, not by a later step such as the BuildRecipe.
+                    self.assertIn(field, ex['error'])
+
+
 class RequiredInputs(unittest.TestCase):
     """TK-SCP-002: a missing required input is handled as 〈定義：必要輸入〉 says; nothing is started."""
 

@@ -183,6 +183,158 @@ class Evidence(unittest.TestCase):
         self.assertTrue(any('identity_ref' in p for p in report.validate(doc)))
 
 
+class TestNames(unittest.TestCase):
+    """A record that ran names its test with non-empty text; only one that could not run may echo unusable values."""
+
+    FIELDS = ('test_id', 'template_id', 'requirement_id', 'actor_ref', 'resource_ref')
+
+    def test_record_that_ran_needs_text_names(self):
+        for field in self.FIELDS:
+            for value in (None, ''):
+                with self.subTest(field=field, value=value):
+                    doc = valid_report()
+                    doc['execution_records'][0][field] = value  # a failed record
+                    problems = report.validate(doc)
+                    self.assertTrue(any(field in p for p in problems), problems)
+
+
+class ApiKeyFormats(unittest.TestCase):
+    """TK-DYN-004: actor evidence names the API key format the request used (legacy anon JWT or sb_publishable_)."""
+
+    def actor_evidence(self, doc):
+        return next(ev for ev in doc['execution_records'][0]['evidence'] if ev['channel'] == 'actor')
+
+    def test_example_report_names_the_key_format(self):
+        self.assertIn(self.actor_evidence(valid_report())['api_key_format'], ('anon-jwt', 'publishable'))
+
+    def test_both_key_formats_are_accepted(self):
+        for fmt in ('anon-jwt', 'publishable'):
+            with self.subTest(format=fmt):
+                doc = valid_report()
+                self.actor_evidence(doc)['api_key_format'] = fmt
+                self.assertEqual(report.validate(doc), [])
+
+    def test_unknown_key_format_is_rejected(self):
+        for fmt in ('service_role', 'secret', ''):
+            with self.subTest(format=fmt):
+                doc = valid_report()
+                self.actor_evidence(doc)['api_key_format'] = fmt
+                self.assertNotEqual(report.validate(doc), [])
+
+    def test_actor_evidence_without_a_key_format_is_rejected(self):
+        doc = valid_report()
+        del self.actor_evidence(doc)['api_key_format']
+        problems = report.validate(doc)
+        self.assertTrue(any('api_key_format' in p for p in problems), problems)
+
+
+class Observations(unittest.TestCase):
+    """TK-DYN-001 item 4: an observation covers the whole table, so changes to other rows show as side effects."""
+
+    def observation(self, doc):
+        return next(ev for ev in doc['execution_records'][0]['evidence'] if ev['channel'] == 'observer')['observation']
+
+    def test_example_report_observes_the_table(self):
+        obs = self.observation(valid_report())
+        self.assertIsInstance(obs['table_rows'], int)
+        self.assertTrue(obs['table_digest'])
+
+    def test_observation_without_the_table_state_is_rejected(self):
+        for field in ('table_rows', 'table_digest'):
+            with self.subTest(removed=field):
+                doc = valid_report()
+                del self.observation(doc)[field]
+                problems = report.validate(doc)
+                self.assertTrue(any(field in p for p in problems), problems)
+
+    def test_table_rows_is_a_count(self):
+        for value in (-1, 1.5, '3', None):
+            with self.subTest(table_rows=value):
+                doc = valid_report()
+                self.observation(doc)['table_rows'] = value
+                self.assertNotEqual(report.validate(doc), [])
+
+
+class Faults(unittest.TestCase):
+    """TK-VAL-001: a self-validation run marks the execution records of undeterminable cases with the injected fault."""
+
+    def faulted_report(self, fault=None):
+        """The example partial run (session revoked); fault, when given, replaces the injected fault."""
+        doc = json.loads((FIXTURES / 'report-partial-fault.json').read_text(encoding='utf-8'))
+        if fault is not None:
+            self.faulted_record(doc)['fault'] = fault
+        return doc
+
+    def faulted_record(self, doc):
+        return next(e for e in doc['execution_records'] if 'fault' in e)
+
+    def test_example_report_shows_a_blocked_case_with_its_fault(self):
+        doc = self.faulted_report()
+        ex = self.faulted_record(doc)
+        self.assertEqual((ex['result'], ex['fault'], ex['checks']['identity']), ('blocked', 'session-revoked', False))
+        self.assertEqual(doc['status'], 'partial')
+        self.assertEqual(report.validate(doc), [])
+
+    def test_known_faults_are_accepted(self):
+        for fault in ('session-revoked', 'observer-unavailable'):
+            with self.subTest(fault=fault):
+                self.assertEqual(report.validate(self.faulted_report(fault)), [])
+
+    def test_unknown_fault_is_rejected(self):
+        for fault in ('network-down', ''):
+            with self.subTest(fault=fault):
+                self.assertNotEqual(report.validate(self.faulted_report(fault)), [])
+
+
+class UnsupportedItems(unittest.TestCase):
+    """TK-EVD-008: scope without a verified test method is listed with its reason, not dropped from coverage."""
+
+    def test_example_report_lists_an_unsupported_item(self):
+        items = valid_report()['coverage']['unsupported_items']
+        self.assertTrue(items)
+        self.assertTrue(all(i['scope'] and i['reason'] for i in items))
+
+    def test_item_without_scope_or_reason_is_rejected(self):
+        for field in ('scope', 'reason'):
+            with self.subTest(removed=field):
+                doc = valid_report()
+                del doc['coverage']['unsupported_items'][0][field]
+                problems = report.validate(doc)
+                self.assertTrue(any(field in p for p in problems), problems)
+
+
+class UnlistedFields(unittest.TestCase):
+    """CODING_STANDARDS.md rule 9: a field the schema does not list is a validation problem, not silently kept."""
+
+    def test_unlisted_evidence_field_is_rejected(self):
+        for i in (0, 1):  # an observer and an actor piece of evidence
+            with self.subTest(evidence=i):
+                doc = valid_report()
+                doc['execution_records'][0]['evidence'][i]['raw_password'] = 'x'
+                problems = report.validate(doc)
+                self.assertTrue(any('raw_password' in p for p in problems), problems)
+
+    def test_unlisted_request_or_response_field_is_rejected(self):
+        for part in ('request', 'response'):
+            with self.subTest(part=part):
+                doc = valid_report()
+                doc['execution_records'][0]['evidence'][1][part]['authorization'] = 'Bearer x'
+                problems = report.validate(doc)
+                self.assertTrue(any('authorization' in p for p in problems), problems)
+
+    def test_unlisted_observation_field_is_rejected(self):
+        doc = valid_report()
+        doc['execution_records'][0]['evidence'][0]['observation']['row_body'] = 'private text'
+        problems = report.validate(doc)
+        self.assertTrue(any('row_body' in p for p in problems), problems)
+
+    def test_unlisted_execution_record_field_is_rejected(self):
+        doc = valid_report()
+        doc['execution_records'][0]['observer_password'] = 'x'
+        problems = report.validate(doc)
+        self.assertTrue(any('observer_password' in p for p in problems), problems)
+
+
 class DenialChecks(unittest.TestCase):
     """TK-DYN-001: a denial case passes only when all four checks were made and hold."""
 
