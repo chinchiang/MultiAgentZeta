@@ -1,0 +1,74 @@
+name: env-tests
+
+# E1 environment tests (MAZ_ENV_TESTS=1): start a real Supabase stack and run the
+# toolkit's judgement logic against the samples (CODING_STANDARDS.md rule 12).
+on:
+  push:
+    paths: ['toolkit/**', 'samples/**', '.github/workflows/env-tests.yml']
+  pull_request:
+    paths: ['toolkit/**', 'samples/**', '.github/workflows/env-tests.yml']
+  schedule:
+    # Nightly, 03:00 Taiwan time: catches upstream image tags re-pushed under the
+    # same name (digest no longer matches the support matrix) with no code change.
+    - cron: '0 19 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  env-tests:
+    # Same OS as the development machine, so a red run here is not a CI-only difference.
+    runs-on: ubuntu-26.04
+    # Not yet measured (CODING_STANDARDS.md rule 5): generous first limit.
+    # After the first three runs, set it to twice the longest measured run and note the figures here.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Docker Engine pinned by the support matrix
+        # The support matrix pins docker-engine (TK-SCP-001); any other version makes the E1
+        # profile list it as unsupported, and test_e1 requires that list to be empty.
+        # The runner ships a newer Moby engine, so replace it with Ubuntu's docker.io package,
+        # the same package as on the development machine. The package revision is not pinned:
+        # Ubuntu keeps only the latest revision in -updates/-security, so the gate is the engine
+        # version from the support matrix. A red run here means the matrix needs re-verifying.
+        run: |
+          installed=$(dpkg-query -W -f='${Package}\n' 'moby-*' 'docker-ce*' 'containerd.io' 2>/dev/null || true)
+          if [ -n "$installed" ]; then sudo apt-get remove -y $installed; fi
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends docker.io
+          want=$(jq -r '.tools["docker-engine"].version' toolkit/support-matrix.json)
+          got=$(docker version --format '{{.Server.Version}}')
+          echo "docker-engine: matrix $want, installed $got ($(dpkg-query -W -f='${Version}' docker.io))"
+          test "$got" = "$want"
+
+      - name: Install Supabase CLI verified against the support matrix
+        # Version and archive digest are read from the support matrix, the single source;
+        # e1.py checks the binary digest again before use.
+        run: |
+          ver=$(jq -r '.tools["supabase-cli"].version' toolkit/support-matrix.json)
+          sha=$(jq -r '.tools["supabase-cli"].archive_sha256' toolkit/support-matrix.json)
+          dir="$RUNNER_TEMP/supabase-cli"
+          mkdir -p "$dir"
+          curl -fsSL -o "$dir/cli.tar.gz" \
+            "https://github.com/supabase/cli/releases/download/v$ver/supabase_linux_amd64.tar.gz"
+          echo "$sha  $dir/cli.tar.gz" | sha256sum -c -
+          tar -xzf "$dir/cli.tar.gz" -C "$dir" supabase
+          echo "MAZ_SUPABASE_BIN=$dir/supabase" >> "$GITHUB_ENV"
+
+      - name: Install toolkit dependencies (hash-pinned)
+        run: |
+          python3 -m venv .venv
+          .venv/bin/python -m pip install --require-hashes --only-binary=:all: -r toolkit/requirements.lock
+
+      - name: Run toolkit tests, environment tests included
+        # Service images are not pre-pulled or cached: supabase start pulls by tag, as on a
+        # user's machine, so a moved tag fails the digest check here too.
+        env:
+          MAZ_ENV_TESTS: '1'
+        run: .venv/bin/python -I -m unittest discover -s toolkit/tests -t . -v
+
+      - name: Show containers on failure
+        if: failure()
+        run: docker ps -a
