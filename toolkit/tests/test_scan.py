@@ -7,9 +7,12 @@ Expected results follow the sample design (samples/object-authz):
 Creating a document as someone else is denied in every version (TK-DYN-007).
 """
 import copy
+import socket
+import threading
 import unittest
+from pathlib import Path
 
-from toolkit import report, scan
+from toolkit import e1, report, scan
 from toolkit.tests.test_e1 import SAMPLES, needs_env
 
 REQUIREMENT = {
@@ -426,6 +429,43 @@ class MixedPlanEnv(unittest.TestCase):
         self.assertEqual(rep['status'], 'partial')
 
 
+def one_reply_server(reply):
+    """A loopback server that answers one connection with the raw bytes given, then closes it.
+    Returns its base URL."""
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.bind(('127.0.0.1', 0))
+    srv.listen(1)
+
+    def serve():
+        with srv:
+            conn, _ = srv.accept()
+            with conn:
+                conn.recv(65536)
+                conn.sendall(reply)
+    threading.Thread(target=serve, daemon=True).start()
+    return f'http://127.0.0.1:{srv.getsockname()[1]}'
+
+
+class BrokenReplies(unittest.TestCase):
+    """〈定義：測試結果〉 執行錯誤: a reply that cannot be read is RequestFailed, which run() records as an
+    execution error of the case (TK-RUN-001), never an exception that ends the run."""
+
+    def request_to(self, url):
+        env = e1.Environment(project_dir=Path('.'), project_id='maz-no-stack', recipe={}, cli='', api_url=url)
+        return scan._request(env, 'anonymous', 'GET', '/rest/v1/documents', timeout=5)
+
+    def test_error_reply_cut_off_mid_body_is_a_failed_request(self):
+        url = one_reply_server(b'HTTP/1.1 403 Forbidden\r\nContent-Length: 100\r\n\r\npartial')
+        with self.assertRaises(scan.RequestFailed):
+            self.request_to(url)
+
+    def test_reply_that_is_not_utf8_is_a_failed_request(self):
+        body = b'\xff\xfe\xfd'
+        url = one_reply_server(b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 3\r\n\r\n' + body)
+        with self.assertRaises(scan.RequestFailed):
+            self.request_to(url)
+
+
 class SchemaCodes(unittest.TestCase):
     """CODING_STANDARDS.md rule 10: the codes the scan writes are the ones the report schema defines."""
 
@@ -636,6 +676,10 @@ class UndeterminableCasesEnv(unittest.TestCase):
             dict(read, test_id='READ-normal'),
             dict(read, test_id='READ-observer-down', fault='observer-unavailable'),
             dict(read, test_id='READ-timeout', limits={'timeout_seconds': 0.000001}),
+            dict(read, test_id='READ-observer-timeout', fault='observer-timeout'),
+            dict(read, test_id='READ-api-unreachable', fault='api-unreachable'),
+            # The logout that injects this fault uses the test's time limit, so the injection itself times out.
+            dict(read, test_id='READ-injection-timeout', fault='session-revoked', limits={'timeout_seconds': 0.000001}),
             dict(read, test_id='READ-session-revoked', fault='session-revoked'),  # last: the actor stays logged out
         ]
         cls.report = scan.run(m).report
@@ -657,6 +701,29 @@ class UndeterminableCasesEnv(unittest.TestCase):
         self.assertEqual((e['result'], e['fault']), ('blocked', 'observer-unavailable'))
         self.assertIn('observation failed', e['error'])
 
+    def test_observer_query_timeout_blocks_the_case(self):
+        e = self.by_id['READ-observer-timeout']
+        self.assertEqual((e['result'], e['fault']), ('blocked', 'observer-timeout'))
+        # Blocked by the observation itself, not rejected as an unknown fault before the case runs.
+        self.assertIn('observation failed', e['error'])
+        self.assertIn('timed out', e['error'])
+
+    def test_refused_connection_is_an_execution_error(self):
+        e = self.by_id['READ-api-unreachable']
+        self.assertEqual((e['result'], e['fault']), ('error', 'api-unreachable'))
+        self.assertIn('request failed', e['error'])
+
+    def test_cases_after_a_refused_connection_still_run(self):
+        # The fault is undone after its case: the session-revoked case, which runs later, reaches the API.
+        e = self.by_id['READ-session-revoked']
+        self.assertEqual(e['checks']['resource_and_control'], True)
+
+    def test_failed_injection_is_an_execution_error_of_its_case_only(self):
+        e = self.by_id['READ-injection-timeout']
+        self.assertEqual((e['result'], e['fault']), ('error', 'session-revoked'))
+        self.assertIn('/auth/v1/logout', e['error'])  # the injection step failed, not the case's own requests
+        self.assertIn('READ-session-revoked', self.by_id)  # later cases still ran
+
     def test_timeout_is_an_execution_error(self):
         e = self.by_id['READ-timeout']
         self.assertEqual(e['result'], 'error')
@@ -666,6 +733,38 @@ class UndeterminableCasesEnv(unittest.TestCase):
         stages = {s['stage']: s['status'] for s in self.report['stages']}
         self.assertEqual((stages['preflight'], stages['dynamic_execution'], stages['judgement_report']),
                          ('completed', 'completed', 'completed'))
+
+
+@needs_env
+class FaultsMakeRunsPartialEnv(unittest.TestCase):
+    """TK-RUN-002: each network or observation failure on its own makes the run partial, not completed,
+    and the run still reports every case."""
+
+    def run_with(self, faulted):
+        m = manifest('patched')
+        read = next(t for t in m['tests'] if t['test_id'] == 'READ-other-tenant')
+        m['tests'] = [dict(read, test_id='READ-normal'), dict(read, test_id='READ-faulted', **faulted)]
+        rep = scan.run(m).report
+        self.assertEqual(report.validate(rep), [])
+        self.assertEqual(rep['status'], 'partial')
+        by_id = {e['test_id']: e for e in rep['execution_records']}
+        self.assertEqual(by_id['READ-normal']['result'], 'passed')
+        return by_id['READ-faulted']
+
+    def test_refused_connection(self):
+        e = self.run_with({'fault': 'api-unreachable'})
+        self.assertEqual(e['result'], 'error')
+        self.assertIn('request failed', e['error'])
+
+    def test_observer_query_timeout(self):
+        e = self.run_with({'fault': 'observer-timeout'})
+        self.assertEqual(e['result'], 'blocked')
+        self.assertIn('timed out', e['error'])
+
+    def test_failed_injection(self):
+        e = self.run_with({'fault': 'session-revoked', 'limits': {'timeout_seconds': 0.000001}})
+        self.assertEqual(e['result'], 'error')
+        self.assertIn('/auth/v1/logout', e['error'])
 
 
 @needs_env

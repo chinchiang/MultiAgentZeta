@@ -5,6 +5,7 @@ BuildRecipe, run the manifest's fixed tests, judge them with the observer,
 and produce the versioned JSON report plus the Markdown generated from it.
 """
 import hashlib
+import http.client
 import json
 import re
 import secrets
@@ -54,6 +55,11 @@ class RequestTimeout(Exception):
     """A request exceeded the test's time limit: an execution error, never a pass (〈定義：測試結果〉)."""
 
 
+class RequestFailed(Exception):
+    """A request got no HTTP response (connection refused or reset, a broken reply): an execution
+    error for its case, never a pass, and never the end of the run (〈定義：測試結果〉, TK-RUN-001)."""
+
+
 def _request(env, identity, method, path, body=None, api_key='anon-jwt', prefer='return=representation',
              timeout=15):
     """An actor request through the data API, as the given identity. Returns (status, parsed body)."""
@@ -65,21 +71,27 @@ def _request(env, identity, method, path, body=None, api_key='anon-jwt', prefer=
         headers['Content-Type'] = 'application/json'
     req = urllib.request.Request(env.api_url + path, data=data, method=method, headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            status, raw = r.status, r.read()
-    except urllib.error.HTTPError as e:
-        with e:
-            status, raw = e.code, e.read()
+        # Reading an error reply's body can fail too, so it sits inside the same handling.
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                status, raw = r.status, r.read()
+        except urllib.error.HTTPError as e:
+            with e:
+                status, raw = e.code, e.read()
     except (TimeoutError, socket.timeout) as e:
         raise RequestTimeout(f'{method} {path} exceeded {timeout} s') from e
     except urllib.error.URLError as e:
         if isinstance(e.reason, (TimeoutError, socket.timeout)):
             raise RequestTimeout(f'{method} {path} exceeded {timeout} s') from e
-        raise
+        raise RequestFailed(f'{method} {path}: {e.reason}') from e
+    except (OSError, http.client.HTTPException) as e:  # e.g. the connection was reset mid-reply
+        raise RequestFailed(f'{method} {path}: {e!r}') from e
     try:
         return status, json.loads(raw) if raw else None
     except json.JSONDecodeError:
         return status, None
+    except UnicodeDecodeError as e:  # bytes json cannot even decode: no readable reply
+        raise RequestFailed(f'{method} {path}: response body is not text ({e.reason})') from e
 
 
 # The four checks of a denial case (TK-DYN-001).
@@ -165,14 +177,22 @@ def _timeout(test):
 
 
 # Faults a self-validation test may inject (TK-VAL-001 無法判定案例). Recorded on the ExecutionRecord.
-FAULTS = ('session-revoked', 'observer-unavailable')
+FAULTS = ('session-revoked', 'observer-unavailable', 'observer-timeout', 'api-unreachable')
+
+
+def _closed_local_url():
+    """A loopback URL on a port nothing listens on: connections to it are refused (api-unreachable)."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(('127.0.0.1', 0))
+        port = s.getsockname()[1]
+    return f'http://127.0.0.1:{port}'
 
 
 def _inject(env, test):
     """Apply the test's fault, if any. Returns a function that undoes what can be undone."""
     fault = test.get('fault')
     if fault == 'session-revoked':
-        _request(env, test['actor_ref'], 'POST', '/auth/v1/logout?scope=global')
+        _request(env, test['actor_ref'], 'POST', '/auth/v1/logout?scope=global', timeout=_timeout(test))
         return lambda: None  # the actor stays logged out for the rest of the run
     if fault == 'observer-unavailable':
         saved = env.observer['password']
@@ -181,6 +201,18 @@ def _inject(env, test):
         def restore():
             env.observer['password'] = saved
         return restore
+    if fault == 'observer-timeout':  # a query time limit no read can meet (TK-IDN-009)
+        env.observer['timeout_seconds'] = 0.000001
+
+        def no_limit_override():
+            env.observer.pop('timeout_seconds', None)
+        return no_limit_override
+    if fault == 'api-unreachable':  # every data API request of this case is refused, the owner's control included
+        saved_url, env.api_url = env.api_url, _closed_local_url()
+
+        def reconnect():
+            env.api_url = saved_url
+        return reconnect
     return lambda: None
 
 
@@ -451,8 +483,10 @@ def run(manifest):
                 executions.append(_execution(records, test, started, *problem))
                 continue
             denial = test['template_id'] in DENIAL_TEMPLATES
-            undo = _inject(prepared.env, test)
+            undo = None
             try:
+                # Inside the case's handling: a failed injection is that case's error, not the run's (TK-RUN-001).
+                undo = _inject(prepared.env, test)
                 if denial:
                     result, checks = _denial_case(prepared.env, test, evidence)
                 else:
@@ -462,8 +496,11 @@ def run(manifest):
                 result, checks, error = 'blocked', None, f'observation failed: {e}'
             except RequestTimeout as e:
                 result, checks, error = 'error', None, f'timeout: {e}'
+            except RequestFailed as e:
+                result, checks, error = 'error', None, f'request failed: {e}'
             finally:
-                undo()
+                if undo:
+                    undo()
             ex = _execution(records, test, started, result, error)
             if test.get('fault'):
                 ex['fault'] = test['fault']

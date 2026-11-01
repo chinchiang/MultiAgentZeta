@@ -15,13 +15,25 @@ class ObservationFailed(Exception):
     """The observer could not read the state; a judgement must not treat this as a pass (TK-IDN-009)."""
 
 
+# Time limit of one observer query; env.observer['timeout_seconds'] overrides it (self-validation, TK-VAL-001).
+QUERY_TIMEOUT_SECONDS = 60
+
+
 def _query(env, sql):
     obs = env.observer
     if not obs:
         raise ObservationFailed('no observer role in this environment')
-    r = subprocess.run(['docker', 'exec', '-e', f'PGPASSWORD={obs["password"]}', f'supabase_db_{env.project_id}',
-                        'psql', '-h', obs['host'], '-U', obs['role'], '-d', 'postgres', '-At', '-F', '\t',
-                        '-v', 'ON_ERROR_STOP=1', '-c', sql], capture_output=True, text=True, timeout=60)
+    limit = obs.get('timeout_seconds', QUERY_TIMEOUT_SECONDS)
+    try:
+        r = subprocess.run(['docker', 'exec', '-e', f'PGPASSWORD={obs["password"]}', f'supabase_db_{env.project_id}',
+                            'psql', '-h', obs['host'], '-U', obs['role'], '-d', 'postgres', '-At', '-F', '\t',
+                            '-v', 'ON_ERROR_STOP=1', '-c', sql], capture_output=True, text=True, timeout=limit)
+    except subprocess.TimeoutExpired as e:  # TK-IDN-009: a read that did not finish is not a read
+        raise ObservationFailed(f'observer query timed out after {limit} s') from e
+    except OSError as e:  # the container tool cannot be started (TK-IDN-009)
+        raise ObservationFailed(f'container tool unavailable: {e.strerror or e}') from e
+    except UnicodeDecodeError as e:  # output that is not text cannot be read (TK-IDN-009)
+        raise ObservationFailed(f'observer output is not text ({e.reason})') from e
     if r.returncode:
         raise ObservationFailed((r.stderr or r.stdout).strip()[-500:])
     return [line.split('\t') for line in r.stdout.splitlines()]
@@ -36,10 +48,13 @@ def document_row_state(env, marker):
                        f"where title = '{marker}'")
     table = _query(env, "select count(*), coalesce(md5(string_agg(id::text || owner_id || tenant_id || title "
                         "|| body || shared::text, '|' order by id)), '') from public.documents")
-    state = {'template': 'document-row-state-v1', 'table_rows': int(table[0][0]),
-             'table_digest': hashlib.sha256(table[0][1].encode()).hexdigest()}
-    if not rows:
-        return {**state, 'resource_exists': False}
-    owner, tenant, shared, digest = rows[0]
+    try:
+        state = {'template': 'document-row-state-v1', 'table_rows': int(table[0][0]),
+                 'table_digest': hashlib.sha256(table[0][1].encode()).hexdigest()}
+        if not rows:
+            return {**state, 'resource_exists': False}
+        owner, tenant, shared, digest = rows[0]
+    except (IndexError, ValueError) as e:  # output not in the template's shape: no reliable state (TK-IDN-009)
+        raise ObservationFailed(f'observer output is not in the expected shape: {e}') from e
     return {**state, 'resource_exists': True, 'shared': shared == 't',
             'state_digest': hashlib.sha256(f'{owner}|{tenant}|{shared}|{digest}'.encode()).hexdigest()}

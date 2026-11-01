@@ -276,7 +276,7 @@ class Faults(unittest.TestCase):
         self.assertEqual(report.validate(doc), [])
 
     def test_known_faults_are_accepted(self):
-        for fault in ('session-revoked', 'observer-unavailable'):
+        for fault in ('session-revoked', 'observer-unavailable', 'observer-timeout', 'api-unreachable'):
             with self.subTest(fault=fault):
                 self.assertEqual(report.validate(self.faulted_report(fault)), [])
 
