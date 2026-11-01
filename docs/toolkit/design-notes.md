@@ -1,7 +1,7 @@
 # 多代理 AI 輔助程式開發測試工具包：設計說明
 
-> **版本**：v1.4.12（四份文件共用版本號，各版變更見審查處置紀錄）  
-> **修訂日期**：2026-11-01（臺灣時間）  
+> **版本**：v1.4.13（四份文件共用版本號，各版變更見審查處置紀錄）  
+> **修訂日期**：2026-11-02（臺灣時間）  
 > **文件狀態**：架構設計草案，非已實作或已驗證的聲明。  
 > **資訊分級**：機密／僅供英業達內部使用；未取得正式文件編號或發布核准  
 > **文件組合**：規格 [`spec.md`](spec.md)、設計說明 [`design-notes.md`](design-notes.md)（本文件）、審查處置紀錄 [`review-log.md`](review-log.md)、《v0.1 最小範圍》 [`v0.1-scope.md`](v0.1-scope.md)  
@@ -213,6 +213,8 @@ st run ./generated_openapi.yaml \
 Docker 可提供隔離機制，但共享核心、背景服務與設定仍構成攻擊面 [R21]。本工具包不得宣稱容器或 Docker-in-Docker 能保證完全隔離（`TK-SBX-007`、`TK-EVD-014`）。
 
 建置與套件安裝同樣可能執行不可信程式，必須納入隔離，不能只保護最終測試階段（`TK-SBX-008`）。
+
+**測試資料是否為合成資料：** 工具包無法從資料本身證明它是合成資料：正式資料匯出後改用保留網域帳號，外觀與合成資料無異。因此以確認建置配方的人員所做的來源聲明為準（`TK-SBX-011`）；工具包只檢查看得出不是合成資料的情況，例如非保留網域的帳號或受測樣本來源外的種子檔（`TK-SBX-012`）。種子檔限在樣本來源內，代價是建置時才產生的種子資料也會受阻；需要支援時再修訂規格。外部服務須使用真實網域時，以列明帳號的網域例外處理，避免整條檢查被關掉。
 
 不承諾任意儲存庫皆可一鍵啟動。環境建置是獨立開發工作，應先支援經確認的 `BuildRecipe`，未知專案轉為人工補配方或受阻（`TK-ENV-004`）。
 
@@ -506,3 +508,4 @@ BaxBench、SUSVIBES 與 LSCB 原本主要評估程式碼生成的功能與安全
 - **[R56]** Vertex AI 零資料保留：<https://docs.cloud.google.com/vertex-ai/generative-ai/docs/vertex-ai-zero-data-retention>
 - **[R57]** Supabase 官方 Postgres 映像檔原始碼（`postgres` 角色屬性，commit `e2841e5`）：<https://github.com/supabase/postgres/blob/e2841e5fc3afdbb49ac8d52e5e570f7c9da7565a/migrations/db/migrations/10000000000000_demote-postgres.sql>
 - **[R58]** *The Rust Programming Language*（Rust 官方教材，2026-11-01 查閱線上版）：第 4 章〈Understanding Ownership〉，含 §4.1 所有權規則與 §4.2 參考與借用規則 <https://doc.rust-lang.org/book/ch04-00-understanding-ownership.html>；§20.1〈Unsafe Rust〉 <https://doc.rust-lang.org/book/ch20-01-unsafe-rust.html>
+- **[R59]** RFC 6761 *Special-Use Domain Names*（2026-11-02 查閱）：§6.2 `test.`、§6.3 `localhost.`、§6.4 `invalid.`、§6.5 `example.`、`example.com.`、`example.net.`、`example.org.` 及其下所有名稱 <https://www.rfc-editor.org/rfc/rfc6761>
