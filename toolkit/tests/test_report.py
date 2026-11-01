@@ -163,7 +163,7 @@ class RenderMarkdown(unittest.TestCase):
 
 
 class Evidence(unittest.TestCase):
-    """〈定義：核心資料物件〉 ExecutionRecord: every piece of evidence names its channel (actor or observer)."""
+    """〈定義：核心資料物件與相依紀錄〉 ExecutionRecord: every piece of evidence names its channel (actor or observer)."""
 
     def test_evidence_without_a_channel_is_rejected(self):
         doc = valid_report()

@@ -30,6 +30,8 @@ and all its problems are reported together. Checks:
     overrides, areas without area_default/area_names, groups with no members
   * TK- references to unknown IDs, in spec.md and in every other repo doc
     (design notes, review log, README, GLOSSARY.md, ADRs, research notes)
+  * 〈定義：〇〇〉 references to a missing '### 定義：〇〇' section of spec.md, in
+    spec.md, the docs above, docs/agents/, and toolkit/ code and schemas
   * [R] references: definitions in design-notes.md must be unique and numbered
     1..N without gaps; every [Rn] cited in spec, design notes or review log
     must be defined
@@ -62,6 +64,9 @@ FIELDS = ('等級', '條文', '驗收', 'v0.1', '理由', '來源')
 BLOCK = re.compile(r'^#### (TK-([A-Z]{3})-(\d{3})) (.+?)\n(.*?)(?=^#### |^## |^### |\Z)', re.M | re.S)
 FIELD = r'^- \*\*{}\*\*：(.*)$'
 TK_REF = re.compile(r'TK-[A-Z]{3}-\d{3}')
+DEF_HEADING = re.compile(r'^### 定義：(.+?)\s*$', re.M)
+DEF_REF = re.compile(r'〈定義：([^〉]+)〉')
+DEF_PLACEHOLDER = '〇〇'  # the name used when docs describe the reference format itself
 VERSION_SENTENCE = re.compile(r'本文件 (v\d+\.\d+\.\d+) 表示設計文件的修訂；不代表工具包軟體已達 (v\d+\.\d+\.\d+)。')
 
 Problem = collections.namedtuple('Problem', 'rule file message')
@@ -88,6 +93,14 @@ def cross_ref_docs(paths):
     fixed = [DESIGN, REVIEW, README, 'GLOSSARY.md', 'CODING_STANDARDS.md']
     dirs = sorted(p for p in paths if p.endswith('.md') and (_in_dir(p, 'docs/adr') or _in_dir(p, 'docs/research')))
     return [p for p in fixed if p in paths] + dirs
+
+
+def def_ref_files(paths):
+    """Files whose 〈定義：〇〇〉 references are checked: spec.md, the cross-ref docs,
+    docs/agents/, and the toolkit's code and schemas (samples/ is test subject, not checked)."""
+    docs = [SPEC] + cross_ref_docs(paths) + sorted(p for p in paths if p.endswith('.md') and _in_dir(p, 'docs/agents'))
+    code = sorted(p for p in paths if p.startswith('toolkit/') and p.endswith(('.py', '.json')))
+    return [p for p in docs if p in paths] + code
 
 
 def lf_files(paths):
@@ -204,6 +217,12 @@ def validate_cross_refs(reqs, snapshot):
         dangling = sorted(set(TK_REF.findall(snapshot[f])) - known)
         if dangling:
             problems.append(Problem('dangling-ref', f, f'references to unknown IDs: {dangling}'))
+
+    definitions = set(DEF_HEADING.findall(snapshot.get(SPEC, ''))) | {DEF_PLACEHOLDER}
+    for f in def_ref_files(snapshot):
+        dangling = sorted(set(DEF_REF.findall(snapshot[f])) - definitions)
+        if dangling:
+            problems.append(Problem('dangling-def', f, f'references to unknown 定義 sections: {dangling}'))
 
     design = snapshot.get(DESIGN, '')
     defined = [int(n) for n in re.findall(r'^- \*\*\[R(\d+)\]\*\*', design, re.M)]

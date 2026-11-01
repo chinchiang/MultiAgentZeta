@@ -239,6 +239,43 @@ class CrossReferences(unittest.TestCase):
                                        ('version-mismatch', '')})
 
 
+class DefinitionReferences(unittest.TestCase):
+    """〈定義：〇〇〉 references must name an existing '### 定義：〇〇' section of spec.md."""
+
+    def with_definition(self, **files):
+        snap = make(**files)
+        snap[build.SPEC] = snap[build.SPEC].replace('## 1. 條文', '### 定義：測試結果\n\n表。\n\n## 1. 條文')
+        return snap
+
+    def test_reference_to_an_existing_definition_passes(self):
+        snap = self.with_definition(GLOSSARY_md='見〈定義：測試結果〉。')
+        snap['toolkit/scan.py'] = '"""依〈定義：測試結果〉。"""\n'
+        self.assertEqual(rules(snap), set())
+
+    def test_dangling_def_in_spec(self):
+        snap = self.with_definition()
+        snap[build.SPEC] += '\n依〈定義：不存在〉。\n'
+        self.assertEqual(rules(snap), {('dangling-def', build.SPEC)})
+
+    def test_dangling_def_in_docs_code_and_schemas(self):
+        snap = self.with_definition(GLOSSARY_md='〈定義：測試結果之外〉', CODING_STANDARDS_md='〈定義：不存在〉',
+                                    docs__agents__domain_md='〈定義：不存在〉')
+        snap['toolkit/tests/test_report.py'] = '# 〈定義：核心資料物件〉\n'
+        snap['toolkit/schemas/report-v1.json'] = '{"description": "〈定義：不存在〉"}'
+        self.assertEqual(rules(snap), {('dangling-def', 'GLOSSARY.md'), ('dangling-def', 'CODING_STANDARDS.md'),
+                                       ('dangling-def', 'docs/agents/domain.md'),
+                                       ('dangling-def', 'toolkit/tests/test_report.py'),
+                                       ('dangling-def', 'toolkit/schemas/report-v1.json')})
+
+    def test_placeholder_name_is_ignored(self):
+        self.assertEqual(rules(self.with_definition(GLOSSARY_md='以〈定義：〇〇〉引用。')), set())
+
+    def test_refs_outside_the_checked_files_are_ignored(self):
+        snap = self.with_definition(scratch__x_md='〈定義：不存在〉')
+        snap['samples/object-authz/app.py'] = '# 〈定義：不存在〉\n'
+        self.assertEqual(rules(snap), set())
+
+
 class Versions(unittest.TestCase):
     def test_header_missing(self):
         snap = make()
