@@ -214,6 +214,26 @@
       ],
       "fault": "session-revoked",
       "case_kind": "denial"
+    },
+    {
+      "schema_version": "1",
+      "run_id": "run-20261101-0001",
+      "source_id": "toolkit.scan",
+      "commit": "a89be51",
+      "template_id": "cross-user-read-v1",
+      "requirement_id": "REQ-DOCUMENT-OWNER-READ",
+      "actor_ref": "other_tenant_user",
+      "resource_ref": "MARK-A-ALICE-PRIVATE",
+      "id": "exec-0003",
+      "created_at": "2026-11-01T10:00:05Z",
+      "test_id": "AUTHZ-001-other-tenant-key-missing",
+      "started_at": "2026-11-01T10:00:05Z",
+      "ended_at": "2026-11-01T10:00:05Z",
+      "result": "blocked",
+      "error": "API key unavailable: the environment provides no API key of format 'anon-jwt'",
+      "fault": "api-key-missing",
+      "case_kind": "denial",
+      "evidence": []
     }
   ],
   "findings": [
@@ -243,10 +263,10 @@
     "source_id": "toolkit.scan",
     "commit": "a89be51",
     "inventory_source": "fixed test plan (tracer bullet)",
-    "denominator": 3,
+    "denominator": 4,
     "executed": 1,
     "valid_judgements": 1,
-    "blocked": 1,
+    "blocked": 2,
     "untested": 0,
     "unsupported": 1,
     "unsupported_items": [
@@ -256,5 +276,5 @@
       }
     ]
   },
-  "status_reason": "self-validation: 1 case was undeterminable (session revoked) and is blocked, not counted as passed"
+  "status_reason": "self-validation: 2 cases were undeterminable (session revoked, API key missing) and are blocked, not counted as passed"
 }

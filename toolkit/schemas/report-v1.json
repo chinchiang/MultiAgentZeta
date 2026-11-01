@@ -120,7 +120,7 @@
         "evidence": {"type": "array", "items": {"$ref": "#/$defs/evidence"}},
         "fault": {
           "description": "TK-VAL-001: the fault a self-validation run injected to make the case undeterminable.",
-          "enum": ["session-revoked", "observer-unavailable", "observer-timeout", "api-unreachable"]
+          "enum": ["session-revoked", "observer-unavailable", "observer-timeout", "api-unreachable", "api-key-missing"]
         },
         "result": {
           "description": "〈定義：測試結果〉: passed 通過, failed 未通過, blocked 受阻, error 執行錯誤, untested 未測試, unsupported 不支援.",

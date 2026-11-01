@@ -60,10 +60,34 @@ class RequestFailed(Exception):
     error for its case, never a pass, and never the end of the run (〈定義：測試結果〉, TK-RUN-001)."""
 
 
+class ApiKeyUnavailable(Exception):
+    """The environment does not provide an API key format the case needs: the case is blocked, and no
+    request goes out with an empty key (TK-DYN-004, TK-IDN-003; 〈定義：測試結果〉 受阻)."""
+
+
+def _api_key_for(test, identity):
+    """The API key format a request of this case uses for the identity: the test's format for the actor
+    (its requests and its identity check), anon-jwt for any other identity, such as the owner's control
+    operation (TK-DYN-004)."""
+    return test.get('api_key', 'anon-jwt') if identity == test['actor_ref'] else 'anon-jwt'
+
+
+def _check_api_keys(env, test, denial):
+    """Raise ApiKeyUnavailable, before the case sends anything, if the environment lacks an API key format
+    one of the case's requests uses: the actor's, and for a denial case also the owner's (TK-DYN-004,
+    TK-IDN-003)."""
+    identities = [test['actor_ref']] + ([test['owner_ref']] if denial else [])
+    missing = sorted({_api_key_for(test, i) for i in identities} - {f for f, k in env.api_keys.items() if k})
+    if missing:
+        raise ApiKeyUnavailable(f'the environment provides no API key of format {", ".join(map(repr, missing))}')
+
+
 def _request(env, identity, method, path, body=None, api_key='anon-jwt', prefer='return=representation',
              timeout=15):
     """An actor request through the data API, as the given identity. Returns (status, parsed body)."""
-    headers = {'apikey': env.api_keys.get(api_key, ''), 'Prefer': prefer}
+    if not env.api_keys.get(api_key):
+        raise ApiKeyUnavailable(f'the environment provides no API key of format {api_key!r}')
+    headers = {'apikey': env.api_keys[api_key], 'Prefer': prefer}
     if identity in env.tokens:
         headers['Authorization'] = 'Bearer ' + env.tokens[identity]['access_token']
     data = json.dumps(body).encode() if body is not None else None
@@ -177,7 +201,7 @@ def _timeout(test):
 
 
 # Faults a self-validation test may inject (TK-VAL-001 無法判定案例). Recorded on the ExecutionRecord.
-FAULTS = ('session-revoked', 'observer-unavailable', 'observer-timeout', 'api-unreachable')
+FAULTS = ('session-revoked', 'observer-unavailable', 'observer-timeout', 'api-unreachable', 'api-key-missing')
 
 
 def _closed_local_url():
@@ -213,6 +237,14 @@ def _inject(env, test):
         def reconnect():
             env.api_url = saved_url
         return reconnect
+    if fault == 'api-key-missing':  # the environment lacks an API key format (TK-DYN-004); default: the test's own
+        fmt = test.get('fault_api_key') or test.get('api_key', 'anon-jwt')
+        saved_key = env.api_keys.pop(fmt, None)
+
+        def restore_key():
+            if saved_key is not None:
+                env.api_keys[fmt] = saved_key
+        return restore_key
     return lambda: None
 
 
@@ -233,7 +265,7 @@ def _denial_case(env, test, evidence):
     checks = dict.fromkeys(CHECKS, False)
 
     def actor(identity, method, path, body=None, prefer='return=representation'):
-        key = test.get('api_key', 'anon-jwt') if identity == test['actor_ref'] else 'anon-jwt'
+        key = _api_key_for(test, identity)
         status, data = _request(env, identity, method, path, body, key, prefer, _timeout(test))
         rows = data if isinstance(data, list) else None
         evidence.append({'channel': 'actor', 'identity_ref': identity, 'api_key_format': key,
@@ -399,6 +431,8 @@ def _plan_problem(test):
         return 'limits.timeout_seconds must be a positive number'
     if test.get('api_key', 'anon-jwt') not in API_KEY_FORMATS:
         return f'api_key must be one of {list(API_KEY_FORMATS)}'
+    if test.get('fault_api_key') is not None and test['fault_api_key'] not in API_KEY_FORMATS:
+        return f'fault_api_key must be one of {list(API_KEY_FORMATS)}'
     for name in _typed_params(template, 'uuid'):
         if not isinstance(test.get(name), str) or not UUID.match(test[name]):
             return f'{name} must be a UUID'
@@ -487,6 +521,7 @@ def run(manifest):
             try:
                 # Inside the case's handling: a failed injection is that case's error, not the run's (TK-RUN-001).
                 undo = _inject(prepared.env, test)
+                _check_api_keys(prepared.env, test, denial)
                 if denial:
                     result, checks = _denial_case(prepared.env, test, evidence)
                 else:
@@ -498,6 +533,8 @@ def run(manifest):
                 result, checks, error = 'error', None, f'timeout: {e}'
             except RequestFailed as e:
                 result, checks, error = 'error', None, f'request failed: {e}'
+            except ApiKeyUnavailable as e:
+                result, checks, error = 'blocked', None, f'API key unavailable: {e}'
             finally:
                 if undo:
                     undo()

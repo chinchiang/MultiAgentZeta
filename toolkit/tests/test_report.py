@@ -275,8 +275,16 @@ class Faults(unittest.TestCase):
         self.assertEqual(doc['status'], 'partial')
         self.assertEqual(report.validate(doc), [])
 
+    def test_example_report_shows_a_case_blocked_for_a_missing_api_key(self):
+        # TK-DYN-004: blocked before any request, so the record carries no evidence and no checks.
+        ex = next(e for e in self.faulted_report()['execution_records'] if e.get('fault') == 'api-key-missing')
+        self.assertEqual((ex['result'], ex['evidence']), ('blocked', []))
+        self.assertNotIn('checks', ex)
+        self.assertIn("'anon-jwt'", ex['error'])
+
     def test_known_faults_are_accepted(self):
-        for fault in ('session-revoked', 'observer-unavailable', 'observer-timeout', 'api-unreachable'):
+        for fault in ('session-revoked', 'observer-unavailable', 'observer-timeout', 'api-unreachable',
+                      'api-key-missing'):
             with self.subTest(fault=fault):
                 self.assertEqual(report.validate(self.faulted_report(fault)), [])
 

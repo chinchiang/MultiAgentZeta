@@ -451,7 +451,8 @@ class BrokenReplies(unittest.TestCase):
     execution error of the case (TK-RUN-001), never an exception that ends the run."""
 
     def request_to(self, url):
-        env = e1.Environment(project_dir=Path('.'), project_id='maz-no-stack', recipe={}, cli='', api_url=url)
+        env = e1.Environment(project_dir=Path('.'), project_id='maz-no-stack', recipe={}, cli='', api_url=url,
+                             api_keys={'anon-jwt': 'test-anon-key'})
         return scan._request(env, 'anonymous', 'GET', '/rest/v1/documents', timeout=5)
 
     def test_error_reply_cut_off_mid_body_is_a_failed_request(self):
@@ -464,6 +465,19 @@ class BrokenReplies(unittest.TestCase):
         url = one_reply_server(b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 3\r\n\r\n' + body)
         with self.assertRaises(scan.RequestFailed):
             self.request_to(url)
+
+
+class MissingApiKeys(unittest.TestCase):
+    """TK-DYN-004, TK-IDN-003: a request whose API key format the environment does not provide is never sent
+    with an empty key; the case is blocked (〈定義：測試結果〉 受阻: 缺少……環境)."""
+
+    def test_request_without_its_key_is_not_sent(self):
+        # Nothing listens at this URL: a request that went out would fail as refused (RequestFailed).
+        env = e1.Environment(project_dir=Path('.'), project_id='maz-no-stack', recipe={}, cli='',
+                             api_url=scan._closed_local_url(), api_keys={'anon-jwt': 'test-anon-key'})
+        with self.assertRaises(scan.ApiKeyUnavailable) as raised:
+            scan._request(env, 'anonymous', 'GET', '/rest/v1/documents', api_key='publishable', timeout=5)
+        self.assertIn('publishable', str(raised.exception))
 
 
 class SchemaCodes(unittest.TestCase):
@@ -765,6 +779,58 @@ class FaultsMakeRunsPartialEnv(unittest.TestCase):
         e = self.run_with({'fault': 'session-revoked', 'limits': {'timeout_seconds': 0.000001}})
         self.assertEqual(e['result'], 'error')
         self.assertIn('/auth/v1/logout', e['error'])
+
+
+@needs_env
+class ApiKeyMissingEnv(unittest.TestCase):
+    """TK-DYN-004, TK-IDN-003: a case needing an API key format the environment lacks is blocked before it
+    sends anything, and says which format is missing. The fault removes the format for that case only."""
+
+    @classmethod
+    def setUpClass(cls):
+        m = manifest('patched')
+        by_id = {t['test_id']: t for t in m['tests']}
+        anon = by_id['READ-anonymous-publishable']
+        other = by_id['READ-other-tenant']
+        m['tests'] = [
+            dict(anon, test_id='ANON-normal'),
+            # The actor's own format is missing: publishable for the anonymous actor, anon-jwt for the other.
+            dict(anon, test_id='ANON-publishable-missing', fault='api-key-missing'),
+            dict(other, test_id='OTHER-anon-jwt-missing', fault='api-key-missing'),
+            # Only the owner's format is missing: the actor uses publishable, the owner's control anon-jwt.
+            dict(anon, test_id='ANON-owner-key-missing', fault='api-key-missing', fault_api_key='anon-jwt'),
+            # The owner is the actor: every request uses publishable, so a missing anon-jwt blocks nothing.
+            dict(anon, test_id='OWNER-AS-ACTOR', actor_ref='owner', fault='api-key-missing',
+                 fault_api_key='anon-jwt'),
+            dict(other, test_id='OTHER-normal'),
+        ]
+        cls.report = scan.run(m).report
+        cls.by_id = {e['test_id']: e for e in cls.report['execution_records']}
+
+    def assert_blocked_before_any_request(self, test_id, missing_format):
+        e = self.by_id[test_id]
+        self.assertEqual((e['result'], e['fault'], e['evidence']), ('blocked', 'api-key-missing', []))
+        self.assertIn(repr(missing_format), e['error'])
+
+    def test_report_is_valid_and_partial(self):
+        self.assertEqual(report.validate(self.report), [])
+        self.assertEqual(self.report['status'], 'partial')
+
+    def test_missing_actor_key_format_blocks_the_case_before_any_request(self):
+        self.assert_blocked_before_any_request('ANON-publishable-missing', 'publishable')
+        self.assert_blocked_before_any_request('OTHER-anon-jwt-missing', 'anon-jwt')
+
+    def test_missing_owner_key_format_blocks_the_case_before_any_request(self):
+        self.assert_blocked_before_any_request('ANON-owner-key-missing', 'anon-jwt')
+
+    def test_a_format_no_request_of_the_case_uses_does_not_block_it(self):
+        e = self.by_id['OWNER-AS-ACTOR']
+        self.assertNotIn('API key', e['error'] or '')
+        self.assertTrue(e['evidence'])
+
+    def test_cases_with_their_keys_are_judged_as_before(self):
+        self.assertEqual((self.by_id['ANON-normal']['result'], self.by_id['OTHER-normal']['result']),
+                         ('passed', 'passed'))
 
 
 @needs_env
