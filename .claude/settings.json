@@ -1,5 +1,11 @@
 {
   "env": {
     "PYTHONIOENCODING": "utf-8"
+  },
+  "permissions": {
+    "allow": [
+      "Bash(gh run list *)",
+      "Bash(gh run view *)"
+    ]
   }
 }
