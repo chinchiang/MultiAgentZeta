@@ -50,6 +50,39 @@ class Validate(unittest.TestCase):
         doc['findings'][0]['commit'] = ''
         self.assertNotEqual(report.validate(doc), [])
 
+    def without_commit(self, status, preflight='completed'):
+        """The example report with no commit anywhere, as a run whose ScanManifest named none."""
+        doc = valid_report()
+        doc['status'] = status
+        if status != 'completed':
+            doc['status_reason'] = 'commit (受測範圍) is missing'
+        for stage in doc['stages']:
+            if stage['stage'] == 'preflight' and preflight != 'completed':
+                stage.update(status=preflight, reason='commit (受測範圍) is missing')
+        for rec in [doc, *doc['execution_records'], *doc['findings'], doc['coverage']]:
+            rec['commit'] = None
+        return doc
+
+    def test_report_blocked_at_preflight_may_name_no_commit(self):
+        # TK-DAT-001's one exception: blocked before any source is read.
+        self.assertEqual(report.validate(self.without_commit('blocked', preflight='blocked')), [])
+
+    def test_example_report_without_a_commit_is_valid(self):
+        doc = json.loads((FIXTURES / 'report-blocked-no-commit.json').read_text(encoding='utf-8'))
+        self.assertEqual(report.validate(doc), [])
+        self.assertIsNone(doc['commit'])
+        self.assertEqual({s['stage']: s['status'] for s in doc['stages']}['preflight'], 'blocked')
+
+    def test_report_blocked_after_preflight_must_name_its_commit(self):
+        problems = report.validate(self.without_commit('blocked', preflight='completed'))
+        self.assertTrue(any(p.startswith('commit') for p in problems), problems)
+
+    def test_run_that_was_not_blocked_must_name_its_commit(self):
+        for status in ('completed', 'partial'):
+            with self.subTest(status=status):
+                problems = report.validate(self.without_commit(status))
+                self.assertTrue(any(p.startswith('commit') for p in problems), problems)
+
     # TK-RUN-002: 待執行、執行中、完整完成、部分完成、受阻、失敗、已取消 (codes per the plan's Q7).
     RUN_STATUSES = ['pending', 'running', 'completed', 'partial', 'blocked', 'failed', 'cancelled']
 
@@ -115,6 +148,12 @@ class RenderMarkdown(unittest.TestCase):
     RUN_LABELS = {'pending': '待執行', 'running': '執行中', 'completed': '完整完成', 'partial': '部分完成',
                   'blocked': '受阻', 'failed': '失敗', 'cancelled': '已取消'}
     DISCLAIMER = '不代表應用沒有漏洞'
+
+    def test_missing_commit_is_shown_as_not_provided(self):
+        doc = json.loads((FIXTURES / 'report-blocked-no-commit.json').read_text(encoding='utf-8'))
+        md = report.render_markdown(doc)
+        self.assertIn('- **受測提交**：（未提供）', md)
+        self.assertNotIn('None', md)
 
     def test_run_status_is_shown_with_its_spec_name(self):
         for status, label in self.RUN_LABELS.items():

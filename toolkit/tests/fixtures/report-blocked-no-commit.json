@@ -1,0 +1,134 @@
+{
+  "schema_version": "1",
+  "run_id": "run-20261101144310-dd352f",
+  "id": "report-run-20261101144310-dd352f",
+  "created_at": "2026-11-01T14:43:10.957446Z",
+  "source_id": "toolkit.scan",
+  "commit": null,
+  "status": "blocked",
+  "manifest": {
+    "id": "manifest-object-authz-vulnerable",
+    "digest": "sha256:495399cc068b19acd31f0cf22945c7c6f74ef7ae7125a962a7b6762e3cd43ada"
+  },
+  "stages": [
+    {
+      "stage": "preflight",
+      "status": "blocked",
+      "reason": "required inputs missing; nothing was started: commit (受測範圍: the source commit under test) is missing: dynamic testing is not started"
+    },
+    {
+      "stage": "static_analysis",
+      "status": "not_run",
+      "reason": "stage not implemented in this toolkit version"
+    },
+    {
+      "stage": "model_review",
+      "status": "not_run",
+      "reason": "stage not implemented in this toolkit version"
+    },
+    {
+      "stage": "threat_planning",
+      "status": "not_run",
+      "reason": "stage not implemented in this toolkit version"
+    },
+    {
+      "stage": "dynamic_execution",
+      "status": "not_run",
+      "reason": "preflight blocked; no dependent work"
+    },
+    {
+      "stage": "judgement_report",
+      "status": "completed"
+    }
+  ],
+  "requirements": [
+    {
+      "id": "REQ-DOCUMENT-OWNER-ONLY",
+      "statement": "Only the owner may read, change or delete a document that is not shared, and documents are created only in the name and tenant of their creator.",
+      "confirmation": {
+        "by": "app-owner",
+        "at": "2026-11-01T09:00:00Z",
+        "version": "2"
+      }
+    },
+    {
+      "id": "REQ-ANNOUNCEMENTS-PUBLIC-READ",
+      "statement": "Anyone, signed in or not, may read announcements.",
+      "confirmation": {
+        "by": "app-owner",
+        "at": "2026-11-01T09:00:00Z",
+        "version": "1"
+      }
+    }
+  ],
+  "authorization_matrix": [],
+  "execution_records": [
+    {
+      "schema_version": "1",
+      "run_id": "run-20261101144310-dd352f",
+      "id": "exec-0001",
+      "created_at": "2026-11-01T14:43:10.957425Z",
+      "source_id": "toolkit.scan",
+      "commit": null,
+      "test_id": "READ-same-tenant",
+      "template_id": "cross-user-read-v1",
+      "requirement_id": "REQ-DOCUMENT-OWNER-ONLY",
+      "actor_ref": "same_tenant_non_owner",
+      "resource_ref": "MARK-A-ALICE-PRIVATE",
+      "started_at": "2026-11-01T14:43:10.957410Z",
+      "ended_at": "2026-11-01T14:43:10.957419Z",
+      "result": "blocked",
+      "error": "required inputs missing; nothing was started: commit (受測範圍: the source commit under test) is missing: dynamic testing is not started",
+      "evidence": []
+    },
+    {
+      "schema_version": "1",
+      "run_id": "run-20261101144310-dd352f",
+      "id": "exec-0002",
+      "created_at": "2026-11-01T14:43:10.957431Z",
+      "source_id": "toolkit.scan",
+      "commit": null,
+      "test_id": "READ-other-tenant",
+      "template_id": "cross-user-read-v1",
+      "requirement_id": "REQ-DOCUMENT-OWNER-ONLY",
+      "actor_ref": "other_tenant_user",
+      "resource_ref": "MARK-A-ALICE-PRIVATE",
+      "started_at": "2026-11-01T14:43:10.957410Z",
+      "ended_at": "2026-11-01T14:43:10.957429Z",
+      "result": "blocked",
+      "error": "required inputs missing; nothing was started: commit (受測範圍: the source commit under test) is missing: dynamic testing is not started",
+      "evidence": []
+    }
+  ],
+  "findings": [],
+  "coverage": {
+    "schema_version": "1",
+    "run_id": "run-20261101144310-dd352f",
+    "id": "coverage-0003",
+    "created_at": "2026-11-01T14:43:10.957444Z",
+    "source_id": "toolkit.scan",
+    "commit": null,
+    "inventory_source": "fixed test plan in the ScanManifest (tracer bullet)",
+    "denominator": 5,
+    "executed": 0,
+    "valid_judgements": 0,
+    "blocked": 2,
+    "untested": 0,
+    "unsupported": 3,
+    "unsupported_items": [
+      {
+        "scope": "rls-functions",
+        "reason": "no template for functions (RPC, SECURITY DEFINER) yet; includes writes whose response looks like a denial"
+      },
+      {
+        "scope": "rls-views",
+        "reason": "no template for views yet"
+      },
+      {
+        "scope": "rls-column-privileges",
+        "reason": "no template for column-level privileges or masking yet"
+      }
+    ]
+  },
+  "status_reason": "required inputs missing; nothing was started: commit (受測範圍: the source commit under test) is missing: dynamic testing is not started"
+}

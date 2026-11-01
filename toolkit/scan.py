@@ -458,9 +458,18 @@ LIMIT_RULES = {
 }
 
 
+def _commit(manifest):
+    """The source commit under test (受測範圍 of 〈定義：必要輸入〉, TK-SCP-002), or None when the ScanManifest
+    names no usable one; None then blocks at preflight, the one place TK-DAT-001 allows a null commit."""
+    commit = manifest.get('commit')
+    return commit if isinstance(commit, str) and commit.strip() else None
+
+
 def _input_problems(manifest):
-    """Missing or invalid required inputs of the ScanManifest; each one blocks the run."""
+    """Missing or invalid required inputs (〈定義：必要輸入〉, TK-SCP-002) of the ScanManifest; each one blocks the run."""
     problems = []
+    if _commit(manifest) is None:
+        problems.append('commit (受測範圍: the source commit under test) is missing: dynamic testing is not started')
     scope = manifest.get('scope')
     if not isinstance(scope, dict):
         problems.append('scope (受測範圍) is missing: dynamic testing is not started')
@@ -485,7 +494,7 @@ def run(manifest):
     reported with status blocked and the reason; every planned test is blocked.
     """
     run_id = f'run-{datetime.now(timezone.utc):%Y%m%d%H%M%S}-{secrets.token_hex(3)}'
-    records = _Records(run_id, manifest['commit'])
+    records = _Records(run_id, _commit(manifest))
     missing = _input_problems(manifest)
     if missing:
         return _blocked(manifest, records, 'required inputs missing; nothing was started: ' + '; '.join(missing),
@@ -624,7 +633,7 @@ def _finish(manifest, records, executions, findings, status, reason, stages, env
                            untested=counts['untested'], unsupported=counts['unsupported'] + len(UNSUPPORTED_SCOPES),
                            unsupported_items=[dict(u) for u in UNSUPPORTED_SCOPES] + [dict(g) for g in gaps])
     doc = {'schema_version': '1', 'run_id': records.run_id, 'id': f'report-{records.run_id}', 'created_at': _now(),
-           'source_id': SOURCE_ID, 'commit': manifest['commit'], 'status': status,
+           'source_id': SOURCE_ID, 'commit': records.commit, 'status': status,
            'manifest': {'id': manifest['id'], 'digest': _digest(manifest)},
            'stages': stages, 'requirements': manifest['requirements'], 'authorization_matrix': matrix,
            'execution_records': executions, 'findings': findings, 'coverage': coverage}

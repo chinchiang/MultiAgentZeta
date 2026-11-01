@@ -6,6 +6,18 @@
   "allOf": [
     {"$ref": "#/$defs/common"},
     {
+      "description": "TK-DAT-001: every report names the commit it tested, except one blocked at preflight (toolkit.scan only records null there when the ScanManifest named no commit).",
+      "if": {
+        "required": ["status", "stages"],
+        "properties": {
+          "status": {"const": "blocked"},
+          "stages": {"contains": {"required": ["stage", "status"],
+                                  "properties": {"stage": {"const": "preflight"}, "status": {"const": "blocked"}}}}
+        }
+      },
+      "else": {"properties": {"commit": {"$ref": "#/$defs/text"}}}
+    },
+    {
       "description": "A completed run has a definite result (passed or failed) for every test.",
       "if": {"properties": {"status": {"const": "completed"}}, "required": ["status"]},
       "then": {"properties": {"execution_records": {"items": {"properties": {"result": {"enum": ["passed", "failed"]}}}}}}
@@ -50,7 +62,10 @@
         "id": {"$ref": "#/$defs/text"},
         "created_at": {"$ref": "#/$defs/text"},
         "source_id": {"$ref": "#/$defs/text"},
-        "commit": {"$ref": "#/$defs/text"}
+        "commit": {
+          "description": "The source commit under test; null only in a report blocked at preflight (TK-DAT-001), which toolkit.scan writes when the ScanManifest named none (受測範圍, TK-SCP-002). report.validate() keeps every record on the report's commit.",
+          "anyOf": [{"$ref": "#/$defs/text"}, {"type": "null"}]
+        }
       }
     },
     "execution_record": {

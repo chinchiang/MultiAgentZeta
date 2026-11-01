@@ -77,10 +77,12 @@ def render_markdown(doc):
     problems = validate(doc)
     if problems:
         raise ValueError('invalid report: ' + '; '.join(problems))
+    # TK-DAT-001: a report blocked at preflight may name no commit.
+    commit_text = f'`{doc["commit"]}`' if doc['commit'] is not None else '（未提供）'
     lines = [f'# 執行報告 `{doc["run_id"]}`', '',
              f'- **整體執行狀態**：{RUN_LABELS[doc["status"]]}（`{doc["status"]}`）'
              + (f'；原因：{doc["status_reason"]}' if doc.get('status_reason') else ''),
-             f'- **受測提交**：`{doc["commit"]}`',
+             f'- **受測提交**：{commit_text}',
              f'- **報告建立時間**：{doc["created_at"]}']
     if doc.get('environment'):
         lines.append(f'- **環境模式**：{doc["environment"].get("mode", "")}')

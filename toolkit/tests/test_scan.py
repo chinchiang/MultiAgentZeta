@@ -517,8 +517,32 @@ class MalformedTestFields(unittest.TestCase):
                     self.assertIn(field, ex['error'])
 
 
+def manifest_for_recipe_change(d, change):
+    """A full manifest aimed at a copy of the vulnerable sample whose BuildRecipe was changed (in d)."""
+    from toolkit.tests.test_e1 import failing_copy
+    src = failing_copy(d, recipe_change=change)
+    m = manifest('vulnerable')
+    m['target'] = {'project': str(src), 'source_digest': e1.source_digest(src)}
+    return m
+
+
 class RequiredInputs(unittest.TestCase):
-    """TK-SCP-002: a missing required input is handled as 〈定義：必要輸入〉 says; nothing is started."""
+    """TK-SCP-002: a missing required input is handled as 〈定義：必要輸入〉 says; nothing is started.
+
+    Each category of 〈定義：必要輸入〉, the test that removes it, and what is not covered yet:
+      受測範圍      test_missing_commit_blocks_dynamic_testing, test_missing_scope_blocks_dynamic_testing,
+                    test_each_part_of_the_scope_is_required (commit, endpoints, operations, data scope)
+      獨立安全需求  UnknownRequirement (an unknown or unconfirmed requirement is not run; generating
+                    candidates for confirmation, chapter 2, is not implemented yet)
+      部署資訊      test_missing_deployment_information_blocks_before_start_and_names_the_gap (build method,
+                    external services; environment variable names, test substitute services and marking
+                    the environment differences are not covered yet)
+      測試身分      UnsupportedIdentity (an identity the BuildRecipe lacks is listed as a coverage gap)
+      測試資料      test_missing_test_data_is_not_filled_in
+      復原方式      NoRecovery, NoRecoveryMixedPlanEnv
+      執行限制      test_missing_limits_block_the_run, test_each_limit_is_required_and_no_unlimited_default_is_used,
+                    test_limits_must_be_bounded
+    """
 
     def assert_blocked_before_start(self, m, reason_part):
         rep = scan.run(m).report
@@ -527,6 +551,54 @@ class RequiredInputs(unittest.TestCase):
         self.assertIn(reason_part, rep['status_reason'])
         self.assertNotIn('environment', rep)
         self.assertEqual(set(results(rep).values()), {'blocked'})
+        return rep
+
+    def assert_recipe_gap_blocks_before_start(self, change, reason_part):
+        """A BuildRecipe with one required part removed: the run stops when the recipe is read, before
+        anything starts, and the reason names the missing part."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            rep = self.assert_blocked_before_start(manifest_for_recipe_change(d, change), reason_part)
+        stages = {s['stage']: s['status'] for s in rep['stages']}
+        self.assertEqual(stages['dynamic_execution'], 'blocked')
+        return rep
+
+    def test_missing_deployment_information_blocks_before_start_and_names_the_gap(self):
+        # 部署資訊: 建置方式 (source_build) and 外部相依服務 (service_init.services). The handling's 受阻項目 is
+        # covered: nothing starts and the reason names the missing part. Its 環境差異 is not: see the mapping above.
+        for step, setting in (('source_build', None), ('source_build', 'tools'),
+                              ('service_init', None), ('service_init', 'services')):
+            with self.subTest(step=step, setting=setting):
+                def remove(r, step=step, setting=setting):
+                    if setting:
+                        del r[step][setting]
+                    else:
+                        del r[step]
+                self.assert_recipe_gap_blocks_before_start(remove, step if not setting else f'{step}.{setting}')
+
+    def test_missing_test_data_is_not_filled_in(self):
+        # 測試資料: 合成資料／初始化方法 (seed), 擁有權標記 (tenants, accounts), 唯一識別標記 (markers).
+        # 不使用正式機敏資料補位: no case runs and no environment starts, so no other data can stand in.
+        for setting in (None, 'seed', 'tenants', 'accounts', 'markers'):
+            with self.subTest(setting=setting):
+                def remove(r, setting=setting):
+                    if setting:
+                        del r['test_data'][setting]
+                    else:
+                        del r['test_data']
+                self.assert_recipe_gap_blocks_before_start(remove, 'test_data' if not setting else f'test_data.{setting}')
+
+    def test_missing_commit_blocks_dynamic_testing(self):
+        # 受測範圍 includes the commit under test; without one, no record can be bound to it (TK-DAT-001).
+        for value in ('absent', None, '', '   ', 7):
+            with self.subTest(commit=value):
+                m = manifest('vulnerable')
+                if value == 'absent':
+                    del m['commit']
+                else:
+                    m['commit'] = value
+                rep = self.assert_blocked_before_start(m, 'commit')
+                self.assertIsNone(rep['commit'])
 
     def test_missing_scope_blocks_dynamic_testing(self):
         m = manifest('vulnerable')
@@ -632,16 +704,12 @@ class NoRecovery(unittest.TestCase):
 
     def test_write_cases_are_not_run_without_a_reset(self):
         import tempfile
-        from toolkit import e1
-        from toolkit.tests.test_e1 import failing_copy
 
         def no_reset(r):
             r['snapshot_reset']['reset_scope'] = 'none'
             r['source_build']['tools'] = ['no-such-tool']  # fail fast if the run ever gets that far
         with tempfile.TemporaryDirectory() as d:
-            src = failing_copy(d, recipe_change=no_reset)
-            m = manifest('vulnerable')
-            m['target'] = {'project': str(src), 'source_digest': e1.source_digest(src)}
+            m = manifest_for_recipe_change(d, no_reset)
             m['tests'] = [t for t in m['tests'] if scan.DENIAL_TEMPLATES.get(t['template_id'], {}).get('writes')]
             rep = scan.run(m).report
         self.assertEqual(report.validate(rep), [])
