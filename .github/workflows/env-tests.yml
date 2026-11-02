@@ -45,18 +45,9 @@ jobs:
           test "$got" = "$want"
 
       - name: Install Supabase CLI verified against the support matrix
-        # Version and archive digest are read from the support matrix, the single source;
-        # e1.py checks the binary digest again before use.
-        run: |
-          ver=$(jq -r '.tools["supabase-cli"].version' toolkit/support-matrix.json)
-          sha=$(jq -r '.tools["supabase-cli"].archive_sha256' toolkit/support-matrix.json)
-          dir="$RUNNER_TEMP/supabase-cli"
-          mkdir -p "$dir"
-          curl -fsSL -o "$dir/cli.tar.gz" \
-            "https://github.com/supabase/cli/releases/download/v$ver/supabase_linux_amd64.tar.gz"
-          echo "$sha  $dir/cli.tar.gz" | sha256sum -c -
-          tar -xzf "$dir/cli.tar.gz" -C "$dir" supabase
-          echo "MAZ_SUPABASE_BIN=$dir/supabase" >> "$GITHUB_ENV"
+        # The same script developers use; it reads version and digests from the support matrix,
+        # the single source. e1.py checks the binary digest again before use.
+        run: echo "MAZ_SUPABASE_BIN=$(toolkit/tools/fetch-supabase-cli.sh "$RUNNER_TEMP/supabase-cli")" >> "$GITHUB_ENV"
 
       - name: Install toolkit dependencies (hash-pinned)
         run: |
