@@ -66,6 +66,8 @@ RUN_LABELS = {'pending': '待執行', 'running': '執行中', 'completed': '完�
               'blocked': '受阻', 'failed': '失敗', 'cancelled': '已取消'}
 RESULT_LABELS = {'passed': '通過', 'failed': '未通過', 'blocked': '受阻', 'error': '執行錯誤',
                  'untested': '未測試', 'unsupported': '不支援'}
+# 〈定義：確認清單〉 處理狀態 of a confirmation item; not a finding state.
+REVIEW_LABELS = {'pending': '待確認', 'accepted': '接受', 'modified': '修改', 'not_applicable': '不適用'}
 FINDING_LABELS = {'confirmed': '已確認', 'evidence_pending': '證據待補', 'not_reproduced': '本次未重現',
                   'excluded': '已排除', 'fixed_pending_regression': '已修復待回歸', 'regression_passed': '回歸通過'}
 COMPLETED_NOTE = ('「完整完成」表示計畫內的測試都取得明確結果；只對本次範圍與條件有效，'
@@ -90,10 +92,13 @@ def render_markdown(doc):
         lines += ['', f'> {COMPLETED_NOTE}']
 
     if doc.get('requirements'):
-        lines += ['', '## 安全需求', '', '| 需求 | 內容 | 確認 |', '| :--- | :--- | :--- |']
+        lines += ['', '## 安全需求（確認項目）', '', '| 確認項目 | 來源 | 內容 | 處理狀態 | 確認者 |',
+                  '| :--- | :--- | :--- | :--- | :--- |']
         for r in doc['requirements']:
-            c = r.get('confirmation') or {}
-            lines.append(f'| `{r["id"]}` | {r.get("statement", "")} | {c.get("by", "未確認")} {c.get("at", "")} |')
+            c = r['confirmation']
+            state = REVIEW_LABELS[r['status']] + ('（範圍外）' if r['out_of_scope'] else '')
+            who = f'{c["by"]} {c["at"]}' if c['by'] else '（未確認）'
+            lines.append(f'| `{r["id"]}` v{c["version"]} | {r["source"]} | {r["statement"]} | {state} | {who} |')
 
     if doc.get('authorization_matrix'):
         lines += ['', '## 授權矩陣中的身分', '', '| 身分 | 傳遞方式 | 路徑 |', '| :--- | :--- | :--- |']

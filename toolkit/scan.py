@@ -13,10 +13,11 @@ import socket
 import string
 import urllib.error
 import urllib.request
+from pathlib import Path
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from toolkit import e1, observer, report
+from toolkit import confirmation, e1, observer, policy, report
 
 SOURCE_ID = 'toolkit.scan'
 FINGERPRINT_VERSION = 'fp-authz-v1'
@@ -41,6 +42,7 @@ class _Records:
 
     def __init__(self, run_id, commit):
         self.run_id, self.commit, self.n = run_id, commit, 0
+        self.items, self.confirmation_list = {}, None  # 〈定義：確認清單〉 as read or handed over in this run
 
     def new(self, prefix, **fields):
         self.n += 1
@@ -374,9 +376,9 @@ def _identity_problem(test, identities):
     return None
 
 
-def _test_problem(test, manifest, identities, restorable=True):
+def _test_problem(test, items, identities, restorable=True):
     """(result, reason) for a test that cannot run, or None."""
-    reason = _plan_problem(test) or _requirement_problem(test, manifest)
+    reason = _plan_problem(test) or _item_problem(test, items)
     if reason:
         return 'blocked', reason
     if not restorable and DENIAL_TEMPLATES.get(test['template_id'], {}).get('writes'):
@@ -395,16 +397,70 @@ def _identity_gaps(manifest, identities):
     return [{'scope': f'identity:{n}', 'reason': 'no such identity in the BuildRecipe (測試身分)'} for n in names]
 
 
-def _requirement_problem(test, manifest):
-    """需求不明: the test's requirement must be in the manifest and confirmed. The toolkit never
-    infers a requirement from the implementation (TK-REQ-005); confirmation itself is #9."""
+def _item_problem(test, items):
+    """需求不明: the confirmation item the test rests on must be in the list, in scope and reviewed
+    with the fields its review state needs (〈定義：確認清單〉, TK-SCP-003). The toolkit never infers
+    a requirement from the implementation (TK-REQ-005). A pending item blocks the test until the
+    judgement cap for pending S2 items (TK-REQ-003) is in place (#41)."""
     rid = test.get('requirement_id')
-    req = next((r for r in manifest.get('requirements') or [] if r.get('id') == rid), None)
-    if req is None:
-        return f'requirement {rid!r} is not in the ScanManifest; requirement unknown, not inferred from the code'
-    c = req.get('confirmation') or {}
-    if not (c.get('by') and c.get('at') and c.get('version')):
-        return f'requirement {rid!r} is not confirmed (by, at, version); the test is not run'
+    item = items.get(rid)
+    if item is None:
+        return f'requirement {rid!r} is not in the confirmation list; requirement unknown, not inferred from the code'
+    if item['out_of_scope']:
+        return f'confirmation item {rid!r} is out of scope; the test is not run'
+    if item['status'] == 'pending':
+        return f'confirmation item {rid!r} is pending (待確認); the test is not run until it is reviewed'
+    if item['status'] == 'not_applicable':
+        return f'confirmation item {rid!r} is not_applicable (不適用); the test is not run'
+    return confirmation.review_problem(item)
+
+
+S1_FIELDS = ('id', 'statement', 'resources', 'rule')
+
+
+def _s1_problems(manifest):
+    """S1 entries are the owner's spec as input (〈定義：確認清單〉): id, statement, resources and an
+    allow/deny rule, and no confirmation, which belongs in the confirmation list."""
+    problems = []
+    for i, entry in enumerate(manifest.get('requirements') or []):
+        if not isinstance(entry, dict):
+            problems.append(f'requirements/{i} must be an object')
+            continue
+        problems += [f'requirements/{i}.{name} (S1 entry) is missing' for name in S1_FIELDS if not entry.get(name)]
+        if entry.get('rule') and entry['rule'] not in policy.RULES:
+            problems.append(f'requirements/{i}.rule must be one of {policy.RULES}')
+        if 'confirmation' in entry:
+            problems.append(f'requirements/{i}.confirmation: S1 entries carry no confirmation; it is given '
+                            f'in the confirmation list')
+    return problems
+
+
+def _load_confirmation_list(manifest, records):
+    """Read the referenced list, or generate it and hand it over when the file does not exist yet;
+    bring it up to date with the S2 template and the scope. Returns a problem or None; the items
+    and the list reference end up on records."""
+    ref = manifest.get('confirmation_list')
+    path = ref.get('path') if isinstance(ref, dict) else None
+    if not path:
+        return ('confirmation_list.path (獨立安全需求) is missing: there is no control-zone location to read '
+                'the confirmation list from or hand it over to')
+    source, template = manifest['target']['project'], policy.load_template()
+    resources, s1 = manifest['scope']['resources'], manifest.get('requirements') or []
+    try:
+        if not Path(path).exists():
+            doc, updated = confirmation.generate(template, resources, s1), True
+        elif not ref.get('digest'):
+            return f'confirmation_list.digest is missing: the list at {path} is read only with its digest'
+        else:
+            existing = confirmation.read(path, ref['digest'], source)
+            doc = confirmation.update(existing, template, resources, s1)
+            updated = doc != existing
+        digest = confirmation.write(path, doc, source) if updated else ref['digest']
+    except confirmation.ConfirmationListUnusable as e:
+        return f'confirmation list unusable: {e}'
+    records.items = {i['item_id']: i for i in doc['items']}
+    records.confirmation_list = {'path': str(path), 'digest': digest, 'list_version': doc['list_version'],
+                                 'updated': updated}
     return None
 
 
@@ -445,7 +501,7 @@ def _is_positive_int(v):
 
 # 〈定義：必要輸入〉 checked from the ScanManifest. Every limit must be stated: a missing or
 # unbounded limit is never replaced by an unlimited default (TK-SCP-002).
-SCOPE_PARTS = ('endpoints', 'allowed_operations', 'data_scope')
+SCOPE_PARTS = ('endpoints', 'resources', 'allowed_operations', 'data_scope')
 LIMIT_RULES = {
     'max_cost_usd': (lambda v: isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 0,
                      'a number >= 0 (0 allows no spending)'),
@@ -511,7 +567,7 @@ def run(manifest):
     if missing:
         return _blocked(manifest, records, 'required inputs missing; nothing was started: ' + '; '.join(missing),
                         stage='preflight')
-    overrides = _template_override_problems(manifest)
+    overrides = _template_override_problems(manifest) + _s1_problems(manifest)
     if overrides:
         return _blocked(manifest, records, 'nothing was started: ' + '; '.join(overrides), stage='preflight')
     project = manifest['target']['project']
@@ -519,14 +575,17 @@ def run(manifest):
     if pinned != actual:
         return _blocked(manifest, records, f'source_digest of the ScanManifest ({pinned}) does not match '
                                            f'the project ({actual}); nothing was started', stage='preflight')
+    problem = _load_confirmation_list(manifest, records)
+    if problem:
+        return _blocked(manifest, records, f'nothing was started: {problem}', stage='preflight')
     recipe, _ = e1.load_recipe(project)
     identities = {i['name'] for i in recipe['auth']['identities']} if recipe else None
     restorable = not (recipe and recipe['snapshot_reset'].get('reset_scope') == 'none')
-    problems = {t['test_id']: _test_problem(t, manifest, identities, restorable) for t in manifest['tests']}
+    problems = {t['test_id']: _test_problem(t, records.items, identities, restorable) for t in manifest['tests']}
     gaps = _identity_gaps(manifest, identities)
     if all(problems.values()):
-        return _blocked(manifest, records, 'no test in the ScanManifest can run; nothing was started',
-                        per_test=problems, stage='preflight', gaps=gaps)
+        return _blocked(manifest, records, 'no test in the ScanManifest can run; nothing was started'
+                        + _handover_note(records), per_test=problems, stage='preflight', gaps=gaps)
     prepared = e1.prepare(project)
     if isinstance(prepared, e1.Blocked):
         return _blocked(manifest, records, f'environment blocked at BuildRecipe step {prepared.step}: '
@@ -600,6 +659,24 @@ def _execution(records, test, started, result, error=None):
                        result=result, error=error, evidence=[])
 
 
+def _handover_note(records):
+    """Where a generated or updated confirmation list waits for the owner's review (交付確認)."""
+    ref = records.confirmation_list
+    if not (ref and ref['updated']):
+        return ''
+    return (f'; the confirmation list was handed over for review at {ref["path"]} ({ref["digest"]}): review its '
+            f'pending items and reference it in the ScanManifest by this path and digest')
+
+
+def _requirements(manifest, records):
+    """The confirmation items the planned tests rest on, as the report shows them."""
+    used = dict.fromkeys(t.get('requirement_id') for t in manifest['tests'])
+    return [{'id': i['item_id'], 'source': i['source'], 'statement': i['statement'], 'rule': i['rule'],
+             'status': i['status'], 'out_of_scope': i['out_of_scope'],
+             'confirmation': {'by': i['review']['by'], 'at': i['review']['at'], 'version': i['version']}}
+            for rid in used if (i := records.items.get(rid))]
+
+
 def _blocked(manifest, records, reason, per_test=None, stage='preflight', gaps=()):
     """Every planned test blocked at `stage`; later stages do not run (〈定義：工作階段〉)."""
     now = _now()
@@ -650,12 +727,14 @@ def _finish(manifest, records, executions, findings, status, reason, stages, env
     doc = {'schema_version': '1', 'run_id': records.run_id, 'id': f'report-{records.run_id}', 'created_at': _now(),
            'source_id': SOURCE_ID, 'commit': records.commit, 'status': status,
            'manifest': {'id': manifest['id'], 'digest': _digest(manifest)},
-           'stages': stages, 'requirements': manifest['requirements'], 'authorization_matrix': matrix,
+           'stages': stages, 'requirements': _requirements(manifest, records), 'authorization_matrix': matrix,
            'execution_records': executions, 'findings': findings, 'coverage': coverage}
     if reason:
         doc['status_reason'] = reason
     if environment:
         doc['environment'] = environment
+    if records.confirmation_list:
+        doc['confirmation_list'] = dict(records.confirmation_list)
     problems = report.validate(doc)
     if problems:
         raise RuntimeError('the toolkit produced an invalid report: ' + '; '.join(problems))

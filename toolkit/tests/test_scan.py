@@ -6,8 +6,12 @@ Expected results follow the sample design (samples/object-authz):
   patched     only the owner can; legit adds read-only sharing of documents marked shared
 Creating a document as someone else is denied in every version (TK-DYN-007).
 """
+import atexit
 import copy
+import json
+import shutil
 import socket
+import tempfile
 import threading
 import unittest
 from pathlib import Path
@@ -15,17 +19,14 @@ from pathlib import Path
 from toolkit import e1, report, scan
 from toolkit.tests.test_e1 import SAMPLES, needs_env
 
-REQUIREMENT = {
-    'id': 'REQ-DOCUMENT-OWNER-ONLY',
-    'statement': 'Only the owner may read, change or delete a document that is not shared, '
-                 'and documents are created only in the name and tenant of their creator.',
-    'confirmation': {'by': 'app-owner', 'at': '2026-11-01T09:00:00Z', 'version': '2'},
-}
-PUBLIC_REQUIREMENT = {
-    'id': 'REQ-ANNOUNCEMENTS-PUBLIC-READ',
-    'statement': 'Anyone, signed in or not, may read announcements.',
-    'confirmation': {'by': 'app-owner', 'at': '2026-11-01T09:00:00Z', 'version': '1'},
-}
+# S1: the owner's own spec, given in the ScanManifest without any confirmation (〈定義：確認清單〉).
+S1_PUBLIC = {'id': 'S1-ANNOUNCEMENTS-PUBLIC-READ', 'statement': 'Anyone, signed in or not, may read announcements.',
+             'resources': ['announcements'], 'rule': 'allow'}
+# Confirmation items the tests rest on: an S2 clause on a resource, or an S1 entry.
+OWNER_ITEM, TENANT_ITEM, ANON_ITEM = 'S2-OWNER-ONLY@documents', 'S2-TENANT-ISOLATION@documents', 'S2-ANON-NO-ACCESS@documents'
+PUBLIC_ITEM = S1_PUBLIC['id']
+ITEM_FOR_ACTOR = {'same_tenant_non_owner': OWNER_ITEM, 'other_tenant_user': TENANT_ITEM, 'anonymous': ANON_ITEM}
+ACCEPTED = (OWNER_ITEM, TENANT_ITEM, ANON_ITEM, PUBLIC_ITEM)
 # Seeded identifiers (samples/object-authz/*/supabase/seed.sql).
 ALICE_ID = 'a0000000-0000-4000-8000-00000000a11c'
 TENANT_A = '7e000000-0000-4000-8000-00000000000a'
@@ -39,11 +40,11 @@ OPERATIONS = {
     'CREATE': {'template_id': 'cross-user-create-v1', 'resource_ref': 'MARK-A-CREATED-AS-ALICE',
                'control_ref': 'MARK-A-OWNER-CONTROL', 'claimed_owner_id': ALICE_ID, 'tenant_id': TENANT_A},
 }
-TESTS = [{'test_id': f'{op}-{short}', 'requirement_id': REQUIREMENT['id'], 'owner_ref': 'owner',
+TESTS = [{'test_id': f'{op}-{short}', 'requirement_id': ITEM_FOR_ACTOR[actor], 'owner_ref': 'owner',
           'observation_ref': 'document-row-state-v1', 'actor_ref': actor, **params}
          for op, params in OPERATIONS.items() for short, actor in ACTORS.items()]
 # TK-DYN-004: anonymous requests with both API key formats (legacy anon JWT, sb_publishable_).
-TESTS += [{'test_id': f'READ-anonymous-{fmt}', 'requirement_id': REQUIREMENT['id'], 'owner_ref': 'owner',
+TESTS += [{'test_id': f'READ-anonymous-{fmt}', 'requirement_id': ANON_ITEM, 'owner_ref': 'owner',
            'observation_ref': 'document-row-state-v1', 'actor_ref': 'anonymous', 'api_key': fmt,
            **OPERATIONS['READ']}
           for fmt in ('anon-jwt', 'publishable')]
@@ -51,7 +52,7 @@ TESTS += [{'test_id': f'READ-anonymous-{fmt}', 'requirement_id': REQUIREMENT['id
 PUBLIC_READERS = {'anonymous-anon-jwt': ('anonymous', 'anon-jwt'), 'anonymous-publishable': ('anonymous', 'publishable'),
                   'other-tenant': ('other_tenant_user', 'anon-jwt')}
 TESTS += [{'test_id': f'PUBLIC-READ-{short}', 'template_id': 'public-read-v1',
-           'requirement_id': PUBLIC_REQUIREMENT['id'], 'actor_ref': actor, 'api_key': fmt,
+           'requirement_id': PUBLIC_ITEM, 'actor_ref': actor, 'api_key': fmt,
            'resource_ref': 'MARK-PUBLIC-ANNOUNCEMENT'}
           for short, (actor, fmt) in PUBLIC_READERS.items()]
 
@@ -68,13 +69,31 @@ ALL_PASSED = {t['test_id']: 'passed' for t in TESTS}
 DENIAL_TESTS = [t for t in TESTS if t['template_id'] in scan.DENIAL_TEMPLATES]
 
 
-# 〈定義：必要輸入〉 受測範圍: endpoints, allowed operations and data scope.
+# 〈定義：必要輸入〉 受測範圍: endpoints, resources under test, allowed operations and data scope.
 SCOPE = {'endpoints': ['/rest/v1/documents', '/rest/v1/announcements', '/auth/v1/user'],
+         'resources': ['documents', 'announcements'],
          'allowed_operations': ['GET', 'POST', 'PATCH', 'DELETE'],
          'data_scope': 'synthetic sample data of samples/object-authz only'}
 # 〈定義：必要輸入〉 執行限制: cost, time, request volume, concurrency, model providers, network allow-list.
 LIMITS = {'max_cost_usd': 0, 'max_duration_seconds': 3600, 'max_requests': 500, 'max_concurrency': 1,
           'model_providers': [], 'network_allowlist': ['127.0.0.1']}
+
+
+CONTROL = Path(tempfile.mkdtemp(prefix='maz-control-'))  # the control zone of these tests, outside every sample
+atexit.register(shutil.rmtree, CONTROL, ignore_errors=True)
+
+
+def reviewed_list(source, accepted=ACCEPTED, s1=(S1_PUBLIC,), resources=None):
+    """A confirmation list in the control zone where the owner accepted the given items (test only:
+    in a real run a person edits the list). Returns the ScanManifest reference {path, digest}."""
+    from toolkit import confirmation, policy
+    doc = confirmation.generate(policy.load_template(), resources or SCOPE['resources'], list(s1))
+    for item in doc['items']:
+        if item['item_id'] in accepted:
+            item['status'] = 'accepted'
+            item['review'].update(by='app-owner', at='2026-11-02T09:00:00Z')
+    path = Path(tempfile.mkdtemp(dir=CONTROL)) / 'confirmation-list.json'
+    return {'path': str(path), 'digest': confirmation.write(path, doc, source)}
 
 
 def manifest(version):
@@ -85,7 +104,8 @@ def manifest(version):
         'id': f'manifest-object-authz-{version}',
         'commit': 'test-commit-0001',
         'target': {'project': str(project), 'source_digest': e1.source_digest(project)},
-        'requirements': [copy.deepcopy(REQUIREMENT), copy.deepcopy(PUBLIC_REQUIREMENT)],
+        'requirements': [copy.deepcopy(S1_PUBLIC)],
+        'confirmation_list': reviewed_list(project),
         'scope': copy.deepcopy(SCOPE),
         'limits': copy.deepcopy(LIMITS),
         'tests': copy.deepcopy(TESTS),
@@ -129,7 +149,7 @@ class VulnerableRunEnv(unittest.TestCase):
                          ['DELETE-same-tenant', 'READ-same-tenant', 'UPDATE-same-tenant'])
         for f in findings:
             self.assertEqual((f['status'], f['requirement_id'], len(f['execution_record_ids'])),
-                             ('confirmed', REQUIREMENT['id'], 1))
+                             ('confirmed', OWNER_ITEM, 1))
             self.assertEqual(f['fingerprint_version'], 'fp-authz-v1')
             self.assertRegex(f['fingerprint'], r'^sha256:[0-9a-f]{64}$')
         self.assertEqual(len({f['fingerprint'] for f in findings}), 3)  # one problem per operation
@@ -531,9 +551,10 @@ class RequiredInputs(unittest.TestCase):
 
     Each category of 〈定義：必要輸入〉, the test that removes it, and what is not covered yet:
       受測範圍      test_missing_commit_blocks_dynamic_testing, test_missing_scope_blocks_dynamic_testing,
-                    test_each_part_of_the_scope_is_required (commit, endpoints, operations, data scope)
-      獨立安全需求  UnknownRequirement (an unknown or unconfirmed requirement is not run; generating
-                    candidates for confirmation, chapter 2, is not implemented yet)
+                    test_each_part_of_the_scope_is_required (commit, endpoints, resources, operations, data scope)
+      獨立安全需求  ConfirmationListInScan (without a confirmation list one is generated, all pending, and
+                    handed over; the list is read only from the control zone with its digest),
+                    UnknownRequirement (a test on an unknown or pending item is not run)
       部署資訊      test_missing_deployment_information_blocks_before_start_and_names_the_gap (build method,
                     external services; environment variable names, test substitute services and marking
                     the environment differences are not covered yet)
@@ -660,35 +681,143 @@ class UnknownRequirement(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             m = preflight_manifest(d)
             for t in m['tests']:
-                t['requirement_id'] = 'REQ-NOT-IN-THE-MANIFEST'
+                t['requirement_id'] = 'REQ-NOT-IN-THE-LIST'
             for result, error in self.errors(m).values():
                 self.assertEqual(result, 'blocked')
-                self.assertIn('REQ-NOT-IN-THE-MANIFEST', error)
+                self.assertIn('REQ-NOT-IN-THE-LIST', error)
 
-    def test_test_citing_an_unconfirmed_requirement_is_blocked(self):
+    def test_test_citing_a_pending_item_is_blocked(self):
+        # Until the judgement cap (#41), a test resting on a pending item is not run.
         import tempfile
         with tempfile.TemporaryDirectory() as d:
             m = preflight_manifest(d)
-            for r in m['requirements']:
-                del r['confirmation']
+            m['confirmation_list'] = reviewed_list(d, accepted=())
             for result, error in self.errors(m).values():
                 self.assertEqual(result, 'blocked')
-                self.assertIn('not confirmed', error)
+                self.assertIn('pending', error)
+
+
+class ConfirmationListInScan(unittest.TestCase):
+    """〈定義：確認清單〉 in a run: generated and handed over when missing, read only from the control zone."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = preflight_manifest(self.tmp.name)
+
+    def blocked(self, m):
+        rep = scan.run(m).report
+        self.assertEqual(report.validate(rep), [])
+        self.assertEqual(rep['status'], 'blocked')
+        self.assertNotIn('environment', rep)
+        return rep
+
+    def test_without_a_list_one_is_generated_all_pending_and_handed_over(self):
+        from toolkit import confirmation
+        path = Path(tempfile.mkdtemp(dir=CONTROL)) / 'new-list.json'
+        self.m['confirmation_list'] = {'path': str(path)}
+        rep = self.blocked(self.m)
+        doc = json.loads(path.read_text(encoding='utf-8'))
+        self.assertEqual(confirmation.validate(doc), [])
+        self.assertEqual({i['status'] for i in doc['items']}, {'pending'})
+        self.assertEqual(sorted(i['item_id'] for i in doc['items']), sorted(
+            [f'{c}@{r}' for c in ('S2-OWNER-ONLY', 'S2-TENANT-ISOLATION', 'S2-ANON-NO-ACCESS')
+             for r in ('documents', 'announcements')] + [PUBLIC_ITEM]))
+        self.assertIn(str(path), rep['status_reason'])
+        self.assertIn(confirmation.file_digest(path), rep['status_reason'])
+        for e in rep['execution_records']:
+            self.assertEqual(e['result'], 'blocked')
+            self.assertIn('pending', e['error'])
+
+    def test_the_list_path_is_required(self):
+        for value in (None, {}, {'digest': 'sha256:' + '0' * 64}):
+            with self.subTest(value=value):
+                m = copy.deepcopy(self.m)
+                if value is None:
+                    del m['confirmation_list']
+                else:
+                    m['confirmation_list'] = value
+                self.assertIn('confirmation_list.path', self.blocked(m)['status_reason'])
+
+    def test_a_list_inside_the_sample_source_is_refused(self):
+        self.m['confirmation_list'] = {'path': str(Path(self.tmp.name) / 'confirmation-list.json')}
+        rep = self.blocked(self.m)
+        self.assertIn('inside the sample source', rep['status_reason'])
+        self.assertFalse((Path(self.tmp.name) / 'confirmation-list.json').exists())
+
+    def test_an_existing_list_needs_its_digest_and_it_must_match(self):
+        ref = self.m['confirmation_list']
+        for digest in (None, 'sha256:' + '0' * 64):
+            with self.subTest(digest=digest):
+                self.m['confirmation_list'] = {'path': ref['path']} if digest is None else {**ref, 'digest': digest}
+                self.assertIn('digest', self.blocked(self.m)['status_reason'])
+
+    def test_s1_entries_carry_no_confirmation(self):
+        self.m['requirements'][0]['confirmation'] = {'by': 'app-owner', 'at': '2026-11-02T09:00:00Z'}
+        self.assertIn('confirmation list', self.blocked(self.m)['status_reason'])
+
+    def test_s1_entries_need_id_statement_resources_and_rule(self):
+        for field in ('id', 'statement', 'resources', 'rule'):
+            with self.subTest(missing=field):
+                m = copy.deepcopy(self.m)
+                del m['requirements'][0][field]
+                self.assertIn(field, self.blocked(m)['status_reason'])
+
+    def test_tests_on_incomplete_or_not_applicable_items_are_blocked(self):
+        from toolkit import confirmation
+        ref = self.m['confirmation_list']
+        doc = json.loads(Path(ref['path']).read_text(encoding='utf-8'))
+        items = {i['item_id']: i for i in doc['items']}
+        items[OWNER_ITEM]['review']['at'] = None                      # accepted, but when?
+        items[TENANT_ITEM].update(status='not_applicable')
+        items[TENANT_ITEM]['review'].update(reason='single tenant', basis='S1-X')
+        items[ANON_ITEM]['review']['by'] = None
+        items[PUBLIC_ITEM]['review']['by'] = None
+        self.m['confirmation_list'] = {'path': ref['path'], 'digest': confirmation.write(ref['path'], doc, self.tmp.name)}
+        errors = {e['test_id']: e['error'] for e in self.blocked(self.m)['execution_records']}
+        self.assertIn('lacks at', errors['READ-same-tenant'])
+        self.assertIn('not_applicable', errors['READ-other-tenant'])
+        self.assertIn('lacks by', errors['READ-anonymous-anon-jwt'])
+        self.assertIn('lacks by', errors['PUBLIC-READ-other-tenant'])
+
+    def test_tests_on_items_out_of_scope_are_blocked(self):
+        # documents leaves the scope: its items are marked out of scope and keep their review state.
+        self.m['scope']['resources'] = ['announcements']
+        self.m['tests'] = [t for t in self.m['tests'] if t['requirement_id'] != PUBLIC_ITEM]
+        errors = {e['test_id']: e['error'] for e in self.blocked(self.m)['execution_records']}
+        self.assertIn('out of scope', errors['READ-same-tenant'])
+        self.assertIn('out of scope', errors['READ-anonymous-anon-jwt'])
+        doc = json.loads(Path(self.m['confirmation_list']['path']).read_text(encoding='utf-8'))
+        owner = next(i for i in doc['items'] if i['item_id'] == OWNER_ITEM)
+        self.assertEqual((owner['out_of_scope'], owner['status']), (True, 'accepted'))
+
+    def test_a_list_from_an_older_scope_is_updated_and_its_new_items_are_pending(self):
+        from toolkit import confirmation
+        self.m['confirmation_list'] = reviewed_list(self.tmp.name, resources=['documents'])
+        before = json.loads(Path(self.m['confirmation_list']['path']).read_text(encoding='utf-8'))
+        rep = scan.run(self.m).report
+        after = json.loads(Path(self.m['confirmation_list']['path']).read_text(encoding='utf-8'))
+        self.assertEqual(after['list_version'], before['list_version'] + 1)
+        self.assertEqual({i['item_id']: i['status'] for i in after['items'] if i['item_id'].endswith('@announcements')},
+                         {f'{c}@announcements': 'pending' for c in ('S2-OWNER-ONLY', 'S2-TENANT-ISOLATION', 'S2-ANON-NO-ACCESS')})
+        self.assertEqual(next(i for i in after['items'] if i['item_id'] == OWNER_ITEM)['status'], 'accepted')
+        self.assertEqual(rep['confirmation_list'], {'path': self.m['confirmation_list']['path'],
+                                                    'digest': confirmation.file_digest(self.m['confirmation_list']['path']),
+                                                    'list_version': after['list_version'], 'updated': True})
 
 
 def self_acceptance_manifest(version, template):
     """A ScanManifest of the S2 template's self-acceptance cases for one sample version (TK-REQ-008).
 
-    Until the confirmation list exists (#40), requirements carry their confirmation inline; here each
-    clause is confirmed by the self-acceptance harness, in this test only.
+    Each clause is accepted on documents in a confirmation list written by this test, as the
+    owner of a sample would; the toolkit itself never accepts an item (TK-REQ-009).
     """
     m = manifest(version)
     m['id'] = f'manifest-s2-self-acceptance-{version}'
-    m['requirements'] = [{'id': c['id'], 'statement': c['statement'],
-                          'confirmation': {'by': 'template-self-acceptance', 'at': '2026-11-02T00:00:00Z',
-                                           'version': template['version']}}
-                         for c in template['clauses']]
-    m['tests'] = [{'test_id': c['case_id'], 'requirement_id': c['clause'], **c['test']}
+    m['requirements'] = []
+    m['confirmation_list'] = reviewed_list(SAMPLES / version, accepted=[f'{c["id"]}@documents' for c in template['clauses']],
+                                           s1=())
+    m['tests'] = [{'test_id': c['case_id'], 'requirement_id': f'{c["clause"]}@documents', **c['test']}
                   for c in template['self_acceptance']['cases']]
     return m
 

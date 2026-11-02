@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/chinchiang/MultiAgentZeta/toolkit/schemas/confirmation-list-v1.json",
+  "title": "Confirmation list (〈定義：確認清單〉)",
+  "description": "The list the application owner reviews item by item (TK-REQ-001). Lives in the control zone, outside the sample source; a ScanManifest references it by path and digest. The toolkit only writes pending, and marks out_of_scope (TK-REQ-009).",
+  "type": "object",
+  "required": ["schema_version", "list_version", "s2_template", "items"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"const": "1"},
+    "list_version": {"type": "integer", "minimum": 1},
+    "s2_template": {
+      "description": "The S2 template the list was produced from (TK-REQ-004, TK-REQ-008).",
+      "type": "object",
+      "required": ["policy_template_id", "version", "digest"],
+      "additionalProperties": false,
+      "properties": {
+        "policy_template_id": {"type": "string", "minLength": 1},
+        "version": {"type": "string", "minLength": 1},
+        "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+      }
+    },
+    "items": {"type": "array", "items": {"$ref": "#/$defs/item"}}
+  },
+  "$defs": {
+    "status": {
+      "description": "Review state 處理狀態: pending 待確認, accepted 接受, modified 修改, not_applicable 不適用. out_of_scope is a separate flag, not a review state.",
+      "enum": ["pending", "accepted", "modified", "not_applicable"]
+    },
+    "rule": {"enum": ["deny", "allow"]},
+    "review": {
+      "type": "object",
+      "required": ["by", "at", "reason", "basis", "modified_rule", "allowed_tests", "expiry"],
+      "additionalProperties": false,
+      "properties": {
+        "by": {"type": ["string", "null"]},
+        "at": {"type": ["string", "null"]},
+        "reason": {"type": ["string", "null"]},
+        "basis": {"type": ["string", "null"], "description": "Spec basis: an S1 entry id or the owner's spec text."},
+        "modified_rule": {"oneOf": [{"$ref": "#/$defs/rule"}, {"type": "null"}]},
+        "allowed_tests": {"type": "array", "items": {"type": "string", "minLength": 1},
+                          "description": "Allowed-case tests that show a 合法例外 (TK-DYN-003)."},
+        "expiry": {"type": ["string", "null"], "description": "Expiry condition of a 合法例外."}
+      }
+    },
+    "version_fields": {
+      "type": "object",
+      "required": ["item_id", "source", "statement", "rule", "version", "status", "review"],
+      "properties": {
+        "item_id": {"type": "string", "minLength": 1},
+        "source": {"enum": ["S1", "S2"], "description": "Never the implementation (TK-REQ-005)."},
+        "clause_id": {"type": "string", "minLength": 1},
+        "resource": {"type": "string", "minLength": 1},
+        "resources": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "statement": {"type": "string", "minLength": 1},
+        "rule": {"$ref": "#/$defs/rule"},
+        "version": {"type": "integer", "minimum": 1},
+        "status": {"$ref": "#/$defs/status"},
+        "review": {"$ref": "#/$defs/review"}
+      }
+    },
+    "item": {
+      "allOf": [{"$ref": "#/$defs/version_fields"}],
+      "required": ["out_of_scope"],
+      "properties": {
+        "out_of_scope": {"type": "boolean"},
+        "history": {"type": "array", "items": {"$ref": "#/$defs/version_fields"},
+                    "description": "Earlier versions of the item, oldest first (TK-REQ-004)."}
+      }
+    }
+  }
+}

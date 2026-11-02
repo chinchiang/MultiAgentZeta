@@ -86,6 +86,28 @@ class Validate(unittest.TestCase):
     # TK-RUN-002: 待執行、執行中、完整完成、部分完成、受阻、失敗、已取消 (codes per the plan's Q7).
     RUN_STATUSES = ['pending', 'running', 'completed', 'partial', 'blocked', 'failed', 'cancelled']
 
+    def test_requirement_entries_name_their_item_source_and_review_state(self):
+        for field in ('id', 'source', 'statement', 'rule', 'status', 'out_of_scope', 'confirmation'):
+            with self.subTest(missing=field):
+                doc = valid_report()
+                del doc['requirements'][0][field]
+                self.assertTrue(any('requirements' in p and field in p for p in report.validate(doc)),
+                                report.validate(doc))
+        doc = valid_report()
+        doc['requirements'][0]['status'] = 'confirmed'  # a finding state, not a review state
+        self.assertNotEqual(report.validate(doc), [])
+        doc = valid_report()
+        doc['requirements'][0]['source'] = 'implementation'  # TK-REQ-005
+        self.assertNotEqual(report.validate(doc), [])
+
+    def test_confirmation_list_reference_is_checked(self):
+        self.assertEqual(valid_report()['confirmation_list']['updated'], False)
+        for field in ('path', 'digest', 'list_version', 'updated'):
+            with self.subTest(missing=field):
+                doc = valid_report()
+                del doc['confirmation_list'][field]
+                self.assertNotEqual(report.validate(doc), [])
+
     def test_every_run_status_of_the_spec_is_accepted(self):
         for status in self.RUN_STATUSES:
             with self.subTest(status=status):
@@ -148,6 +170,30 @@ class RenderMarkdown(unittest.TestCase):
     RUN_LABELS = {'pending': '待執行', 'running': '執行中', 'completed': '完整完成', 'partial': '部分完成',
                   'blocked': '受阻', 'failed': '失敗', 'cancelled': '已取消'}
     DISCLAIMER = '不代表應用沒有漏洞'
+
+    # 〈定義：確認清單〉 處理狀態.
+    REVIEW_LABELS = {'pending': '待確認', 'accepted': '接受', 'modified': '修改', 'not_applicable': '不適用'}
+
+    def test_confirmation_items_are_shown_with_their_review_state(self):
+        for status, label in self.REVIEW_LABELS.items():
+            with self.subTest(status=status):
+                doc = valid_report()
+                doc['requirements'][0]['status'] = status
+                md = report.render_markdown(doc)
+                self.assertIn(f'| {label} |', md)
+                self.assertIn('S2-OWNER-ONLY@documents', md)
+
+    def test_an_item_nobody_reviewed_shows_no_reviewer(self):
+        doc = valid_report()
+        doc['requirements'][0].update(status='pending', confirmation={'by': None, 'at': None, 'version': 1})
+        md = report.render_markdown(doc)
+        self.assertIn('（未確認）', md)
+        self.assertNotIn('None', md)
+
+    def test_an_item_out_of_scope_is_marked(self):
+        doc = valid_report()
+        doc['requirements'][0]['out_of_scope'] = True
+        self.assertIn('範圍外', report.render_markdown(doc))
 
     def test_missing_commit_is_shown_as_not_provided(self):
         doc = json.loads((FIXTURES / 'report-blocked-no-commit.json').read_text(encoding='utf-8'))

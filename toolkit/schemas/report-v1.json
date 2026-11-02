@@ -41,6 +41,43 @@
         "then": {"required": ["reason"]}
       }
     },
+    "requirements": {
+      "description": "〈定義：確認清單〉: the confirmation items the planned tests rest on, with their review state. status is the item's 處理狀態, not a finding state.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "source", "statement", "rule", "status", "out_of_scope", "confirmation"],
+        "additionalProperties": false,
+        "properties": {
+          "id": {"$ref": "#/$defs/text"},
+          "source": {"enum": ["S1", "S2"], "description": "Never the implementation (TK-REQ-005)."},
+          "statement": {"$ref": "#/$defs/text"},
+          "rule": {"enum": ["deny", "allow"]},
+          "status": {"enum": ["pending", "accepted", "modified", "not_applicable"],
+                     "description": "pending 待確認, accepted 接受, modified 修改, not_applicable 不適用."},
+          "out_of_scope": {"type": "boolean"},
+          "confirmation": {
+            "type": "object",
+            "required": ["by", "at", "version"],
+            "additionalProperties": false,
+            "properties": {"by": {"type": ["string", "null"]}, "at": {"type": ["string", "null"]},
+                           "version": {"type": "integer", "minimum": 1}}
+          }
+        }
+      }
+    },
+    "confirmation_list": {
+      "description": "〈定義：確認清單〉: the list this run used or handed over, in the control zone. digest is the file as it is after the run: a list the run generated or updated (updated true) needs the owner's review and a new ScanManifest reference.",
+      "type": "object",
+      "required": ["path", "digest", "list_version", "updated"],
+      "additionalProperties": false,
+      "properties": {
+        "path": {"$ref": "#/$defs/text"},
+        "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "list_version": {"type": "integer", "minimum": 1},
+        "updated": {"type": "boolean"}
+      }
+    },
     "status": {
       "description": "Overall run status (TK-RUN-002): pending 待執行, running 執行中, completed 完整完成, partial 部分完成, blocked 受阻, failed 失敗, cancelled 已取消. completed means every planned item got a definite result; it does not mean the application has no vulnerabilities.",
       "enum": ["pending", "running", "completed", "partial", "blocked", "failed", "cancelled"]
