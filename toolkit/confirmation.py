@@ -28,19 +28,30 @@ def _s2_items(template, resources):
             for c in template['clauses'] for r in resources]
 
 
-def _s1_items(entries):
+def _s1_items(entries, resources):
+    """S1 entries with at least one of their resources in scope; the others are out of scope."""
     return [{'item_id': e['id'], 'source': 'S1', 'resources': list(e['resources']),
-             'statement': e['statement'], 'rule': e['rule']} for e in entries]
+             'statement': e['statement'], 'rule': e['rule']}
+            for e in entries if set(e['resources']) & set(resources)]
+
+
+def _new(item, out_of_scope=False):
+    return {**item, 'version': 1, 'status': PENDING, 'review': _empty_review(), 'out_of_scope': out_of_scope}
+
+
+def _template_ref(template):
+    return {'policy_template_id': template['policy_template_id'], 'version': template['version'],
+            'digest': policy.template_digest(template)}
 
 
 def generate(template, resources, s1_entries):
     """A new confirmation list: every item pending, review fields empty, version 1 (TK-REQ-001)."""
-    items = [{**item, 'version': 1, 'status': PENDING, 'review': _empty_review(), 'out_of_scope': False}
-             for item in _s2_items(template, resources) + _s1_items(s1_entries)]
-    return {'schema_version': '1', 'list_version': 1,
-            's2_template': {'policy_template_id': template['policy_template_id'], 'version': template['version'],
-                            'digest': policy.template_digest(template)},
-            'items': items}
+    in_scope = _s2_items(template, resources) + _s1_items(s1_entries, resources)
+    produced = {i['item_id'] for i in in_scope}
+    out = [i for i in _s1_items(s1_entries, [r for e in s1_entries for r in e['resources']])
+           if i['item_id'] not in produced]
+    return {'schema_version': '1', 'list_version': 1, 's2_template': _template_ref(template),
+            'items': [_new(i) for i in in_scope] + [_new(i, out_of_scope=True) for i in out]}
 
 
 CONTENT = ('statement', 'rule', 'resources')  # what makes an item's text; a change means a new version
@@ -58,7 +69,7 @@ def update(existing, template, resources, s1_entries):
     in its history (TK-REQ-004); an item no longer produced is marked out of scope and keeps its
     review state. list_version goes up only when something changed.
     """
-    fresh = {i['item_id']: i for i in _s2_items(template, resources) + _s1_items(s1_entries)}
+    fresh = {i['item_id']: i for i in _s2_items(template, resources) + _s1_items(s1_entries, resources)}
     items = []
     for old in existing['items']:
         new = fresh.pop(old['item_id'], None)
@@ -70,9 +81,8 @@ def update(existing, template, resources, s1_entries):
             previous = {k: v for k, v in old.items() if k not in ('history', 'out_of_scope')}
             items.append({**new, 'version': old['version'] + 1, 'status': PENDING, 'review': _empty_review(),
                           'out_of_scope': False, 'history': old.get('history', []) + [previous]})
-    items += [{**i, 'version': 1, 'status': PENDING, 'review': _empty_review(), 'out_of_scope': False}
-              for i in fresh.values()]
-    doc = {**existing, 's2_template': generate(template, [], [])['s2_template'], 'items': items}
+    items += [_new(i) for i in fresh.values()]
+    doc = {**existing, 's2_template': _template_ref(template), 'items': items}
     if doc != existing:
         doc['list_version'] = existing['list_version'] + 1
     return doc
@@ -91,6 +101,14 @@ def validate(doc):
     """Structural problems of a confirmation list (schema); an empty list means it can be read."""
     validator = jsonschema.Draft202012Validator(SCHEMA)
     return [f'{"/".join(map(str, e.absolute_path)) or "(list)"}: {e.message}' for e in validator.iter_errors(doc)]
+
+
+def effective_rule(item):
+    """The allow/deny rule that applies: a modified item's rewritten rule replaces the original
+    (〈定義：確認清單〉 修改)."""
+    if item['status'] == 'modified' and item['review'].get('modified_rule'):
+        return item['review']['modified_rule']
+    return item['rule']
 
 
 def review_problem(item):

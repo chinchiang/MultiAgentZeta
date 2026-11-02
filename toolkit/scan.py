@@ -408,10 +408,12 @@ def _item_problem(test, items):
         return f'requirement {rid!r} is not in the confirmation list; requirement unknown, not inferred from the code'
     if item['out_of_scope']:
         return f'confirmation item {rid!r} is out of scope; the test is not run'
-    if item['status'] == 'pending':
-        return f'confirmation item {rid!r} is pending (待確認); the test is not run until it is reviewed'
-    if item['status'] == 'not_applicable':
-        return f'confirmation item {rid!r} is not_applicable (不適用); the test is not run'
+    status = item['status']
+    if status == confirmation.PENDING:
+        return (f'confirmation item {rid!r} is {status} ({report.REVIEW_LABELS[status]}); the test is not run '
+                f'until it is reviewed')
+    if status == 'not_applicable':
+        return f'confirmation item {rid!r} is {status} ({report.REVIEW_LABELS[status]}); the test is not run'
     return confirmation.review_problem(item)
 
 
@@ -444,8 +446,11 @@ def _load_confirmation_list(manifest, records):
     if not path:
         return ('confirmation_list.path (獨立安全需求) is missing: there is no control-zone location to read '
                 'the confirmation list from or hand it over to')
-    source, template = manifest['target']['project'], policy.load_template()
-    resources, s1 = manifest['scope']['resources'], manifest.get('requirements') or []
+    source, resources, s1 = manifest['target']['project'], manifest['scope']['resources'], manifest.get('requirements') or []
+    try:
+        template = policy.load_template()
+    except (OSError, ValueError, policy.PolicyTemplateInvalid) as e:
+        return f'the S2 template cannot be used: {e}'
     try:
         if not Path(path).exists():
             doc, updated = confirmation.generate(template, resources, s1), True
@@ -456,7 +461,7 @@ def _load_confirmation_list(manifest, records):
             doc = confirmation.update(existing, template, resources, s1)
             updated = doc != existing
         digest = confirmation.write(path, doc, source) if updated else ref['digest']
-    except confirmation.ConfirmationListUnusable as e:
+    except (confirmation.ConfirmationListUnusable, OSError) as e:
         return f'confirmation list unusable: {e}'
     records.items = {i['item_id']: i for i in doc['items']}
     records.confirmation_list = {'path': str(path), 'digest': digest, 'list_version': doc['list_version'],
@@ -671,7 +676,7 @@ def _handover_note(records):
 def _requirements(manifest, records):
     """The confirmation items the planned tests rest on, as the report shows them."""
     used = dict.fromkeys(t.get('requirement_id') for t in manifest['tests'])
-    return [{'id': i['item_id'], 'source': i['source'], 'statement': i['statement'], 'rule': i['rule'],
+    return [{'id': i['item_id'], 'source': i['source'], 'statement': i['statement'], 'rule': confirmation.effective_rule(i),
              'status': i['status'], 'out_of_scope': i['out_of_scope'],
              'confirmation': {'by': i['review']['by'], 'at': i['review']['at'], 'version': i['version']}}
             for rid in used if (i := records.items.get(rid))]

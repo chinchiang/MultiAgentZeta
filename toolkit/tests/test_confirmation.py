@@ -29,6 +29,11 @@ class Generate(unittest.TestCase):
         s1 = self.doc['items'][-1]
         self.assertEqual((s1['source'], s1['resources'], s1['rule']), ('S1', ['announcements'], 'allow'))
 
+    def test_s1_entry_on_no_resource_in_scope_is_listed_out_of_scope(self):
+        doc = confirmation.generate(self.template, ['documents'], [S1_PUBLIC])
+        s1 = next(i for i in doc['items'] if i['source'] == 'S1')
+        self.assertEqual((s1['out_of_scope'], s1['status']), (True, 'pending'))
+
     def test_every_item_is_pending_with_empty_review_fields(self):
         for item in self.doc['items']:
             with self.subTest(item=item['item_id']):
@@ -95,13 +100,23 @@ class Update(unittest.TestCase):
         item = self.item(back, 'S2-OWNER-ONLY@documents')
         self.assertEqual((item['out_of_scope'], item['status'], item['version']), (False, 'accepted', 1))
 
+    def test_s1_entry_whose_resources_left_the_scope_is_out_of_scope(self):
+        both = ['documents', 'announcements']
+        doc = accept(confirmation.generate(self.template, both, [S1_PUBLIC]), 'S1-ANNOUNCEMENTS-PUBLIC-READ')
+        gone = confirmation.update(doc, self.template, ['documents'], [S1_PUBLIC])
+        item = self.item(gone, 'S1-ANNOUNCEMENTS-PUBLIC-READ')
+        self.assertEqual((item['out_of_scope'], item['status']), (True, 'accepted'))
+        back = confirmation.update(gone, self.template, both, [S1_PUBLIC])
+        self.assertEqual((self.item(back, 'S1-ANNOUNCEMENTS-PUBLIC-READ')['out_of_scope'],
+                          self.item(back, 'S1-ANNOUNCEMENTS-PUBLIC-READ')['status']), (False, 'accepted'))
+
     def test_s1_entries_follow_the_same_rules(self):
-        accept(self.doc, 'S1-ANNOUNCEMENTS-PUBLIC-READ')
+        scope = ['documents', 'announcements']
+        doc = accept(confirmation.generate(self.template, scope, [S1_PUBLIC]), 'S1-ANNOUNCEMENTS-PUBLIC-READ')
         changed = {**S1_PUBLIC, 'rule': 'deny'}
-        item = self.item(confirmation.update(self.doc, self.template, ['documents'], [changed]),
-                         'S1-ANNOUNCEMENTS-PUBLIC-READ')
+        item = self.item(confirmation.update(doc, self.template, scope, [changed]), 'S1-ANNOUNCEMENTS-PUBLIC-READ')
         self.assertEqual((item['version'], item['status'], item['rule']), (2, 'pending', 'deny'))
-        item = self.item(confirmation.update(self.doc, self.template, ['documents'], []), 'S1-ANNOUNCEMENTS-PUBLIC-READ')
+        item = self.item(confirmation.update(doc, self.template, scope, []), 'S1-ANNOUNCEMENTS-PUBLIC-READ')
         self.assertEqual((item['out_of_scope'], item['status']), (True, 'accepted'))
 
     def test_the_toolkit_writes_no_review_decision(self):
@@ -126,6 +141,9 @@ class Validate(unittest.TestCase):
 
     def test_malformed_list_is_invalid(self):
         changes = {'unknown review state': lambda d: d['items'][0].update(status='confirmed'),
+                   'an accept-all field on an item': lambda d: d['items'][0].update(accept_all=True),
+                   'an unknown field in an earlier version': lambda d: d['items'][0].update(
+                       history=[{**{k: v for k, v in d['items'][0].items() if k != 'out_of_scope'}, 'accept_all': True}]),
                    'items missing': lambda d: d.pop('items'),
                    'unknown source': lambda d: d['items'][0].update(source='implementation'),
                    'version not an integer': lambda d: d['items'][0].update(version='1'),
@@ -173,6 +191,20 @@ class Validate(unittest.TestCase):
         for name, empty in (('allowed_tests', []), ('expiry', None)):
             with self.subTest(missing=name):
                 self.assertIn(name, confirmation.review_problem(self.item('modified', **{**done, name: empty})))
+
+
+class EffectiveRule(unittest.TestCase):
+    """〈定義：確認清單〉 修改: the rewritten allow/deny rule replaces the original."""
+
+    def test_a_modified_item_uses_its_modified_rule_and_others_their_own(self):
+        doc = confirmation.generate(policy.load_template(), ['announcements'], [])
+        item = doc['items'][0]
+        self.assertEqual(confirmation.effective_rule(item), 'deny')
+        item['status'] = 'modified'
+        item['review'].update(modified_rule='allow')
+        self.assertEqual(confirmation.effective_rule(item), 'allow')
+        item['status'] = 'accepted'  # a leftover modified_rule does not count unless the item is modified
+        self.assertEqual(confirmation.effective_rule(item), 'deny')
 
 
 class ReadWrite(unittest.TestCase):

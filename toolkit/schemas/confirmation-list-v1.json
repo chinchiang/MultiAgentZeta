@@ -61,10 +61,11 @@
     },
     "item": {
       "allOf": [{"$ref": "#/$defs/version_fields"}],
+      "unevaluatedProperties": false,
       "required": ["out_of_scope"],
       "properties": {
         "out_of_scope": {"type": "boolean"},
-        "history": {"type": "array", "items": {"$ref": "#/$defs/version_fields"},
+        "history": {"type": "array", "items": {"$ref": "#/$defs/version_fields", "unevaluatedProperties": false},
                     "description": "Earlier versions of the item, oldest first (TK-REQ-004)."}
       }
     }

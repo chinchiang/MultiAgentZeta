@@ -729,6 +729,39 @@ class ConfirmationListInScan(unittest.TestCase):
             self.assertEqual(e['result'], 'blocked')
             self.assertIn('pending', e['error'])
 
+    def test_a_list_that_cannot_be_written_is_blocked_not_a_crash(self):
+        blocker = Path(tempfile.mkdtemp(dir=CONTROL)) / 'a-file'
+        blocker.write_text('not a directory', encoding='utf-8')
+        self.m['confirmation_list'] = {'path': str(blocker / 'confirmation-list.json')}
+        self.assertIn('confirmation list', self.blocked(self.m)['status_reason'])
+
+    def test_a_malformed_s2_template_is_blocked_not_a_crash(self):
+        from unittest import mock
+        from toolkit import policy
+        bad = Path(tempfile.mkdtemp(dir=CONTROL)) / 'template.json'
+        bad.write_text('{"policy_template_id": "x"}', encoding='utf-8')
+        with mock.patch.object(policy, 'TEMPLATE', bad):
+            self.assertIn('S2 template', self.blocked(self.m)['status_reason'])
+
+    def test_errors_name_review_states_with_their_spec_labels(self):
+        # Spec names (〈定義：確認清單〉 處理狀態), written here, not taken from report.REVIEW_LABELS.
+        self.m['confirmation_list'] = reviewed_list(self.tmp.name, accepted=())
+        errors = [e['error'] for e in self.blocked(self.m)['execution_records']]
+        self.assertTrue(all('待確認' in e for e in errors), errors)
+
+    def test_a_modified_item_is_reported_with_its_modified_rule(self):
+        # The run stops at the empty project's BuildRecipe step (no Docker); the report still lists the items.
+        from toolkit import confirmation
+        ref = self.m['confirmation_list']
+        doc = json.loads(Path(ref['path']).read_text(encoding='utf-8'))
+        public = next(i for i in doc['items'] if i['item_id'] == PUBLIC_ITEM)
+        public['status'] = 'modified'
+        public['review'].update(reason='owner restricts reads', basis='spec §2', modified_rule='deny')
+        self.m['confirmation_list'] = {'path': ref['path'], 'digest': confirmation.write(ref['path'], doc, self.tmp.name)}
+        reported = {r['id']: r for r in scan.run(self.m).report['requirements']}
+        self.assertEqual((reported[PUBLIC_ITEM]['status'], reported[PUBLIC_ITEM]['rule']), ('modified', 'deny'))
+        self.assertEqual(reported[OWNER_ITEM]['rule'], 'deny')
+
     def test_the_list_path_is_required(self):
         for value in (None, {}, {'digest': 'sha256:' + '0' * 64}):
             with self.subTest(value=value):
