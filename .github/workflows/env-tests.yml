@@ -20,9 +20,10 @@ jobs:
   env-tests:
     # Same OS as the development machine, so a red run here is not a CI-only difference.
     runs-on: ubuntu-26.04
-    # Measured runs (total): 41276297711 2026-11-01 14m55s, 41276312841 2026-11-01 15m39s, 41339823662 2026-11-01 17m11s.
-    # Limit = longest x 2 (17m11s x 2 = 34m22s, rounded up to whole minutes).
-    timeout-minutes: 35
+    # Measured runs (total): 41276297711 2026-11-01 14m55s, 41276312841 2026-11-01 15m39s, 41339823662 2026-11-01 17m11s;
+    # 41395696689 2026-11-02 30m42s (first run with the S2 template self-acceptance, #39).
+    # Limit = longest x 2 (30m42s x 2 = 61m24s, rounded up to whole minutes).
+    timeout-minutes: 62
     steps:
       - uses: actions/checkout@v4
 
