@@ -100,6 +100,33 @@ class Update(unittest.TestCase):
         item = self.item(back, 'S2-OWNER-ONLY@documents')
         self.assertEqual((item['out_of_scope'], item['status'], item['version']), (False, 'accepted', 1))
 
+    def test_an_item_whose_clause_left_the_template_is_out_of_scope_and_keeps_its_review_state(self):
+        # 〈定義：確認清單〉 更新: a clause removed from the S2 template marks its items out of scope.
+        removed = copy.deepcopy(self.template)
+        removed['version'] = '2'
+        removed['clauses'] = [c for c in removed['clauses'] if c['id'] != 'S2-OWNER-ONLY']
+        gone = confirmation.update(self.doc, removed, ['documents'], [S1_PUBLIC])
+        item = self.item(gone, 'S2-OWNER-ONLY@documents')
+        self.assertEqual((item['out_of_scope'], item['status'], item['review']['by'], item['version']),
+                         (True, 'accepted', 'app-owner', 1))
+        self.assertNotIn('history', item)  # no new version: the text did not change, the clause left
+        self.assertFalse(self.item(gone, 'S2-TENANT-ISOLATION@documents')['out_of_scope'])
+        back = confirmation.update(gone, self.template, ['documents'], [S1_PUBLIC])
+        item = self.item(back, 'S2-OWNER-ONLY@documents')
+        self.assertEqual((item['out_of_scope'], item['status'], item['version']), (False, 'accepted', 1))
+
+    def test_an_s1_entry_no_longer_given_is_out_of_scope_and_keeps_its_review_state(self):
+        # 〈定義：確認清單〉 更新: an S1 entry the ScanManifest no longer gives marks its item out of scope.
+        both = ['documents', 'announcements']
+        doc = accept(confirmation.generate(self.template, both, [S1_PUBLIC]), 'S1-ANNOUNCEMENTS-PUBLIC-READ')
+        gone = confirmation.update(doc, self.template, both, [])
+        item = self.item(gone, 'S1-ANNOUNCEMENTS-PUBLIC-READ')
+        self.assertEqual((item['out_of_scope'], item['status'], item['version']), (True, 'accepted', 1))
+        reworded = dict(S1_PUBLIC, statement='Anyone may read published announcements.')
+        back = self.item(confirmation.update(gone, self.template, both, [reworded]), 'S1-ANNOUNCEMENTS-PUBLIC-READ')
+        # Back in scope with a changed text: a new version, pending again (TK-REQ-004).
+        self.assertEqual((back['out_of_scope'], back['status'], back['version']), (False, 'pending', 2))
+
     def test_s1_entry_whose_resources_left_the_scope_is_out_of_scope(self):
         both = ['documents', 'announcements']
         doc = accept(confirmation.generate(self.template, both, [S1_PUBLIC]), 'S1-ANNOUNCEMENTS-PUBLIC-READ')

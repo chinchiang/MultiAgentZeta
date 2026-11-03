@@ -66,8 +66,10 @@ def update(existing, template, resources, s1_entries):
 
     New items are added as pending; an item whose text is unchanged keeps its review state; an
     item whose text changed gets the next version, back at pending, with the previous version kept
-    in its history (TK-REQ-004); an item no longer produced is marked out of scope and keeps its
-    review state. list_version goes up only when something changed.
+    in its history (TK-REQ-004); an item no longer produced (its resource left the scope, its S2 clause
+    left the template, or its S1 entry is no longer given) is marked out of scope and keeps its review
+    state and version; produced again, it is back in scope, kept or given a new version as above.
+    list_version goes up only when something changed.
     """
     fresh = {i['item_id']: i for i in _s2_items(template, resources) + _s1_items(s1_entries, resources)}
     items = []
