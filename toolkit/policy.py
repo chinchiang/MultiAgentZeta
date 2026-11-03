@@ -12,6 +12,9 @@ TEMPLATE_FIELDS = ('policy_template_id', 'version', 'stack', 'clauses', 'self_ac
 RESULTS = ('passed', 'failed')  # a self-acceptance case has a definite expected result
 CLAUSE_FIELDS = ('id', 'statement', 'rule', 'actors')
 DENY, ALLOW = RULES = ('deny', 'allow')  # the allow/deny rule of a confirmation item (〈定義：確認清單〉)
+# 〈定義：高影響類別〉 (TK-REQ-012), in the order of its table: admin functions, cross-tenant access,
+# confidential information, payment, third-party callbacks.
+IMPACT_CATEGORIES = ('admin', 'cross_tenant', 'confidential', 'payment', 'third_party_callback')
 
 
 class PolicyTemplateInvalid(Exception):

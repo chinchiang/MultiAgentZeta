@@ -3,7 +3,9 @@
 Fast tests only; the template's self-acceptance on the samples runs in test_scan.TemplateSelfAcceptanceEnv.
 """
 import copy
+import re
 import unittest
+from pathlib import Path
 
 from toolkit import policy
 
@@ -102,6 +104,18 @@ class TemplateVersion(unittest.TestCase):
         changed = {**t, 'clauses': [{**t['clauses'][0], 'rule': 'allow'}] + t['clauses'][1:]}
         self.assertNotEqual(policy.template_digest(changed), policy.template_digest(t))
         self.assertEqual(policy.template_digest(policy.load_template()), policy.template_digest(t))
+
+
+class ImpactCategoriesFollowTheSpec(unittest.TestCase):
+    """policy.IMPACT_CATEGORIES is the one list of 〈定義：高影響類別〉 codes in the code; it has the codes of
+    the spec's table, in its order, so neither can change alone."""
+
+    def test_codes_and_order_match_the_definition_table(self):
+        spec = (Path(__file__).resolve().parents[2] / 'docs' / 'toolkit' / 'spec.md').read_text(encoding='utf-8')
+        section = spec.split('### 定義：高影響類別', 1)[1].split('\n### ', 1)[0].split('\n#### ', 1)[0]
+        codes = re.findall(r'^\| `([a-z_]+)` \|', section, flags=re.M)
+        self.assertEqual(codes, ['admin', 'cross_tenant', 'confidential', 'payment', 'third_party_callback'])
+        self.assertEqual(list(policy.IMPACT_CATEGORIES), codes)
 
 
 if __name__ == '__main__':

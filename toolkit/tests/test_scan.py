@@ -71,7 +71,8 @@ DENIAL_TESTS = [t for t in TESTS if t['template_id'] in scan.DENIAL_TEMPLATES]
 
 # 〈定義：必要輸入〉 受測範圍: endpoints, resources under test, allowed operations and data scope.
 SCOPE = {'endpoints': ['/rest/v1/documents', '/rest/v1/announcements', '/auth/v1/user'],
-         'resources': ['documents', 'announcements'],
+         'resources': [{'name': 'documents', 'impact': ['confidential']},  # private documents
+                       {'name': 'announcements', 'impact': []}],  # public data
          'allowed_operations': ['GET', 'POST', 'PATCH', 'DELETE'],
          'data_scope': 'synthetic sample data of samples/object-authz only'}
 # 〈定義：必要輸入〉 執行限制: cost, time, request volume, concurrency, model providers, network allow-list.
@@ -87,7 +88,7 @@ def reviewed_list(source, accepted=ACCEPTED, s1=(S1_PUBLIC,), resources=None):
     """A confirmation list in the control zone where the owner accepted the given items (test only:
     in a real run a person edits the list). Returns the ScanManifest reference {path, digest}."""
     from toolkit import confirmation, policy
-    doc = confirmation.generate(policy.load_template(), resources or SCOPE['resources'], list(s1))
+    doc = confirmation.generate(policy.load_template(), resources or [r['name'] for r in SCOPE['resources']], list(s1))
     for item in doc['items']:
         if item['item_id'] in accepted:
             item['status'] = 'accepted'
@@ -616,6 +617,7 @@ class RequiredInputs(unittest.TestCase):
     Each category of 〈定義：必要輸入〉, the test that removes it, and what is not covered yet:
       受測範圍      test_missing_commit_blocks_dynamic_testing, test_missing_scope_blocks_dynamic_testing,
                     test_each_part_of_the_scope_is_required (commit, endpoints, resources, operations, data scope)
+                    test_each_resource_names_its_high_impact_categories (受測資源 and their 〈定義：高影響類別〉)
       獨立安全需求  ConfirmationListInScan (without a confirmation list one is generated, all pending, and
                     handed over; the list is read only from the control zone with its digest),
                     UnknownRequirement (a test on an unknown or pending item is not run)
@@ -647,6 +649,34 @@ class RequiredInputs(unittest.TestCase):
         stages = {s['stage']: s['status'] for s in rep['stages']}
         self.assertEqual(stages['dynamic_execution'], 'blocked')
         return rep
+
+    def test_each_resource_names_its_high_impact_categories(self):
+        # 〈定義：必要輸入〉 受測範圍: every resource under test says which 〈定義：高影響類別〉 it involves; an
+        # empty list says none. Leaving it out is refused, not taken as "none".
+        import tempfile
+        cases = {
+            'a name only': ('documents', "scope.resources/0 must be an object"),
+            'no impact': ({'name': 'documents'}, "scope.resources/0 ('documents').impact"),
+            'impact not a list': ({'name': 'documents', 'impact': 'confidential'}, "scope.resources/0 ('documents').impact must be a list"),
+            'an unknown category': ({'name': 'documents', 'impact': ['secret']},
+                                    "scope.resources/0 ('documents').impact: unknown high-impact category 'secret'"),
+            'a category twice': ({'name': 'documents', 'impact': ['confidential', 'confidential']},
+                                 "scope.resources/0 ('documents').impact lists 'confidential' twice"),
+            'no name': ({'impact': []}, 'scope.resources/0.name'),
+        }
+        for label, (resource, reason) in cases.items():
+            with self.subTest(label), tempfile.TemporaryDirectory() as d:
+                m = preflight_manifest(d)
+                m['scope']['resources'][0] = resource
+                rep = self.assert_blocked_before_start(m, reason)
+                self.assertEqual(rep['stages'][0]['status'], 'blocked')
+        with self.subTest('a resource twice'), tempfile.TemporaryDirectory() as d:
+            m = preflight_manifest(d)
+            m['scope']['resources'].append({'name': 'documents', 'impact': []})
+            self.assert_blocked_before_start(m, "scope.resources/2 ('documents') is listed twice")
+        with self.subTest('well formed'), tempfile.TemporaryDirectory() as d:
+            rep = scan.run(preflight_manifest(d)).report  # empty project: passes preflight, stops at the BuildRecipe
+            self.assertEqual(rep['stages'][0], {'stage': 'preflight', 'status': 'completed'})
 
     def test_missing_deployment_information_blocks_before_start_and_names_the_gap(self):
         # 部署資訊: 建置方式 (source_build) and 外部相依服務 (service_init.services). The handling's 受阻項目 is
@@ -897,7 +927,7 @@ class ConfirmationListInScan(unittest.TestCase):
         self.assertEqual(listed['list_version'], doc['list_version'])
 
     def test_items_out_of_scope_are_counted_apart_from_review_states(self):
-        self.m['scope']['resources'] = ['announcements']
+        self.m['scope']['resources'] = [{'name': 'announcements', 'impact': []}]
         listed = scan.run(self.m).report['confirmation_list']
         self.assertEqual(listed['out_of_scope'], 3)  # the three S2 clauses on documents
         self.assertEqual(listed['summary']['S2'], {'pending': 3, 'accepted': 0, 'modified': 0, 'not_applicable': 0})
@@ -971,7 +1001,7 @@ class ConfirmationListInScan(unittest.TestCase):
 
     def test_tests_on_items_out_of_scope_are_blocked(self):
         # documents leaves the scope: its items are marked out of scope and keep their review state.
-        self.m['scope']['resources'] = ['announcements']
+        self.m['scope']['resources'] = [{'name': 'announcements', 'impact': []}]
         self.m['tests'] = [t for t in self.m['tests'] if t['requirement_id'] != PUBLIC_ITEM]
         errors = {e['test_id']: e['error'] for e in self.blocked(self.m)['execution_records']}
         self.assertIn('out of scope', errors['READ-same-tenant'])
