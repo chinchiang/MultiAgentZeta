@@ -6,7 +6,7 @@ import copy
 import unittest
 from pathlib import Path
 
-from toolkit import confirmation, policy
+from toolkit import confirmation, policy, report
 
 S1_PUBLIC = {'id': 'S1-ANNOUNCEMENTS-PUBLIC-READ', 'statement': 'Anyone, signed in or not, may read announcements.',
              'resources': ['announcements'], 'rule': 'allow'}
@@ -165,6 +165,31 @@ class Validate(unittest.TestCase):
     def test_generated_and_updated_lists_are_valid(self):
         self.assertEqual(confirmation.validate(self.doc), [])
         self.assertEqual(confirmation.validate(accept(self.doc, 'S2-OWNER-ONLY@documents')), [])
+
+    def test_item_ids_follow_their_source_so_s1_and_s2_cannot_collide(self):
+        # An S2 item is "clause@resource" with both parts; an S1 entry id has no "@", so it can never
+        # equal an S2 item id (〈定義：確認清單〉 確認項目).
+        def with_id(source, item_id, in_history=False):
+            doc = copy.deepcopy(self.doc)
+            n, item = next((n, i) for n, i in enumerate(doc['items']) if i['source'] == source)
+            if in_history:
+                item['history'] = [dict({k: v for k, v in item.items() if k not in ('out_of_scope', 'history')},
+                                        item_id=item_id)]
+            else:
+                item['item_id'] = item_id
+            return doc, f'items/{n}/history/0' if in_history else f'items/{n}'
+
+        for source, item_id in (('S1', 'S1-ANNOUNCEMENTS-PUBLIC-READ'), ('S2', 'S2-OWNER-ONLY@documents')):
+            with self.subTest(accepted=item_id):
+                doc, _ = with_id(source, item_id)
+                self.assertEqual(confirmation.validate(doc), [])
+        for source, item_id, in_history in (('S1', 'S2-OWNER-ONLY@documents', False), ('S1', 'S1-X@announcements', False),
+                                            ('S2', 'S2-OWNER-ONLY', False), ('S2', 'S2-OWNER-ONLY@', False),
+                                            ('S2', 'S2-OWNER-ONLY@files', False), ('S2', 'S2-OWNER-ONLY@files', True)):
+            with self.subTest(refused=item_id, source=source, in_history=in_history):
+                doc, where = with_id(source, item_id, in_history)
+                problems = confirmation.validate(doc)
+                self.assertTrue(any(p.startswith(f'{where}/item_id: ') for p in problems), problems)
 
     def test_malformed_list_is_invalid(self):
         changes = {'unknown review state': lambda d: d['items'][0].update(status='confirmed'),
@@ -351,3 +376,29 @@ class FindingCap(unittest.TestCase):
         self.assertEqual(confirmation.finding_cap(items['S2-TENANT-ISOLATION@documents']), 'evidence_pending')
         # Only accepted or modified items confirm; anything else is capped, whatever the order of the checks.
         self.assertEqual(confirmation.finding_cap(dict(owner, source='S1', status='pending')), 'evidence_pending')
+
+
+class EnumsAgreeWithSchemas(unittest.TestCase):
+    """Review states, allow/deny rules and case kinds are each defined once in the code; both schemas
+    list the same values, so neither side can change alone (〈定義：確認清單〉, TK-REQ-016)."""
+
+    def test_review_states(self):
+        states = list(report.REVIEW_STATES)
+        self.assertEqual(states, ['pending', 'accepted', 'modified', 'not_applicable'])  # 〈定義：確認清單〉 table order
+        self.assertEqual(confirmation.SCHEMA['$defs']['status']['enum'], states)
+        self.assertEqual(report.SCHEMA['properties']['requirements']['items']['properties']['status']['enum'], states)
+        self.assertEqual(report.SCHEMA['$defs']['review_counts']['required'], states)
+        self.assertEqual(list(confirmation.REQUIRED_REVIEW), states)
+        self.assertEqual(list(report.REVIEW_LABELS), states)
+
+    def test_rules(self):
+        rules = list(policy.RULES)
+        self.assertEqual(confirmation.SCHEMA['$defs']['rule']['enum'], rules)
+        self.assertEqual(report.SCHEMA['properties']['requirements']['items']['properties']['rule']['enum'], rules)
+        self.assertEqual(sorted(report.RULE_FOR_CASE.values()), sorted(rules))
+
+    def test_case_kinds(self):
+        kinds = list(report.CASE_KINDS)
+        self.assertEqual(kinds, ['denial', 'allowed'])
+        self.assertEqual(report.SCHEMA['$defs']['execution_record']['properties']['case_kind']['enum'], kinds)
+        self.assertEqual(list(report.RULE_FOR_CASE), kinds)

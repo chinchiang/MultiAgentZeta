@@ -9,6 +9,8 @@ from pathlib import Path
 
 import jsonschema
 
+from toolkit import policy
+
 SCHEMA = json.loads((Path(__file__).parent / 'schemas' / 'report-v1.json').read_text(encoding='utf-8'))
 
 
@@ -59,8 +61,13 @@ def _cross_record_problems(doc):
 # Rules on confirmation items shared by the toolkit and validate(), so that a run and the check of its
 # report cannot disagree. An item is a confirmation-list item or a requirements[] entry: both carry
 # source, status and out_of_scope. Codes follow toolkit/schemas.
-RULE_FOR_CASE = {'denial': 'deny', 'allowed': 'allow'}  # case_kind → the rule it tests (TK-REQ-016)
-REVIEWED = ('accepted', 'modified')
+# 〈定義：確認清單〉 處理狀態 of a confirmation item, in the order of its table; not a finding state. Both
+# schemas list the same codes (test_confirmation.EnumsAgreeWithSchemas); REVIEW_LABELS names them.
+PENDING, ACCEPTED, MODIFIED, NOT_APPLICABLE = REVIEW_STATES = ('pending', 'accepted', 'modified', 'not_applicable')
+REVIEWED = (ACCEPTED, MODIFIED)
+# case_kind of an ExecutionRecord and the allow/deny rule each one tests (TK-REQ-016).
+DENIAL, ALLOWED = CASE_KINDS = ('denial', 'allowed')
+RULE_FOR_CASE = {DENIAL: policy.DENY, ALLOWED: policy.ALLOW}
 
 
 def untestable(item):
@@ -69,9 +76,9 @@ def untestable(item):
     status = item.get('status')
     if item.get('out_of_scope'):
         return 'is out of scope'
-    if status == 'not_applicable':
+    if status == NOT_APPLICABLE:
         return f'is {status} ({REVIEW_LABELS[status]})'
-    if status == 'pending' and item.get('source') == 'S1':
+    if status == PENDING and item.get('source') == 'S1':
         return f'is an S1 entry still pending ({REVIEW_LABELS[status]}) until it is reviewed (TK-REQ-003)'
     return None
 
@@ -82,8 +89,9 @@ def finding_cap(item):
     return 'confirmed' if item.get('status') in REVIEWED else 'evidence_pending'
 
 
-def _listed(items, record):
-    """The requirements[] entry a record rests on, or None."""
+def listed_item(items, record):
+    """The item a record or a planned test rests on, by its requirement_id, or None: the one lookup the
+    toolkit and validate() share. items maps ids to confirmation-list items or requirements[] entries."""
     rid = record.get('requirement_id') if isinstance(record, dict) else None
     return items.get(rid) if isinstance(rid, str) else None
 
@@ -94,7 +102,7 @@ def _requirement_problems(doc):
     items = {r.get('id'): r for r in _list(doc, 'requirements') if isinstance(r, dict) and isinstance(r.get('id'), str)}
     problems = []
     for i, e in enumerate(_list(doc, 'execution_records')):
-        item = _listed(items, e)
+        item = listed_item(items, e)
         if item is None:
             continue
         version = (item.get('confirmation') or {}).get('version')
@@ -107,12 +115,12 @@ def _requirement_problems(doc):
         if reason:
             problems.append(f'execution_records/{i}: {item["id"]!r} {reason}; a test on it must be blocked, '
                             f'not {e.get("result")!r} (〈定義：確認清單〉)')
-        kind = e.get('case_kind', 'denial')
+        kind = e.get('case_kind', DENIAL)
         if e.get('result') in ('passed', 'failed') and RULE_FOR_CASE.get(kind) != item.get('rule'):
             problems.append(f'execution_records/{i}: a {kind} case on {item["id"]!r} (rule {item.get("rule")!r}) '
                             f'must be blocked, not {e.get("result")!r} (TK-REQ-016)')
     for i, f in enumerate(_list(doc, 'findings')):
-        item = _listed(items, f)
+        item = listed_item(items, f)
         if item and f.get('status') == 'confirmed' and finding_cap(item) != 'confirmed':
             problems.append(f'findings/{i}: {item["id"]!r} is {item.get("status")!r}; a finding on it is at most '
                             f'evidence_pending, not confirmed (TK-REQ-003)')
@@ -129,8 +137,7 @@ RUN_LABELS = {'pending': '待執行', 'running': '執行中', 'completed': '完�
               'blocked': '受阻', 'failed': '失敗', 'cancelled': '已取消'}
 RESULT_LABELS = {'passed': '通過', 'failed': '未通過', 'blocked': '受阻', 'error': '執行錯誤',
                  'untested': '未測試', 'unsupported': '不支援'}
-# 〈定義：確認清單〉 處理狀態 of a confirmation item; not a finding state.
-REVIEW_LABELS = {'pending': '待確認', 'accepted': '接受', 'modified': '修改', 'not_applicable': '不適用'}
+REVIEW_LABELS = dict(zip(REVIEW_STATES, ('待確認', '接受', '修改', '不適用')))
 FINDING_LABELS = {'confirmed': '已確認', 'evidence_pending': '證據待補', 'not_reproduced': '本次未重現',
                   'excluded': '已排除', 'fixed_pending_regression': '已修復待回歸', 'regression_passed': '回歸通過'}
 COMPLETED_NOTE = ('「完整完成」表示計畫內的測試都取得明確結果；只對本次範圍與條件有效，'

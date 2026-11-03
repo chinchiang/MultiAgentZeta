@@ -46,11 +46,18 @@
     "version_fields": {
       "type": "object",
       "required": ["item_id", "source", "statement", "rule", "version", "status", "review"],
+      "description": "Item ids follow the source, so an S1 entry can never take an S2 item's id: an S2 item is clause_id@resource (validate() checks the parts match), an S1 entry id has no @.",
+      "allOf": [
+        {"if": {"properties": {"source": {"const": "S2"}}, "required": ["source"]},
+         "then": {"required": ["clause_id", "resource"], "properties": {"item_id": {"pattern": "^[^@]+@[^@]+$"}}}},
+        {"if": {"properties": {"source": {"const": "S1"}}, "required": ["source"]},
+         "then": {"properties": {"item_id": {"pattern": "^[^@]+$"}}}}
+      ],
       "properties": {
         "item_id": {"type": "string", "minLength": 1},
         "source": {"enum": ["S1", "S2"], "description": "Never the implementation (TK-REQ-005)."},
-        "clause_id": {"type": "string", "minLength": 1},
-        "resource": {"type": "string", "minLength": 1},
+        "clause_id": {"type": "string", "pattern": "^[^@]+$"},
+        "resource": {"type": "string", "pattern": "^[^@]+$"},
         "resources": {"type": "array", "items": {"type": "string", "minLength": 1}},
         "statement": {"type": "string", "minLength": 1},
         "rule": {"$ref": "#/$defs/rule"},

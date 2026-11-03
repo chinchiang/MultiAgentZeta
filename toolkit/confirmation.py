@@ -14,7 +14,7 @@ import jsonschema
 
 from toolkit import policy, report
 
-PENDING = 'pending'
+PENDING = report.PENDING
 REVIEW_FIELDS = ('by', 'at', 'reason', 'basis', 'modified_rule', 'allowed_tests', 'expiry')
 
 
@@ -23,7 +23,7 @@ def _empty_review():
 
 
 def _s2_items(template, resources):
-    return [{'item_id': f'{c["id"]}@{r}', 'source': 'S2', 'clause_id': c['id'], 'resource': r,
+    return [{'item_id': s2_item_id(c['id'], r), 'source': 'S2', 'clause_id': c['id'], 'resource': r,
              'statement': c['statement'], 'rule': c['rule']}
             for c in template['clauses'] for r in resources]
 
@@ -94,19 +94,32 @@ SCHEMA_FILE = Path(__file__).with_name('schemas') / 'confirmation-list-v1.json'
 with open(SCHEMA_FILE, encoding='utf-8') as _f:
     SCHEMA = json.load(_f)
 # 〈定義：確認清單〉: the fields each review state needs, besides who and when.
-REQUIRED_REVIEW = {'pending': (), 'accepted': ('by', 'at'),
-                   'modified': ('by', 'at', 'reason', 'basis', 'modified_rule'),
-                   'not_applicable': ('by', 'at', 'reason', 'basis')}
+REQUIRED_REVIEW = {report.PENDING: (), report.ACCEPTED: ('by', 'at'),
+                   report.MODIFIED: ('by', 'at', 'reason', 'basis', 'modified_rule'),
+                   report.NOT_APPLICABLE: ('by', 'at', 'reason', 'basis')}
+
+
+def s2_item_id(clause_id, resource):
+    """The id of an S2 clause applied to a resource, 「S2 條文 × 資源」 of 〈定義：確認清單〉; S1 entry ids
+    have no @, so the two never collide (schema, scan._s1_problems)."""
+    return f'{clause_id}@{resource}'
 
 
 def validate(doc):
-    """Structural problems of a confirmation list (schema); an empty list means it can be read."""
+    """Structural problems of a confirmation list: the schema, and an S2 item id that is not its own
+    clause_id@resource, which the schema cannot express. An empty list means it can be read."""
     validator = jsonschema.Draft202012Validator(SCHEMA)
-    return [f'{"/".join(map(str, e.absolute_path)) or "(list)"}: {e.message}' for e in validator.iter_errors(doc)]
+    problems = [f'{"/".join(map(str, e.absolute_path)) or "(list)"}: {e.message}' for e in validator.iter_errors(doc)]
+    if problems:
+        return problems
+    versions = [(f'items/{n}', i) for n, i in enumerate(doc['items'])]
+    versions += [(f'items/{n}/history/{k}', h) for n, i in enumerate(doc['items']) for k, h in enumerate(i.get('history', []))]
+    return [f'{where}/item_id: {v["item_id"]!r} is not {s2_item_id(v["clause_id"], v["resource"])!r}'
+            for where, v in versions if v['source'] == 'S2' and v['item_id'] != s2_item_id(v['clause_id'], v['resource'])]
 
 
-STATUSES = tuple(REQUIRED_REVIEW)
-SINGLE_APPROVAL = ('modified', 'not_applicable')  # they relax or rewrite S2; no second approver yet (TK-REQ-014)
+STATUSES = report.REVIEW_STATES
+SINGLE_APPROVAL = (report.MODIFIED, report.NOT_APPLICABLE)  # they relax or rewrite S2; no second approver yet (TK-REQ-014)
 
 
 def summary(doc):
@@ -126,7 +139,7 @@ def summary(doc):
 def effective_rule(item):
     """The allow/deny rule that applies: a modified item's rewritten rule replaces the original
     (〈定義：確認清單〉 修改)."""
-    if item['status'] == 'modified' and item['review'].get('modified_rule'):
+    if item['status'] == report.MODIFIED and item['review'].get('modified_rule'):
         return item['review']['modified_rule']
     return item['rule']
 
@@ -163,7 +176,7 @@ def review_problem(item):
     """
     review = item['review']
     missing = [name for name in REQUIRED_REVIEW[item['status']] if not review.get(name)]
-    if item['status'] == 'modified' and review.get('modified_rule') == 'allow' and item['rule'] == 'deny':
+    if item['status'] == report.MODIFIED and review.get('modified_rule') == policy.ALLOW and item['rule'] == policy.DENY:
         missing += [name for name in ('allowed_tests', 'expiry') if not review.get(name)]
     if missing:
         return f'confirmation item {item["item_id"]!r} is {item["status"]} but lacks {", ".join(missing)}'

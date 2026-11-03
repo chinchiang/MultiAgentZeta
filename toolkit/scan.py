@@ -14,7 +14,7 @@ import string
 import urllib.error
 import urllib.request
 from pathlib import Path
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from toolkit import confirmation, e1, observer, policy, report
@@ -42,12 +42,23 @@ class _Records:
 
     def __init__(self, run_id, commit):
         self.run_id, self.commit, self.n = run_id, commit, 0
-        self.items, self.confirmation_list = {}, None  # 〈定義：確認清單〉 as read or handed over in this run
 
     def new(self, prefix, **fields):
         self.n += 1
         return {'schema_version': '1', 'run_id': self.run_id, 'id': f'{prefix}-{self.n:04d}', 'created_at': _now(),
                 'source_id': SOURCE_ID, 'commit': self.commit, **fields}
+
+
+@dataclass
+class _Listed:
+    """〈定義：確認清單〉 as read or handed over in this run: its items by id, and the reference the report
+    gives (path, digest, versions, summary). Empty until the list is loaded."""
+    items: dict = field(default_factory=dict)
+    ref: dict | None = None
+
+    def item(self, test):
+        """The item a planned test rests on, or None."""
+        return report.listed_item(self.items, test)
 
 
 API_KEY_FORMATS = ('anon-jwt', 'publishable')
@@ -398,17 +409,16 @@ def _identity_gaps(manifest, identities):
 
 
 def _case_kind(test):
-    return 'denial' if test['template_id'] in DENIAL_TEMPLATES else 'allowed'
+    return report.DENIAL if test['template_id'] in DENIAL_TEMPLATES else report.ALLOWED
 
 
 def _item_problem(test, items):
     """需求不明: the confirmation item the test rests on must be in the list; the toolkit never infers a
     requirement from the implementation (TK-REQ-005). Whether the item lets the test run is
     confirmation.test_problem (〈定義：確認清單〉, TK-REQ-003, TK-REQ-016)."""
-    rid = test.get('requirement_id')
-    item = items.get(rid)
+    item = report.listed_item(items, test)
     if item is None:
-        return f'requirement {rid!r} is not in the confirmation list; requirement unknown, not inferred from the code'
+        return f'requirement {test.get("requirement_id")!r} is not in the confirmation list; requirement unknown, not inferred from the code'
     return confirmation.test_problem(item, _case_kind(test))
 
 
@@ -417,13 +427,17 @@ S1_FIELDS = ('id', 'statement', 'resources', 'rule')
 
 def _s1_problems(manifest):
     """S1 entries are the owner's spec as input (〈定義：確認清單〉): id, statement, resources and an
-    allow/deny rule, and no confirmation, which belongs in the confirmation list."""
+    allow/deny rule, and no confirmation, which belongs in the confirmation list. An id has no "@",
+    so it never equals an S2 item id."""
     problems = []
     for i, entry in enumerate(manifest.get('requirements') or []):
         if not isinstance(entry, dict):
             problems.append(f'requirements/{i} must be an object')
             continue
         problems += [f'requirements/{i}.{name} (S1 entry) is missing' for name in S1_FIELDS if not entry.get(name)]
+        if isinstance(entry.get('id'), str) and '@' in entry['id']:
+            problems.append(f"requirements/{i}.id {entry['id']!r} must not contain '@': it is kept for S2 item "
+                            f"ids (clause@resource), which an S1 entry id could otherwise take")
         if entry.get('rule') and entry['rule'] not in policy.RULES:
             problems.append(f'requirements/{i}.rule must be one of {policy.RULES}')
         if 'confirmation' in entry:
@@ -432,37 +446,35 @@ def _s1_problems(manifest):
     return problems
 
 
-def _load_confirmation_list(manifest, records):
+def _load_confirmation_list(manifest):
     """Read the referenced list, or generate it and hand it over when there is none yet (no digest and no
     file; a list referenced with its digest is read even when its file is gone, TK-REQ-004);
-    bring it up to date with the S2 template and the scope. Returns a problem or None; the items
-    and the list reference end up on records."""
+    bring it up to date with the S2 template and the scope. Returns (_Listed, None), or (None, problem)."""
     ref = manifest.get('confirmation_list')
     path = ref.get('path') if isinstance(ref, dict) else None
     if not path:
-        return ('confirmation_list.path (獨立安全需求) is missing: there is no control-zone location to read '
+        return None, ('confirmation_list.path (獨立安全需求) is missing: there is no control-zone location to read '
                 'the confirmation list from or hand it over to')
     source, resources, s1 = manifest['target']['project'], manifest['scope']['resources'], manifest.get('requirements') or []
     try:
         template = policy.load_template()
     except (OSError, ValueError, policy.PolicyTemplateInvalid) as e:
-        return f'the S2 template cannot be used: {e}'
+        return None, f'the S2 template cannot be used: {e}'
     try:
         if ref.get('digest'):  # the list existed: read it, even when its file is gone (TK-REQ-004)
             existing = confirmation.read(path, ref['digest'], source)
             doc = confirmation.update(existing, template, resources, s1)
             updated = doc != existing
         elif Path(path).exists():
-            return f'confirmation_list.digest is missing: the list at {path} is read only with its digest'
+            return None, f'confirmation_list.digest is missing: the list at {path} is read only with its digest'
         else:
             doc, updated = confirmation.generate(template, resources, s1), True
         digest = confirmation.write(path, doc, source) if updated else ref['digest']
     except (confirmation.ConfirmationListUnusable, OSError) as e:
-        return f'confirmation list unusable: {e}'
-    records.items = {i['item_id']: i for i in doc['items']}
-    records.confirmation_list = {'path': str(path), 'digest': digest, 'list_version': doc['list_version'],
-                                 'updated': updated, 's2_template': doc['s2_template'], **confirmation.summary(doc)}
-    return None
+        return None, f'confirmation list unusable: {e}'
+    ref = {'path': str(path), 'digest': digest, 'list_version': doc['list_version'], 'updated': updated,
+           's2_template': doc['s2_template'], **confirmation.summary(doc)}
+    return _Listed({i['item_id']: i for i in doc['items']}, ref), None
 
 
 def _plan_problem(test):
@@ -563,33 +575,34 @@ def run(manifest):
     reported with status blocked and the reason; every planned test is blocked.
     """
     run_id = f'run-{datetime.now(timezone.utc):%Y%m%d%H%M%S}-{secrets.token_hex(3)}'
-    records = _Records(run_id, _commit(manifest))
+    records, listed = _Records(run_id, _commit(manifest)), _Listed()
     missing = _input_problems(manifest)
     if missing:
-        return _blocked(manifest, records, 'required inputs missing; nothing was started: ' + '; '.join(missing),
+        return _blocked(manifest, records, listed, 'required inputs missing; nothing was started: ' + '; '.join(missing),
                         stage='preflight')
     overrides = _template_override_problems(manifest) + _s1_problems(manifest)
     if overrides:
-        return _blocked(manifest, records, 'nothing was started: ' + '; '.join(overrides), stage='preflight')
+        return _blocked(manifest, records, listed, 'nothing was started: ' + '; '.join(overrides), stage='preflight')
     project = manifest['target']['project']
     pinned, actual = manifest['target']['source_digest'], e1.source_digest(project)
     if pinned != actual:
-        return _blocked(manifest, records, f'source_digest of the ScanManifest ({pinned}) does not match '
+        return _blocked(manifest, records, listed, f'source_digest of the ScanManifest ({pinned}) does not match '
                                            f'the project ({actual}); nothing was started', stage='preflight')
-    problem = _load_confirmation_list(manifest, records)
+    loaded, problem = _load_confirmation_list(manifest)
     if problem:
-        return _blocked(manifest, records, f'nothing was started: {problem}', stage='preflight')
+        return _blocked(manifest, records, listed, f'nothing was started: {problem}', stage='preflight')
+    listed = loaded
     recipe, _ = e1.load_recipe(project)
     identities = {i['name'] for i in recipe['auth']['identities']} if recipe else None
     restorable = not (recipe and recipe['snapshot_reset'].get('reset_scope') == 'none')
-    problems = {t['test_id']: _test_problem(t, records.items, identities, restorable) for t in manifest['tests']}
+    problems = {t['test_id']: _test_problem(t, listed.items, identities, restorable) for t in manifest['tests']}
     gaps = _identity_gaps(manifest, identities)
     if all(problems.values()):
-        return _blocked(manifest, records, 'no test in the ScanManifest can run; nothing was started',
+        return _blocked(manifest, records, listed, 'no test in the ScanManifest can run; nothing was started',
                         per_test=problems, stage='preflight', gaps=gaps)
     prepared = e1.prepare(project)
     if isinstance(prepared, e1.Blocked):
-        return _blocked(manifest, records, f'environment blocked at BuildRecipe step {prepared.step}: '
+        return _blocked(manifest, records, listed, f'environment blocked at BuildRecipe step {prepared.step}: '
                                            f'{prepared.reason}', per_test=problems, stage='dynamic_execution')
     executions, findings = [], []
     stopped = None  # reason the remaining tests cannot run
@@ -598,9 +611,9 @@ def run(manifest):
             started, evidence = _now(), []
             problem = problems[test['test_id']] or (('blocked', stopped) if stopped else None)
             if problem:
-                executions.append(_execution(records, test, started, *problem))
+                executions.append(_execution(records, listed, test, started, *problem))
                 continue
-            denial = test['template_id'] in DENIAL_TEMPLATES
+            denial = _case_kind(test) == report.DENIAL
             undo = None
             try:
                 # Inside the case's handling: a failed injection is that case's error, not the run's (TK-RUN-001).
@@ -622,10 +635,10 @@ def run(manifest):
             finally:
                 if undo:
                     undo()
-            ex = _execution(records, test, started, result, error)
+            ex = _execution(records, listed, test, started, result, error)
             if test.get('fault'):
                 ex['fault'] = test['fault']
-            ex['case_kind'] = 'denial' if denial else 'allowed'
+            ex['case_kind'] = _case_kind(test)
             if checks is not None:
                 ex['checks'] = checks
             ex['evidence'] = [{'id': f'{ex["id"]}-ev{i + 1}', **ev} for i, ev in enumerate(evidence)]
@@ -634,9 +647,9 @@ def run(manifest):
                 findings.append(records.new('finding', fingerprint=_fingerprint(test),
                                             fingerprint_version=FINGERPRINT_VERSION,
                                             requirement_id=test['requirement_id'],
-                                            requirement_version=_item_version(records, test),
+                                            requirement_version=_item_version(listed, test),
                                             root_cause='object-ownership-not-enforced',
-                                            status=confirmation.finding_cap(records.items[test['requirement_id']]),
+                                            status=confirmation.finding_cap(listed.item(test)),
                                             evidence_type='dynamic', execution_record_ids=[ex['id']]))
             if denial and DENIAL_TEMPLATES[test['template_id']]['writes']:
                 reset = e1.reset(prepared.env)
@@ -647,7 +660,7 @@ def run(manifest):
     definite = all(e['result'] in ('passed', 'failed') for e in executions)
     dynamic = ({'status': 'failed', 'reason': f'stopped, environment isolated: {stopped}'} if stopped
                else {'status': 'completed'})
-    return _finish(manifest, records, executions, findings, gaps=gaps,
+    return _finish(manifest, records, listed, executions, findings, gaps=gaps,
                    status='completed' if definite else 'partial',
                    reason='' if definite else 'some tests have no definite result',
                    stages=_stages(preflight={'status': 'completed'}, dynamic_execution=dynamic),
@@ -655,51 +668,50 @@ def run(manifest):
                    matrix=_authorization_matrix(prepared))
 
 
-def _item_version(records, test):
+def _item_version(listed, test):
     """The version of the confirmation item the test rests on, or None when there is none (TK-REQ-004)."""
-    rid = test.get('requirement_id')
-    item = records.items.get(rid) if isinstance(rid, str) else None
+    item = listed.item(test)
     return item['version'] if item else None
 
 
-def _execution(records, test, started, result, error=None):
+def _execution(records, listed, test, started, result, error=None):
     return records.new('exec', test_id=test['test_id'], template_id=test['template_id'],
-                       requirement_id=test['requirement_id'], requirement_version=_item_version(records, test),
+                       requirement_id=test['requirement_id'], requirement_version=_item_version(listed, test),
                        actor_ref=test['actor_ref'],
                        resource_ref=test['resource_ref'], started_at=started, ended_at=_now(),
                        result=result, error=error, evidence=[])
 
 
-def _handover_note(records):
+def _handover_note(listed):
     """Where a generated or updated confirmation list waits for the owner's review (交付確認)."""
-    ref = records.confirmation_list
+    ref = listed.ref
     if not (ref and ref['updated']):
         return ''
     return (f'; the confirmation list was handed over for review at {ref["path"]} ({ref["digest"]}): review its '
             f'pending items and reference it in the ScanManifest by this path and digest')
 
 
-def _requirements(manifest, records):
+def _requirements(manifest, listed):
     """The confirmation items the planned tests rest on, as the report shows them."""
-    used = dict.fromkeys(t.get('requirement_id') for t in manifest['tests'])
+    used = {i['item_id']: i for t in manifest['tests'] if (i := listed.item(t))}  # each item once, in plan order
     return [{'id': i['item_id'], 'source': i['source'], 'statement': i['statement'], 'rule': confirmation.effective_rule(i),
              'status': i['status'], 'out_of_scope': i['out_of_scope'],
              'confirmation': {'by': i['review']['by'], 'at': i['review']['at'], 'version': i['version']}}
-            for rid in used if (i := records.items.get(rid))]
+            for i in used.values()]
 
 
-def _blocked(manifest, records, reason, per_test=None, stage='preflight', gaps=()):
+def _blocked(manifest, records, listed, reason, per_test=None, stage='preflight', gaps=()):
     """Every planned test blocked at `stage`; later stages do not run (〈定義：工作階段〉)."""
     now = _now()
     per_test = per_test or {}
-    executions = [_execution(records, t, now, *(per_test.get(t['test_id']) or ('blocked', reason)))
+    executions = [_execution(records, listed, t, now, *(per_test.get(t['test_id']) or ('blocked', reason)))
                   for t in manifest['tests']]
     if stage == 'preflight':
         stages = _stages(preflight={'status': 'blocked', 'reason': reason},
                          dynamic_execution={'status': 'not_run', 'reason': 'preflight blocked; no dependent work'})
     else:
         stages = _stages(preflight={'status': 'completed'}, dynamic_execution={'status': 'blocked', 'reason': reason})
-    return _finish(manifest, records, executions, [], status='blocked', reason=reason, stages=stages, gaps=gaps,
+    return _finish(manifest, records, listed, executions, [], status='blocked', reason=reason, stages=stages, gaps=gaps,
                    environment=None, matrix=[])
 
 
@@ -726,7 +738,7 @@ UNSUPPORTED_SCOPES = [
 ]
 
 
-def _finish(manifest, records, executions, findings, status, reason, stages, environment, matrix, gaps=()):
+def _finish(manifest, records, listed, executions, findings, status, reason, stages, environment, matrix, gaps=()):
     counts = {k: sum(e['result'] == k for e in executions)
               for k in ('passed', 'failed', 'blocked', 'untested', 'unsupported')}
     coverage = records.new('coverage', inventory_source='fixed test plan in the ScanManifest (tracer bullet)',
@@ -738,14 +750,14 @@ def _finish(manifest, records, executions, findings, status, reason, stages, env
     doc = {'schema_version': '1', 'run_id': records.run_id, 'id': f'report-{records.run_id}', 'created_at': _now(),
            'source_id': SOURCE_ID, 'commit': records.commit, 'status': status,
            'manifest': {'id': manifest['id'], 'digest': _digest(manifest)},
-           'stages': stages, 'requirements': _requirements(manifest, records), 'authorization_matrix': matrix,
+           'stages': stages, 'requirements': _requirements(manifest, listed), 'authorization_matrix': matrix,
            'execution_records': executions, 'findings': findings, 'coverage': coverage}
     if reason:  # status_reason says why the run is not completed, and what the owner has to do about it
-        doc['status_reason'] = reason + _handover_note(records)
+        doc['status_reason'] = reason + _handover_note(listed)
     if environment:
         doc['environment'] = environment
-    if records.confirmation_list:
-        doc['confirmation_list'] = dict(records.confirmation_list)
+    if listed.ref:
+        doc['confirmation_list'] = dict(listed.ref)
     problems = report.validate(doc)
     if problems:
         raise RuntimeError('the toolkit produced an invalid report: ' + '; '.join(problems))

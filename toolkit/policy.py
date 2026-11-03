@@ -11,7 +11,7 @@ TEMPLATE = Path(__file__).with_name('policy-templates') / 'nextjs-supabase-objec
 TEMPLATE_FIELDS = ('policy_template_id', 'version', 'stack', 'clauses', 'self_acceptance')
 RESULTS = ('passed', 'failed')  # a self-acceptance case has a definite expected result
 CLAUSE_FIELDS = ('id', 'statement', 'rule', 'actors')
-RULES = ('deny', 'allow')  # the allow/deny rule of a confirmation item (〈定義：確認清單〉)
+DENY, ALLOW = RULES = ('deny', 'allow')  # the allow/deny rule of a confirmation item (〈定義：確認清單〉)
 
 
 class PolicyTemplateInvalid(Exception):

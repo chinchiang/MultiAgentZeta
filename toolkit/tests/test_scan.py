@@ -939,6 +939,19 @@ class ConfirmationListInScan(unittest.TestCase):
                 del m['requirements'][0][field]
                 self.assertIn(field, self.blocked(m)['status_reason'])
 
+    def test_an_s1_entry_id_with_an_at_sign_is_refused_before_any_list_is_written(self):
+        # "@" belongs to S2 item ids (clause@resource); an S1 id with it could take one's place.
+        path = Path(tempfile.mkdtemp(dir=CONTROL)) / 'list.json'
+        m = copy.deepcopy(self.m)
+        m['confirmation_list'] = {'path': str(path)}
+        m['requirements'][0]['id'] = OWNER_ITEM
+        rep = self.blocked(m)
+        self.assertIn("requirements/0.id 'S2-OWNER-ONLY@documents' must not contain '@'", rep['status_reason'])
+        self.assertFalse(path.exists())
+        m['requirements'][0]['id'] = 'S1-ANNOUNCEMENTS-PUBLIC-READ'  # without "@": the list is generated
+        self.blocked(m)
+        self.assertTrue(path.exists())
+
     def test_tests_on_incomplete_or_not_applicable_items_are_blocked(self):
         from toolkit import confirmation
         ref = self.m['confirmation_list']
