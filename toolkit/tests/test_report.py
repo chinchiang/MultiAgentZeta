@@ -160,6 +160,17 @@ class Validate(unittest.TestCase):
                 problems = report.validate(doc)
                 self.assertTrue(any('execution_records/1' in p and 'blocked' in p for p in problems), problems)
 
+    def test_a_judged_test_must_match_its_items_rule(self):
+        # TK-REQ-016: an allowed case on a deny item (or a denial case on an allow item) is blocked.
+        doc = valid_report()
+        doc['findings'] = []
+        doc['execution_records'][1].update(case_kind='allowed', checks={'access_granted': True})  # the item denies
+        problems = report.validate(doc)
+        self.assertTrue(any('execution_records/1' in p and 'TK-REQ-016' in p for p in problems), problems)
+        doc['execution_records'][1].update(result='blocked', error='mismatch')
+        doc['status'], doc['status_reason'] = 'partial', 'mismatch'
+        self.assertFalse(any('TK-REQ-016' in p for p in report.validate(doc)), report.validate(doc))
+
     def test_records_name_the_item_version_the_report_lists(self):
         doc = valid_report()
         doc['execution_records'][1]['requirement_version'] = 2  # the listed item is version 1
@@ -277,7 +288,9 @@ class RenderMarkdown(unittest.TestCase):
     def test_a_handed_over_list_says_the_owner_has_to_review_it(self):
         doc = valid_report()
         doc['confirmation_list']['updated'] = True
-        self.assertIn('待負責人處理', report.render_markdown(doc))
+        md = report.render_markdown(doc)  # also for a completed run, which has no status_reason
+        self.assertIn('待負責人處理', md)
+        self.assertIn('更新 ScanManifest 的引用', md)
         self.assertNotIn('待負責人處理', report.render_markdown(valid_report()))
 
     def test_missing_commit_is_shown_as_not_provided(self):
@@ -583,7 +596,13 @@ class AllowedCases(unittest.TestCase):
     """A case whose requirement allows the access (e.g. public data) passes when access was granted."""
 
     def allowed(self, doc, granted=True):
+        # An allowed case rests on an item whose rule allows the access (TK-REQ-016).
+        doc['requirements'].append({'id': 'S1-ANNOUNCEMENTS-PUBLIC-READ', 'source': 'S1', 'rule': 'allow',
+                                    'statement': 'Anyone may read announcements.', 'status': 'accepted',
+                                    'out_of_scope': False,
+                                    'confirmation': {'by': 'app-owner', 'at': '2026-11-01T09:00:00Z', 'version': 1}})
         e = doc['execution_records'][1]
+        e.update(requirement_id='S1-ANNOUNCEMENTS-PUBLIC-READ', requirement_version=1)
         e['case_kind'] = 'allowed'
         e['checks'] = {'access_granted': granted}
         return doc

@@ -56,39 +56,66 @@ def _cross_record_problems(doc):
     return problems + _requirement_problems(doc)
 
 
-def _untestable(item):
-    """Why tests on a listed item must be blocked (〈定義：確認清單〉, TK-REQ-003), or None."""
+# Rules on confirmation items shared by the toolkit and validate(), so that a run and the check of its
+# report cannot disagree. An item is a confirmation-list item or a requirements[] entry: both carry
+# source, status and out_of_scope. Codes follow toolkit/schemas.
+RULE_FOR_CASE = {'denial': 'deny', 'allowed': 'allow'}  # case_kind → the rule it tests (TK-REQ-016)
+REVIEWED = ('accepted', 'modified')
+
+
+def untestable(item):
+    """Why tests on item must be blocked, or None: out of scope, not applicable, or a pending S1
+    entry (〈定義：確認清單〉, TK-REQ-003). A pending S2 clause may still be tested."""
+    status = item.get('status')
     if item.get('out_of_scope'):
         return 'is out of scope'
-    if item.get('status') == 'not_applicable':
-        return 'is not applicable'
-    if item.get('status') == 'pending' and item.get('source') == 'S1':
-        return 'is a pending S1 entry'
+    if status == 'not_applicable':
+        return f'is {status} ({REVIEW_LABELS[status]})'
+    if status == 'pending' and item.get('source') == 'S1':
+        return f'is an S1 entry still pending ({REVIEW_LABELS[status]}) until it is reviewed (TK-REQ-003)'
     return None
+
+
+def finding_cap(item):
+    """The highest finding status (問題狀態) a failed test on item may give: only an accepted or
+    modified item gives 已確認; an S2 clause nobody accepted yet gives at most 證據待補 (TK-REQ-003)."""
+    return 'confirmed' if item.get('status') in REVIEWED else 'evidence_pending'
+
+
+def _listed(items, record):
+    """The requirements[] entry a record rests on, or None."""
+    rid = record.get('requirement_id') if isinstance(record, dict) else None
+    return items.get(rid) if isinstance(rid, str) else None
 
 
 def _requirement_problems(doc):
     """Records against the confirmation items the report lists: version (TK-REQ-004), blocked tests
-    (〈定義：確認清單〉) and the finding cap of pending items (TK-REQ-003)."""
+    (〈定義：確認清單〉), case kind against the rule (TK-REQ-016) and the finding cap (TK-REQ-003)."""
     items = {r.get('id'): r for r in _list(doc, 'requirements') if isinstance(r, dict) and isinstance(r.get('id'), str)}
     problems = []
     for i, e in enumerate(_list(doc, 'execution_records')):
-        item = items.get(e.get('requirement_id')) if isinstance(e, dict) and isinstance(e.get('requirement_id'), str) else None
+        item = _listed(items, e)
         if item is None:
             continue
         version = (item.get('confirmation') or {}).get('version')
         if e.get('requirement_version') != version:
             problems.append(f'execution_records/{i}: requirement_version {e.get("requirement_version")!r} differs '
                             f'from version {version!r} of {item["id"]!r} in requirements (TK-REQ-004)')
-        reason = _untestable(item)
-        if reason and e.get('result') != 'blocked':
+        if e.get('result') == 'blocked':
+            continue
+        reason = untestable(item)
+        if reason:
             problems.append(f'execution_records/{i}: {item["id"]!r} {reason}; a test on it must be blocked, '
                             f'not {e.get("result")!r} (〈定義：確認清單〉)')
+        kind = e.get('case_kind', 'denial')
+        if e.get('result') in ('passed', 'failed') and RULE_FOR_CASE.get(kind) != item.get('rule'):
+            problems.append(f'execution_records/{i}: a {kind} case on {item["id"]!r} (rule {item.get("rule")!r}) '
+                            f'must be blocked, not {e.get("result")!r} (TK-REQ-016)')
     for i, f in enumerate(_list(doc, 'findings')):
-        item = items.get(f.get('requirement_id')) if isinstance(f, dict) and isinstance(f.get('requirement_id'), str) else None
-        if item and item.get('status') == 'pending' and f.get('status') == 'confirmed':
-            problems.append(f'findings/{i}: {item["id"]!r} is pending; a finding on it is at most evidence_pending, '
-                            f'not confirmed (TK-REQ-003)')
+        item = _listed(items, f)
+        if item and f.get('status') == 'confirmed' and finding_cap(item) != 'confirmed':
+            problems.append(f'findings/{i}: {item["id"]!r} is {item.get("status")!r}; a finding on it is at most '
+                            f'evidence_pending, not confirmed (TK-REQ-003)')
     return problems
 
 
@@ -116,7 +143,8 @@ def _confirmation_summary(listed):
     t = listed['s2_template']
     lines = ['', '## 確認狀態摘要', '',
              f'- **確認清單**：`{listed["path"]}` v{listed["list_version"]}（`{listed["digest"]}`）'
-             + ('；本次產生或更新，待負責人處理' if listed['updated'] else ''),
+             + ('；本次產生或更新，待負責人處理：處理其中待確認的項目，再以此路徑與摘要更新 ScanManifest 的引用'
+                if listed['updated'] else ''),
              f'- **S2 範本**：`{t["policy_template_id"]}` v{t["version"]}（`{t["digest"]}`）', '',
              '| 來源 | ' + ' | '.join(REVIEW_LABELS.values()) + ' |', '| :--- |' + ' ---: |' * len(REVIEW_LABELS)]
     for source, counts in listed['summary'].items():

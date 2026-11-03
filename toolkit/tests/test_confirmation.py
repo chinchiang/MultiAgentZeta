@@ -305,6 +305,12 @@ class TestProblem(unittest.TestCase):
         self.assertIn('does not match the rule (TK-REQ-016)', confirmation.test_problem(allowed, 'denial'))
 
 
+    def test_a_modification_without_its_rule_is_named_before_the_case_kind(self):
+        # Without modified_rule the original rule would apply and the reason would wrongly be a mismatch.
+        owner = self.items['S2-OWNER-ONLY@documents']
+        unfinished = dict(owner, status='modified', review=dict(owner['review'], reason='shared drafts', basis='S1-X'))
+        self.assertIn('lacks modified_rule', confirmation.test_problem(unfinished, 'allowed'))
+
 class FindingCap(unittest.TestCase):
     """The highest finding status a failed test may give, by the item it rests on (TK-REQ-003)."""
 
@@ -316,3 +322,5 @@ class FindingCap(unittest.TestCase):
         self.assertEqual(confirmation.finding_cap(owner), 'confirmed')
         self.assertEqual(confirmation.finding_cap(modified), 'confirmed')
         self.assertEqual(confirmation.finding_cap(items['S2-TENANT-ISOLATION@documents']), 'evidence_pending')
+        # Only accepted or modified items confirm; anything else is capped, whatever the order of the checks.
+        self.assertEqual(confirmation.finding_cap(dict(owner, source='S1', status='pending')), 'evidence_pending')

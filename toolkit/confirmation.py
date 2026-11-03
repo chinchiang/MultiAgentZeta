@@ -129,34 +129,28 @@ def effective_rule(item):
     return item['rule']
 
 
-RULE_FOR_CASE = {'denial': 'deny', 'allowed': 'allow'}  # case_kind of an ExecutionRecord → the rule it tests
-
-
 def test_problem(item, case_kind):
     """Why a test of case_kind ('denial' or 'allowed') cannot run on item, or None.
 
-    The case kind must match the item's allow/deny rule, a modified item's rewritten rule included;
-    an access is allowed only by the item, never by picking an allowed-case template (TK-REQ-016).
+    The item must be testable (report.untestable) and carry the fields its review state needs; then
+    the case kind must match its allow/deny rule, a modified item's rewritten rule included, so an
+    access is allowed only by the item, never by picking an allowed-case template (TK-REQ-016).
     """
-    rid, status = item['item_id'], item['status']
-    if item['out_of_scope']:
-        return f'confirmation item {rid!r} is out of scope; the test is not run'
-    if status == 'not_applicable':
-        return f'confirmation item {rid!r} is {status} ({report.REVIEW_LABELS[status]}); the test is not run'
-    if status == PENDING and item['source'] == 'S1':
-        return (f'confirmation item {rid!r} is an S1 entry still pending ({report.REVIEW_LABELS[PENDING]}); '
-                f'the test is not run until it is reviewed (TK-REQ-003)')
+    rid = item['item_id']
+    reason = report.untestable(item)
+    if reason:
+        return f'confirmation item {rid!r} {reason}; the test is not run'
+    problem = review_problem(item)  # before the rule: a modification lacking its rule has no rule to match
+    if problem:
+        return problem
     rule = effective_rule(item)
-    if RULE_FOR_CASE[case_kind] != rule:
+    if report.RULE_FOR_CASE[case_kind] != rule:
         return (f'confirmation item {rid!r} has rule {rule!r} but the test is a {case_kind} case: '
                 f'the case kind does not match the rule (TK-REQ-016); the test is not run')
-    return review_problem(item)
+    return None
 
 
-def finding_cap(item):
-    """The highest finding status (問題狀態) a failed test on item may give: a finding resting on an
-    S2 clause nobody accepted yet is at most 證據待補 (evidence_pending), never 已確認 (TK-REQ-003)."""
-    return 'evidence_pending' if item['status'] == PENDING else 'confirmed'
+finding_cap = report.finding_cap  # one rule for the run and for report.validate() (TK-REQ-003)
 
 
 def review_problem(item):
