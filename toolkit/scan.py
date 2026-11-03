@@ -433,7 +433,8 @@ def _s1_problems(manifest):
 
 
 def _load_confirmation_list(manifest, records):
-    """Read the referenced list, or generate it and hand it over when the file does not exist yet;
+    """Read the referenced list, or generate it and hand it over when there is none yet (no digest and no
+    file; a list referenced with its digest is read even when its file is gone, TK-REQ-004);
     bring it up to date with the S2 template and the scope. Returns a problem or None; the items
     and the list reference end up on records."""
     ref = manifest.get('confirmation_list')
@@ -447,14 +448,14 @@ def _load_confirmation_list(manifest, records):
     except (OSError, ValueError, policy.PolicyTemplateInvalid) as e:
         return f'the S2 template cannot be used: {e}'
     try:
-        if not Path(path).exists():
-            doc, updated = confirmation.generate(template, resources, s1), True
-        elif not ref.get('digest'):
-            return f'confirmation_list.digest is missing: the list at {path} is read only with its digest'
-        else:
+        if ref.get('digest'):  # the list existed: read it, even when its file is gone (TK-REQ-004)
             existing = confirmation.read(path, ref['digest'], source)
             doc = confirmation.update(existing, template, resources, s1)
             updated = doc != existing
+        elif Path(path).exists():
+            return f'confirmation_list.digest is missing: the list at {path} is read only with its digest'
+        else:
+            doc, updated = confirmation.generate(template, resources, s1), True
         digest = confirmation.write(path, doc, source) if updated else ref['digest']
     except (confirmation.ConfirmationListUnusable, OSError) as e:
         return f'confirmation list unusable: {e}'

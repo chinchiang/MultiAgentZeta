@@ -829,6 +829,19 @@ class ConfirmationListInScan(unittest.TestCase):
             self.assertEqual(e['result'], 'blocked')
             self.assertIn('待確認' if e['requirement_id'] == PUBLIC_ITEM else 'BuildRecipe', e['error'])
 
+    def test_a_list_referenced_with_its_digest_but_missing_is_blocked_not_regenerated(self):
+        # A digest means the list existed; generating a new, all-pending one would drop the owner's
+        # review states and break the confirmation record (TK-REQ-004). Without a digest, see above.
+        folder = Path(tempfile.mkdtemp(dir=CONTROL))
+        lost, digest = folder / 'lost-list.json', 'sha256:' + 'ab' * 32
+        self.m['confirmation_list'] = {'path': str(lost), 'digest': digest}
+        rep = self.blocked(self.m)
+        self.assertEqual(rep['stages'][0]['stage'], 'preflight')
+        self.assertEqual(rep['stages'][0]['status'], 'blocked')
+        self.assertIn(f'{lost} is referenced with digest {digest} but does not exist', rep['status_reason'])
+        self.assertEqual(list(folder.iterdir()), [])  # nothing was written
+        self.assertNotIn('confirmation_list', rep)
+
     def test_a_list_that_cannot_be_written_is_blocked_not_a_crash(self):
         blocker = Path(tempfile.mkdtemp(dir=CONTROL)) / 'a-file'
         blocker.write_text('not a directory', encoding='utf-8')
@@ -900,10 +913,13 @@ class ConfirmationListInScan(unittest.TestCase):
                 self.assertIn('confirmation_list.path', self.blocked(m)['status_reason'])
 
     def test_a_list_inside_the_sample_source_is_refused(self):
-        self.m['confirmation_list'] = {'path': str(Path(self.tmp.name) / 'confirmation-list.json')}
-        rep = self.blocked(self.m)
-        self.assertIn('inside the sample source', rep['status_reason'])
-        self.assertFalse((Path(self.tmp.name) / 'confirmation-list.json').exists())
+        inside = Path(self.tmp.name) / 'confirmation-list.json'
+        for ref in ({'path': str(inside)}, {'path': str(inside), 'digest': 'sha256:' + 'ab' * 32}):
+            with self.subTest(digest='digest' in ref):  # with a digest, the location is checked before the file
+                self.m['confirmation_list'] = ref
+                rep = self.blocked(self.m)
+                self.assertIn('inside the sample source', rep['status_reason'])
+                self.assertFalse(inside.exists())
 
     def test_an_existing_list_needs_its_digest_and_it_must_match(self):
         ref = self.m['confirmation_list']

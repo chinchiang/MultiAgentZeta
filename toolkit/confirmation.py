@@ -195,6 +195,10 @@ def write(path, doc, source_root):
 def read(path, digest, source_root):
     """The list at path, after checking where it is, its digest and its structure."""
     path = _outside_source(path, source_root)
+    if not path.exists():
+        # Not "no list yet": a new, all-pending list would drop the owner's review states (TK-REQ-004).
+        raise ConfirmationListUnusable(f'{path} is referenced with digest {digest} but does not exist; '
+                                       f'restore the file')
     try:
         actual = file_digest(path)
         doc = json.loads(path.read_text(encoding='utf-8'))
