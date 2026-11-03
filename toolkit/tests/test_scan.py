@@ -116,13 +116,49 @@ def results(rep):
     return {e['test_id']: e['result'] for e in rep['execution_records']}
 
 
+def judgement_results(rep):
+    """Results of the judgement tests (TESTS) in a shared run, without the template's other cases."""
+    ids = {t['test_id'] for t in TESTS}
+    return {k: v for k, v in results(rep).items() if k in ids}
+
+
+def shared_plan(template, tests):
+    """The S2 template's self-acceptance cases, each on its clause's item for documents, followed by
+    the tests no case covers (TK-REQ-008). A test named like a case must be defined like it, since
+    only one of them runs; otherwise ValueError names it."""
+    plan = [{'test_id': c['case_id'], 'requirement_id': f'{c["clause"]}@documents', **c['test']}
+            for c in template['self_acceptance']['cases']]
+    cases = {t['test_id']: t for t in plan}
+    for t in tests:
+        if t['test_id'] not in cases:
+            plan.append(t)
+        elif t != cases[t['test_id']]:
+            raise ValueError(f'test {t["test_id"]!r} is defined differently from the self-acceptance case of that name')
+    return plan
+
+
 _RUNS = {}
 
 
+def shared_manifest(version):
+    """The ScanManifest of the run the judgement tests and the S2 template's self-acceptance share (#43).
+    Each clause is accepted on documents in a confirmation list written by this test, as the owner of a
+    sample would; the toolkit itself never accepts an item (TK-REQ-009)."""
+    from toolkit import policy
+    template = policy.load_template()
+    m = manifest(version)
+    m['id'] = f'manifest-object-authz-shared-{version}'
+    m['tests'] = shared_plan(template, TESTS)
+    clauses = [f'{c["id"]}@documents' for c in template['clauses']]
+    m['confirmation_list'] = reviewed_list(SAMPLES / version, accepted=[*ACCEPTED, *clauses])
+    return m
+
+
 def run_once(version):
-    """One scan per sample version per test session; the stack is destroyed after each run."""
+    """One scan of shared_manifest(version) per sample version per test session; the stack is destroyed
+    after each run."""
     if version not in _RUNS:
-        _RUNS[version] = scan.run(manifest(version))
+        _RUNS[version] = scan.run(shared_manifest(version))
     return _RUNS[version]
 
 
@@ -140,7 +176,7 @@ class VulnerableRunEnv(unittest.TestCase):
         self.assertEqual(self.report['status'], 'completed')
 
     def test_read_create_update_delete_are_judged_separately(self):
-        self.assertEqual(results(self.report), EXPECTED['vulnerable'])
+        self.assertEqual(judgement_results(self.report), EXPECTED['vulnerable'])
 
     def test_one_confirmed_finding_per_failed_test(self):
         failed = {e['id']: e['test_id'] for e in self.report['execution_records'] if e['result'] == 'failed'}
@@ -206,7 +242,7 @@ class PatchedAndLegitRunsEnv(unittest.TestCase):
                 rep = run_once(version).report
                 self.assertEqual(report.validate(rep), [])
                 self.assertEqual(rep['status'], 'completed')
-                self.assertEqual(results(rep), ALL_PASSED)
+                self.assertEqual(judgement_results(rep), ALL_PASSED)
                 self.assertEqual(rep['findings'], [])
 
 
@@ -346,7 +382,7 @@ class LaxUpdatePolicyRunEnv(unittest.TestCase):
 
     def test_no_finding_and_every_test_passes(self):
         self.assertEqual(report.validate(self.report), [])
-        self.assertEqual(results(self.report), ALL_PASSED)
+        self.assertEqual(judgement_results(self.report), ALL_PASSED)
         self.assertEqual(self.report['findings'], [])
 
     def test_the_update_attempt_was_answered_and_changed_nothing(self):
@@ -958,20 +994,28 @@ class RecordsKeepTheItemVersion(unittest.TestCase):
             self.assertIsNone(rep['execution_records'][0]['requirement_version'])
 
 
-def self_acceptance_manifest(version, template):
-    """A ScanManifest of the S2 template's self-acceptance cases for one sample version (TK-REQ-008).
+class SharedPlan(unittest.TestCase):
+    """One plan per sample version holds the judgement tests and the S2 template's self-acceptance
+    cases, so both share one E1 run (TK-REQ-008); a case keeps the template's own definition."""
 
-    Each clause is accepted on documents in a confirmation list written by this test, as the
-    owner of a sample would; the toolkit itself never accepts an item (TK-REQ-009).
-    """
-    m = manifest(version)
-    m['id'] = f'manifest-s2-self-acceptance-{version}'
-    m['requirements'] = []
-    m['confirmation_list'] = reviewed_list(SAMPLES / version, accepted=[f'{c["id"]}@documents' for c in template['clauses']],
-                                           s1=())
-    m['tests'] = [{'test_id': c['case_id'], 'requirement_id': f'{c["clause"]}@documents', **c['test']}
-                  for c in template['self_acceptance']['cases']]
-    return m
+    def test_the_plan_holds_every_case_and_every_test_once(self):
+        from toolkit import policy
+        plan = shared_plan(policy.load_template(), TESTS)
+        ids = [t['test_id'] for t in plan]
+        # 16 template cases; the 10 judgement tests of the same name are those cases; 3 public reads are S1 only.
+        self.assertEqual(len(ids), 19)
+        self.assertEqual(len(set(ids)), 19)
+        self.assertIn('UPDATE-anonymous-publishable', ids)  # a case only the template has
+        self.assertIn('PUBLIC-READ-other-tenant', ids)  # a test only the judgement plan has
+        case = next(t for t in plan if t['test_id'] == 'READ-same-tenant')
+        self.assertEqual((case['requirement_id'], case['resource_ref']), (OWNER_ITEM, 'MARK-A-ALICE-PRIVATE'))
+
+    def test_a_test_named_like_a_case_but_defined_differently_is_refused(self):
+        from toolkit import policy
+        tests = [dict(t, resource_ref='MARK-A-ALICE-SHARED') if t['test_id'] == 'READ-same-tenant' else t
+                 for t in TESTS]
+        with self.assertRaisesRegex(ValueError, 'READ-same-tenant'):
+            shared_plan(policy.load_template(), tests)
 
 
 @needs_env
@@ -985,10 +1029,13 @@ class TemplateSelfAcceptanceEnv(unittest.TestCase):
         self.assertEqual(SAMPLES.relative_to(SAMPLES.parents[1]).as_posix(), acceptance['sample'])
         for version in acceptance['versions']:
             with self.subTest(version=version):
-                rep = scan.run(self_acceptance_manifest(version, template)).report
+                rep = run_once(version).report  # the run the judgement tests use: no E1 of its own (#43)
                 self.assertEqual(report.validate(rep), [])
                 self.assertEqual(rep['status'], 'completed', rep.get('status_reason'))
-                self.assertEqual(results(rep), {c['case_id']: c['expected'][version] for c in acceptance['cases']})
+                got = results(rep)
+                # A case skipped or without a result gives None here, never its expected passed/failed.
+                self.assertEqual({c['case_id']: got.get(c['case_id']) for c in acceptance['cases']},
+                                 {c['case_id']: c['expected'][version] for c in acceptance['cases']})
 
 
 class TemplateFromToolkitOnly(unittest.TestCase):
