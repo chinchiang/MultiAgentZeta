@@ -397,24 +397,19 @@ def _identity_gaps(manifest, identities):
     return [{'scope': f'identity:{n}', 'reason': 'no such identity in the BuildRecipe (測試身分)'} for n in names]
 
 
+def _case_kind(test):
+    return 'denial' if test['template_id'] in DENIAL_TEMPLATES else 'allowed'
+
+
 def _item_problem(test, items):
-    """需求不明: the confirmation item the test rests on must be in the list, in scope and reviewed
-    with the fields its review state needs (〈定義：確認清單〉, TK-SCP-003). The toolkit never infers
-    a requirement from the implementation (TK-REQ-005). A pending item blocks the test until the
-    judgement cap for pending S2 items (TK-REQ-003) is in place (#41)."""
+    """需求不明: the confirmation item the test rests on must be in the list; the toolkit never infers a
+    requirement from the implementation (TK-REQ-005). Whether the item lets the test run is
+    confirmation.test_problem (〈定義：確認清單〉, TK-REQ-003, TK-REQ-016)."""
     rid = test.get('requirement_id')
     item = items.get(rid)
     if item is None:
         return f'requirement {rid!r} is not in the confirmation list; requirement unknown, not inferred from the code'
-    if item['out_of_scope']:
-        return f'confirmation item {rid!r} is out of scope; the test is not run'
-    status = item['status']
-    if status == confirmation.PENDING:
-        return (f'confirmation item {rid!r} is {status} ({report.REVIEW_LABELS[status]}); the test is not run '
-                f'until it is reviewed')
-    if status == 'not_applicable':
-        return f'confirmation item {rid!r} is {status} ({report.REVIEW_LABELS[status]}); the test is not run'
-    return confirmation.review_problem(item)
+    return confirmation.test_problem(item, _case_kind(test))
 
 
 S1_FIELDS = ('id', 'statement', 'resources', 'rule')
@@ -465,7 +460,7 @@ def _load_confirmation_list(manifest, records):
         return f'confirmation list unusable: {e}'
     records.items = {i['item_id']: i for i in doc['items']}
     records.confirmation_list = {'path': str(path), 'digest': digest, 'list_version': doc['list_version'],
-                                 'updated': updated}
+                                 'updated': updated, 's2_template': doc['s2_template'], **confirmation.summary(doc)}
     return None
 
 
@@ -589,12 +584,12 @@ def run(manifest):
     problems = {t['test_id']: _test_problem(t, records.items, identities, restorable) for t in manifest['tests']}
     gaps = _identity_gaps(manifest, identities)
     if all(problems.values()):
-        return _blocked(manifest, records, 'no test in the ScanManifest can run; nothing was started'
-                        + _handover_note(records), per_test=problems, stage='preflight', gaps=gaps)
+        return _blocked(manifest, records, 'no test in the ScanManifest can run; nothing was started',
+                        per_test=problems, stage='preflight', gaps=gaps)
     prepared = e1.prepare(project)
     if isinstance(prepared, e1.Blocked):
         return _blocked(manifest, records, f'environment blocked at BuildRecipe step {prepared.step}: '
-                                           f'{prepared.reason}', stage='dynamic_execution')
+                                           f'{prepared.reason}', per_test=problems, stage='dynamic_execution')
     executions, findings = [], []
     stopped = None  # reason the remaining tests cannot run
     try:
@@ -638,7 +633,9 @@ def run(manifest):
                 findings.append(records.new('finding', fingerprint=_fingerprint(test),
                                             fingerprint_version=FINGERPRINT_VERSION,
                                             requirement_id=test['requirement_id'],
-                                            root_cause='object-ownership-not-enforced', status='confirmed',
+                                            requirement_version=_item_version(records, test),
+                                            root_cause='object-ownership-not-enforced',
+                                            status=confirmation.finding_cap(records.items[test['requirement_id']]),
                                             evidence_type='dynamic', execution_record_ids=[ex['id']]))
             if denial and DENIAL_TEMPLATES[test['template_id']]['writes']:
                 reset = e1.reset(prepared.env)
@@ -657,9 +654,17 @@ def run(manifest):
                    matrix=_authorization_matrix(prepared))
 
 
+def _item_version(records, test):
+    """The version of the confirmation item the test rests on, or None when there is none (TK-REQ-004)."""
+    rid = test.get('requirement_id')
+    item = records.items.get(rid) if isinstance(rid, str) else None
+    return item['version'] if item else None
+
+
 def _execution(records, test, started, result, error=None):
     return records.new('exec', test_id=test['test_id'], template_id=test['template_id'],
-                       requirement_id=test['requirement_id'], actor_ref=test['actor_ref'],
+                       requirement_id=test['requirement_id'], requirement_version=_item_version(records, test),
+                       actor_ref=test['actor_ref'],
                        resource_ref=test['resource_ref'], started_at=started, ended_at=_now(),
                        result=result, error=error, evidence=[])
 
@@ -734,8 +739,8 @@ def _finish(manifest, records, executions, findings, status, reason, stages, env
            'manifest': {'id': manifest['id'], 'digest': _digest(manifest)},
            'stages': stages, 'requirements': _requirements(manifest, records), 'authorization_matrix': matrix,
            'execution_records': executions, 'findings': findings, 'coverage': coverage}
-    if reason:
-        doc['status_reason'] = reason
+    if reason:  # status_reason says why the run is not completed, and what the owner has to do about it
+        doc['status_reason'] = reason + _handover_note(records)
     if environment:
         doc['environment'] = environment
     if records.confirmation_list:

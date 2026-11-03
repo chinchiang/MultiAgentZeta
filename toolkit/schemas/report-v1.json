@@ -69,13 +69,41 @@
     "confirmation_list": {
       "description": "〈定義：確認清單〉: the list this run used or handed over, in the control zone. digest is the file as it is after the run: a list the run generated or updated (updated true) needs the owner's review and a new ScanManifest reference.",
       "type": "object",
-      "required": ["path", "digest", "list_version", "updated"],
+      "required": ["path", "digest", "list_version", "updated", "s2_template", "summary", "out_of_scope", "single_approval"],
       "additionalProperties": false,
       "properties": {
         "path": {"$ref": "#/$defs/text"},
         "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
         "list_version": {"type": "integer", "minimum": 1},
-        "updated": {"type": "boolean"}
+        "updated": {"type": "boolean"},
+        "s2_template": {
+          "description": "The S2 template the list was produced from (TK-REQ-004, TK-REQ-008).",
+          "type": "object",
+          "required": ["policy_template_id", "version", "digest"],
+          "additionalProperties": false,
+          "properties": {
+            "policy_template_id": {"$ref": "#/$defs/text"},
+            "version": {"$ref": "#/$defs/text"},
+            "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+          }
+        },
+        "summary": {
+          "description": "TK-REQ-003: items in scope by source and 處理狀態 (pending 待確認, accepted 接受, modified 修改, not_applicable 不適用).",
+          "type": "object",
+          "required": ["S1", "S2"],
+          "additionalProperties": false,
+          "properties": {"S1": {"$ref": "#/$defs/review_counts"}, "S2": {"$ref": "#/$defs/review_counts"}}
+        },
+        "out_of_scope": {
+          "description": "Items whose resources left the scope; not a review state, counted in no summary entry (〈定義：確認清單〉).",
+          "type": "integer",
+          "minimum": 0
+        },
+        "single_approval": {
+          "description": "〈定義：確認清單〉 單人核准: modified and not applicable items in scope, approved by one person until a second approval exists (TK-REQ-014).",
+          "type": "array",
+          "items": {"$ref": "#/$defs/text"}
+        }
       }
     },
     "status": {
@@ -139,12 +167,17 @@
           }}
         }
       ],
-      "required": ["result", "evidence"],
+      "required": ["result", "evidence", "requirement_version"],
       "unevaluatedProperties": false,
       "properties": {
         "test_id": {},
         "template_id": {},
         "requirement_id": {},
+        "requirement_version": {
+          "description": "TK-REQ-004: the version of the confirmation item the test rested on in this run; a later version of the item leaves this record as it is. null when the test names no item of the confirmation list.",
+          "type": ["integer", "null"],
+          "minimum": 1
+        },
         "actor_ref": {},
         "resource_ref": {},
         "started_at": {"$ref": "#/$defs/text"},
@@ -243,7 +276,28 @@
       },
       "additionalProperties": false
     },
-    "finding": {"allOf": [{"$ref": "#/$defs/common"}]},
+    "review_counts": {
+      "type": "object",
+      "required": ["pending", "accepted", "modified", "not_applicable"],
+      "additionalProperties": false,
+      "properties": {
+        "pending": {"type": "integer", "minimum": 0},
+        "accepted": {"type": "integer", "minimum": 0},
+        "modified": {"type": "integer", "minimum": 0},
+        "not_applicable": {"type": "integer", "minimum": 0}
+      }
+    },
+    "finding": {
+      "allOf": [{"$ref": "#/$defs/common"}],
+      "required": ["requirement_version"],
+      "properties": {
+        "requirement_version": {
+          "description": "TK-REQ-004: the version of the confirmation item the finding was judged on.",
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
     "coverage": {
       "allOf": [{"$ref": "#/$defs/common"}],
       "properties": {

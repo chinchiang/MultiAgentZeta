@@ -154,6 +154,13 @@ class VulnerableRunEnv(unittest.TestCase):
             self.assertRegex(f['fingerprint'], r'^sha256:[0-9a-f]{64}$')
         self.assertEqual(len({f['fingerprint'] for f in findings}), 3)  # one problem per operation
 
+    def test_requirements_come_from_s1_or_s2_and_the_failures_rest_on_owner_only(self):
+        # TK-REQ-005: no requirement comes from the implementation; the leak is judged on S2-OWNER-ONLY.
+        self.assertTrue(self.report['requirements'])
+        self.assertLessEqual({r['source'] for r in self.report['requirements']}, {'S1', 'S2'})
+        failed = {e['requirement_id'] for e in self.report['execution_records'] if e['result'] == 'failed'}
+        self.assertEqual(failed, {OWNER_ITEM})
+
     def test_findings_are_confirmed_in_e1_without_production_exploitation(self):
         # TK-DYN-016: dynamic evidence from the E1 stack is enough; no production system is touched.
         self.assertEqual(self.report['environment']['mode'], 'E1')
@@ -168,6 +175,27 @@ class VulnerableRunEnv(unittest.TestCase):
 
     def test_markdown_is_generated_from_the_report(self):
         self.assertEqual(self.outcome.markdown, report.render_markdown(self.report))
+
+
+@needs_env
+class PendingS2VulnerableEnv(unittest.TestCase):
+    """TK-REQ-003: a failed test on an S2 clause nobody accepted yet runs, and its finding is at most
+    證據待補 (evidence_pending), never 已確認."""
+
+    @classmethod
+    def setUpClass(cls):
+        m = manifest('vulnerable')
+        m['confirmation_list'] = reviewed_list(SAMPLES / 'vulnerable', accepted=[i for i in ACCEPTED if i != OWNER_ITEM])
+        m['tests'] = [t for t in m['tests'] if t['test_id'] in ('READ-same-tenant', 'UPDATE-same-tenant', 'DELETE-same-tenant')]
+        cls.report = scan.run(m).report
+
+    def test_report_is_valid(self):
+        self.assertEqual(report.validate(self.report), [])
+
+    def test_failed_tests_on_the_pending_clause_give_evidence_pending_findings(self):
+        self.assertEqual(set(results(self.report).values()), {'failed'})
+        self.assertEqual([(f['status'], f['requirement_id']) for f in self.report['findings']],
+                         [('evidence_pending', OWNER_ITEM)] * 3)
 
 
 @needs_env
@@ -686,15 +714,49 @@ class UnknownRequirement(unittest.TestCase):
                 self.assertEqual(result, 'blocked')
                 self.assertIn('REQ-NOT-IN-THE-LIST', error)
 
-    def test_test_citing_a_pending_item_is_blocked(self):
-        # Until the judgement cap (#41), a test resting on a pending item is not run.
+    def test_pending_s2_tests_go_on_and_pending_s1_tests_are_blocked(self):
+        # TK-REQ-003: a pending S2 clause may still be tested (its findings are capped); a pending S1
+        # entry blocks. Both stay in the coverage denominator (〈定義：確認清單〉).
         import tempfile
         with tempfile.TemporaryDirectory() as d:
             m = preflight_manifest(d)
             m['confirmation_list'] = reviewed_list(d, accepted=())
-            for result, error in self.errors(m).values():
-                self.assertEqual(result, 'blocked')
-                self.assertIn('pending', error)
+            rep = scan.run(m).report
+            self.assertEqual(report.validate(rep), [])
+            for e in rep['execution_records']:
+                with self.subTest(e['test_id']):
+                    self.assertEqual(e['result'], 'blocked')
+                    if e['requirement_id'] == PUBLIC_ITEM:
+                        self.assertIn('待確認', e['error'])
+                    else:
+                        self.assertIn('BuildRecipe', e['error'])
+            self.assertEqual(rep['coverage']['denominator'], len(TESTS) + len(scan.UNSUPPORTED_SCOPES))
+
+
+class CaseKindMatchesItem(unittest.TestCase):
+    """TK-REQ-016: a test is a denial or an allowed case as its confirmation item's rule says.
+
+    The empty project stops the run at the BuildRecipe step (no Docker): a test that passed every
+    confirmation check reaches that step, a mismatched one is blocked before it with its own reason."""
+
+    def test_mismatched_case_kinds_are_blocked_and_matching_ones_go_on(self):
+        with tempfile.TemporaryDirectory() as d:
+            m = preflight_manifest(d)
+            read = next(t for t in m['tests'] if t['test_id'] == 'READ-same-tenant')
+            public = next(t for t in m['tests'] if t['test_id'] == 'PUBLIC-READ-other-tenant')
+            m['tests'] = [read, public,
+                          dict(public, test_id='ALLOWED-on-deny', requirement_id=OWNER_ITEM),
+                          dict(read, test_id='DENIAL-on-allow', requirement_id=PUBLIC_ITEM)]
+            rep = scan.run(m).report
+            self.assertEqual(report.validate(rep), [])
+            errors = {e['test_id']: (e['result'], e['error']) for e in rep['execution_records']}
+            for test_id in ('ALLOWED-on-deny', 'DENIAL-on-allow'):
+                self.assertEqual(errors[test_id][0], 'blocked')
+                self.assertIn('does not match the rule (TK-REQ-016)', errors[test_id][1])
+            for test_id in ('READ-same-tenant', 'PUBLIC-READ-other-tenant'):
+                self.assertEqual(errors[test_id][0], 'blocked')
+                self.assertIn('BuildRecipe', errors[test_id][1])
+            self.assertEqual(rep['coverage']['denominator'], 4 + len(scan.UNSUPPORTED_SCOPES))
 
 
 class ConfirmationListInScan(unittest.TestCase):
@@ -725,9 +787,11 @@ class ConfirmationListInScan(unittest.TestCase):
              for r in ('documents', 'announcements')] + [PUBLIC_ITEM]))
         self.assertIn(str(path), rep['status_reason'])
         self.assertIn(confirmation.file_digest(path), rep['status_reason'])
+        # Pending S2 items do not stop their tests (TK-REQ-003): this run went on to the BuildRecipe step.
+        self.assertEqual(rep['stages'][0], {'stage': 'preflight', 'status': 'completed'})
         for e in rep['execution_records']:
             self.assertEqual(e['result'], 'blocked')
-            self.assertIn('pending', e['error'])
+            self.assertIn('待確認' if e['requirement_id'] == PUBLIC_ITEM else 'BuildRecipe', e['error'])
 
     def test_a_list_that_cannot_be_written_is_blocked_not_a_crash(self):
         blocker = Path(tempfile.mkdtemp(dir=CONTROL)) / 'a-file'
@@ -746,8 +810,8 @@ class ConfirmationListInScan(unittest.TestCase):
     def test_errors_name_review_states_with_their_spec_labels(self):
         # Spec names (〈定義：確認清單〉 處理狀態), written here, not taken from report.REVIEW_LABELS.
         self.m['confirmation_list'] = reviewed_list(self.tmp.name, accepted=())
-        errors = [e['error'] for e in self.blocked(self.m)['execution_records']]
-        self.assertTrue(all('待確認' in e for e in errors), errors)
+        errors = [e['error'] for e in self.blocked(self.m)['execution_records'] if e['requirement_id'] == PUBLIC_ITEM]
+        self.assertTrue(errors and all('待確認' in e for e in errors), errors)
 
     def test_a_modified_item_is_reported_with_its_modified_rule(self):
         # The run stops at the empty project's BuildRecipe step (no Docker); the report still lists the items.
@@ -761,6 +825,33 @@ class ConfirmationListInScan(unittest.TestCase):
         reported = {r['id']: r for r in scan.run(self.m).report['requirements']}
         self.assertEqual((reported[PUBLIC_ITEM]['status'], reported[PUBLIC_ITEM]['rule']), ('modified', 'deny'))
         self.assertEqual(reported[OWNER_ITEM]['rule'], 'deny')
+
+    def test_the_report_summarises_review_states_by_source(self):
+        # TK-REQ-003 報告列出各類待確認數量; 〈定義：確認清單〉 單人核准 for modified and not applicable items.
+        from toolkit import confirmation
+        ref = self.m['confirmation_list']
+        doc = json.loads(Path(ref['path']).read_text(encoding='utf-8'))
+        items = {i['item_id']: i for i in doc['items']}
+        items[TENANT_ITEM].update(status='not_applicable')
+        items[TENANT_ITEM]['review'].update(reason='single tenant', basis='S1-X')
+        items[ANON_ITEM].update(status='modified')
+        items[ANON_ITEM]['review'].update(reason='owner wording', basis='spec §3', modified_rule='deny')
+        self.m['confirmation_list'] = {'path': ref['path'], 'digest': confirmation.write(ref['path'], doc, self.tmp.name)}
+        listed = scan.run(self.m).report['confirmation_list']
+        # Six S2 items (three clauses × documents, announcements) and one S1 entry, none out of scope.
+        self.assertEqual(listed['summary'], {
+            'S1': {'pending': 0, 'accepted': 1, 'modified': 0, 'not_applicable': 0},
+            'S2': {'pending': 3, 'accepted': 1, 'modified': 1, 'not_applicable': 1}})
+        self.assertEqual(listed['out_of_scope'], 0)
+        self.assertEqual(listed['single_approval'], [TENANT_ITEM, ANON_ITEM])
+        self.assertEqual(listed['s2_template'], doc['s2_template'])
+        self.assertEqual(listed['list_version'], doc['list_version'])
+
+    def test_items_out_of_scope_are_counted_apart_from_review_states(self):
+        self.m['scope']['resources'] = ['announcements']
+        listed = scan.run(self.m).report['confirmation_list']
+        self.assertEqual(listed['out_of_scope'], 3)  # the three S2 clauses on documents
+        self.assertEqual(listed['summary']['S2'], {'pending': 3, 'accepted': 0, 'modified': 0, 'not_applicable': 0})
 
     def test_the_list_path_is_required(self):
         for value in (None, {}, {'digest': 'sha256:' + '0' * 64}):
@@ -834,9 +925,37 @@ class ConfirmationListInScan(unittest.TestCase):
         self.assertEqual({i['item_id']: i['status'] for i in after['items'] if i['item_id'].endswith('@announcements')},
                          {f'{c}@announcements': 'pending' for c in ('S2-OWNER-ONLY', 'S2-TENANT-ISOLATION', 'S2-ANON-NO-ACCESS')})
         self.assertEqual(next(i for i in after['items'] if i['item_id'] == OWNER_ITEM)['status'], 'accepted')
-        self.assertEqual(rep['confirmation_list'], {'path': self.m['confirmation_list']['path'],
+        listed = {k: rep['confirmation_list'][k] for k in ('path', 'digest', 'list_version', 'updated')}
+        self.assertEqual(listed, {'path': self.m['confirmation_list']['path'],
                                                     'digest': confirmation.file_digest(self.m['confirmation_list']['path']),
                                                     'list_version': after['list_version'], 'updated': True})
+
+
+class RecordsKeepTheItemVersion(unittest.TestCase):
+    """TK-REQ-004: every record names the version of the item it rests on; a later version of the item
+    leaves the records of earlier reports pointing at the version they were judged on."""
+
+    def test_after_the_item_changes_the_old_report_still_points_at_the_old_version(self):
+        with tempfile.TemporaryDirectory() as d:
+            m = preflight_manifest(d)
+            first = scan.run(m).report
+            m['requirements'][0]['statement'] = 'Only signed-in users may read announcements.'
+            second = scan.run(m).report  # the S1 entry changed: its item is now version 2, pending
+            for rep, version in ((first, 1), (second, 2)):
+                with self.subTest(version=version):
+                    self.assertEqual(report.validate(rep), [])
+                    public = [e for e in rep['execution_records'] if e['requirement_id'] == PUBLIC_ITEM]
+                    self.assertEqual({e['requirement_version'] for e in public}, {version})
+            owner = [e['requirement_version'] for e in second['execution_records'] if e['requirement_id'] == OWNER_ITEM]
+            self.assertEqual(set(owner), {1})
+
+    def test_a_test_on_an_unknown_requirement_names_no_version(self):
+        with tempfile.TemporaryDirectory() as d:
+            m = preflight_manifest(d)
+            m['tests'][0]['requirement_id'] = 'REQ-NOT-IN-THE-LIST'
+            rep = scan.run(m).report
+            self.assertEqual(report.validate(rep), [])
+            self.assertIsNone(rep['execution_records'][0]['requirement_version'])
 
 
 def self_acceptance_manifest(version, template):

@@ -12,7 +12,7 @@ from pathlib import Path
 
 import jsonschema
 
-from toolkit import policy
+from toolkit import policy, report
 
 PENDING = 'pending'
 REVIEW_FIELDS = ('by', 'at', 'reason', 'basis', 'modified_rule', 'allowed_tests', 'expiry')
@@ -103,12 +103,60 @@ def validate(doc):
     return [f'{"/".join(map(str, e.absolute_path)) or "(list)"}: {e.message}' for e in validator.iter_errors(doc)]
 
 
+STATUSES = tuple(REQUIRED_REVIEW)
+SINGLE_APPROVAL = ('modified', 'not_applicable')  # they relax or rewrite S2; no second approver yet (TK-REQ-014)
+
+
+def summary(doc):
+    """What the report says about the list (TK-REQ-003 各類待確認數量, 〈定義：確認清單〉 單人核准).
+
+    Items out of scope are counted apart: out of scope is not a review state, and those items count
+    as neither pending nor reviewed.
+    """
+    in_scope = [i for i in doc['items'] if not i['out_of_scope']]
+    return {'summary': {source: {status: sum(i['source'] == source and i['status'] == status for i in in_scope)
+                                 for status in STATUSES}
+                        for source in ('S1', 'S2')},
+            'out_of_scope': len(doc['items']) - len(in_scope),
+            'single_approval': [i['item_id'] for i in in_scope if i['status'] in SINGLE_APPROVAL]}
+
+
 def effective_rule(item):
     """The allow/deny rule that applies: a modified item's rewritten rule replaces the original
     (〈定義：確認清單〉 修改)."""
     if item['status'] == 'modified' and item['review'].get('modified_rule'):
         return item['review']['modified_rule']
     return item['rule']
+
+
+RULE_FOR_CASE = {'denial': 'deny', 'allowed': 'allow'}  # case_kind of an ExecutionRecord → the rule it tests
+
+
+def test_problem(item, case_kind):
+    """Why a test of case_kind ('denial' or 'allowed') cannot run on item, or None.
+
+    The case kind must match the item's allow/deny rule, a modified item's rewritten rule included;
+    an access is allowed only by the item, never by picking an allowed-case template (TK-REQ-016).
+    """
+    rid, status = item['item_id'], item['status']
+    if item['out_of_scope']:
+        return f'confirmation item {rid!r} is out of scope; the test is not run'
+    if status == 'not_applicable':
+        return f'confirmation item {rid!r} is {status} ({report.REVIEW_LABELS[status]}); the test is not run'
+    if status == PENDING and item['source'] == 'S1':
+        return (f'confirmation item {rid!r} is an S1 entry still pending ({report.REVIEW_LABELS[PENDING]}); '
+                f'the test is not run until it is reviewed (TK-REQ-003)')
+    rule = effective_rule(item)
+    if RULE_FOR_CASE[case_kind] != rule:
+        return (f'confirmation item {rid!r} has rule {rule!r} but the test is a {case_kind} case: '
+                f'the case kind does not match the rule (TK-REQ-016); the test is not run')
+    return review_problem(item)
+
+
+def finding_cap(item):
+    """The highest finding status (問題狀態) a failed test on item may give: a finding resting on an
+    S2 clause nobody accepted yet is at most 證據待補 (evidence_pending), never 已確認 (TK-REQ-003)."""
+    return 'evidence_pending' if item['status'] == PENDING else 'confirmed'
 
 
 def review_problem(item):

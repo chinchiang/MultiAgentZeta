@@ -100,13 +100,71 @@ class Validate(unittest.TestCase):
         doc['requirements'][0]['source'] = 'implementation'  # TK-REQ-005
         self.assertNotEqual(report.validate(doc), [])
 
+    def test_records_name_the_version_of_the_item_they_rest_on(self):
+        # TK-REQ-004: executions and findings point at the item version they were judged on.
+        for key in ('execution_records', 'findings'):
+            with self.subTest(missing_in=key):
+                doc = valid_report()
+                del doc[key][0]['requirement_version']
+                self.assertTrue(any(key in p and 'requirement_version' in p for p in report.validate(doc)),
+                                report.validate(doc))
+        for value in (0, '1'):
+            with self.subTest(value=value):
+                doc = valid_report()
+                doc['execution_records'][0]['requirement_version'] = value
+                self.assertNotEqual(report.validate(doc), [])
+        doc = json.loads((FIXTURES / 'report-blocked-no-commit.json').read_text(encoding='utf-8'))
+        doc['execution_records'][0].update(requirement_id='REQ-NOT-IN-THE-LIST', requirement_version=None)
+        self.assertEqual(report.validate(doc), [])  # a test on no item of the list names no version
+
     def test_confirmation_list_reference_is_checked(self):
         self.assertEqual(valid_report()['confirmation_list']['updated'], False)
-        for field in ('path', 'digest', 'list_version', 'updated'):
+        for field in ('path', 'digest', 'list_version', 'updated', 's2_template', 'summary', 'out_of_scope',
+                      'single_approval'):
             with self.subTest(missing=field):
                 doc = valid_report()
                 del doc['confirmation_list'][field]
                 self.assertNotEqual(report.validate(doc), [])
+
+    def test_summary_counts_every_review_state_of_both_sources(self):
+        for source, status in (('S1', 'pending'), ('S2', 'not_applicable')):
+            with self.subTest(source=source, status=status):
+                doc = valid_report()
+                del doc['confirmation_list']['summary'][source][status]
+                self.assertNotEqual(report.validate(doc), [])
+        doc = valid_report()
+        doc['confirmation_list']['summary']['S2']['out_of_scope'] = 0  # out of scope is not a review state
+        self.assertNotEqual(report.validate(doc), [])
+        doc = valid_report()
+        doc['confirmation_list']['summary']['S3'] = doc['confirmation_list']['summary']['S1']  # TK-REQ-005
+        self.assertNotEqual(report.validate(doc), [])
+
+    def test_a_finding_on_a_pending_item_cannot_be_confirmed(self):
+        # TK-REQ-003: at most 證據待補 (evidence_pending).
+        doc = valid_report()
+        doc['requirements'][0].update(status='pending', confirmation={'by': None, 'at': None, 'version': 1})
+        self.assertTrue(any('findings/0' in p and 'TK-REQ-003' in p for p in report.validate(doc)), report.validate(doc))
+        doc['findings'][0]['status'] = 'evidence_pending'
+        self.assertEqual(report.validate(doc), [])
+
+    def test_a_test_on_an_item_that_cannot_be_tested_must_be_blocked(self):
+        # 〈定義：確認清單〉: a pending S1 entry, a not applicable or an out-of-scope item blocks its tests.
+        s1_pending = {'id': 'S1-X', 'source': 'S1', 'status': 'pending'}
+        for change in (s1_pending, {'status': 'not_applicable'}, {'out_of_scope': True}):
+            with self.subTest(change=change):
+                doc = valid_report()
+                doc['findings'] = []
+                doc['requirements'][0].update(change)
+                for e in doc['execution_records']:
+                    e['requirement_id'] = doc['requirements'][0]['id']
+                problems = report.validate(doc)
+                self.assertTrue(any('execution_records/1' in p and 'blocked' in p for p in problems), problems)
+
+    def test_records_name_the_item_version_the_report_lists(self):
+        doc = valid_report()
+        doc['execution_records'][1]['requirement_version'] = 2  # the listed item is version 1
+        self.assertTrue(any('execution_records/1' in p and 'requirement_version' in p for p in report.validate(doc)),
+                        report.validate(doc))
 
     def test_every_run_status_of_the_spec_is_accepted(self):
         for status in self.RUN_STATUSES:
@@ -174,26 +232,53 @@ class RenderMarkdown(unittest.TestCase):
     # 〈定義：確認清單〉 處理狀態.
     REVIEW_LABELS = {'pending': '待確認', 'accepted': '接受', 'modified': '修改', 'not_applicable': '不適用'}
 
+    @staticmethod
+    def listed_item(**changes):
+        """The example report with its listed item changed and no record resting on it, so that the item
+        can take any review state (records on it are checked in Validate)."""
+        doc = valid_report()
+        doc['requirements'][0].update(changes)
+        for r in doc['execution_records'] + doc['findings']:
+            r['requirement_id'] = 'S2-TENANT-ISOLATION@documents'
+        return doc
+
     def test_confirmation_items_are_shown_with_their_review_state(self):
         for status, label in self.REVIEW_LABELS.items():
             with self.subTest(status=status):
-                doc = valid_report()
-                doc['requirements'][0]['status'] = status
-                md = report.render_markdown(doc)
+                md = report.render_markdown(self.listed_item(status=status))
                 self.assertIn(f'| {label} |', md)
                 self.assertIn('S2-OWNER-ONLY@documents', md)
 
     def test_an_item_nobody_reviewed_shows_no_reviewer(self):
-        doc = valid_report()
-        doc['requirements'][0].update(status='pending', confirmation={'by': None, 'at': None, 'version': 1})
-        md = report.render_markdown(doc)
+        md = report.render_markdown(self.listed_item(status='pending', confirmation={'by': None, 'at': None, 'version': 1}))
         self.assertIn('（未確認）', md)
         self.assertNotIn('None', md)
 
     def test_an_item_out_of_scope_is_marked(self):
+        self.assertIn('範圍外', report.render_markdown(self.listed_item(out_of_scope=True)))
+
+    def test_review_summary_is_shown_by_source_with_the_list_it_comes_from(self):
+        # TK-REQ-003 報告列出各類待確認數量; the list version and digest it counts (TK-REQ-004).
         doc = valid_report()
-        doc['requirements'][0]['out_of_scope'] = True
-        self.assertIn('範圍外', report.render_markdown(doc))
+        doc['confirmation_list']['summary']['S2'].update(pending=2, modified=1)
+        doc['confirmation_list'].update(out_of_scope=3, single_approval=['S2-TENANT-ISOLATION@documents'])
+        md = report.render_markdown(doc)
+        section = md[md.index('## 確認狀態摘要'):]
+        self.assertIn('| 來源 | 待確認 | 接受 | 修改 | 不適用 |', section)
+        self.assertIn('| S1 | 0 | 0 | 0 | 0 |', section)
+        self.assertIn('| S2 | 2 | 1 | 1 | 0 |', section)
+        self.assertIn('範圍外 3', section)
+        self.assertIn('v1', section)
+        self.assertIn('sha256:1111', section)
+        self.assertIn('nextjs-supabase-object-authz', section)
+        self.assertIn('單人核准', section)
+        self.assertIn('S2-TENANT-ISOLATION@documents', section)
+
+    def test_a_handed_over_list_says_the_owner_has_to_review_it(self):
+        doc = valid_report()
+        doc['confirmation_list']['updated'] = True
+        self.assertIn('待負責人處理', report.render_markdown(doc))
+        self.assertNotIn('待負責人處理', report.render_markdown(valid_report()))
 
     def test_missing_commit_is_shown_as_not_provided(self):
         doc = json.loads((FIXTURES / 'report-blocked-no-commit.json').read_text(encoding='utf-8'))

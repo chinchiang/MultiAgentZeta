@@ -257,3 +257,62 @@ class ReadWrite(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestProblem(unittest.TestCase):
+    """Whether a test may run on the item it rests on (〈定義：確認清單〉, TK-REQ-003, TK-REQ-016)."""
+
+    def setUp(self):
+        doc = confirmation.generate(policy.load_template(), ['documents', 'announcements'], [S1_PUBLIC])
+        accept(accept(doc, 'S2-OWNER-ONLY@documents'), S1_PUBLIC['id'])
+        self.items = {i['item_id']: i for i in doc['items']}
+
+    def test_case_kind_must_match_the_items_rule(self):
+        deny, allow = self.items['S2-OWNER-ONLY@documents'], self.items[S1_PUBLIC['id']]
+        for item, kind in ((deny, 'allowed'), (allow, 'denial')):
+            with self.subTest(rule=item['rule'], kind=kind):
+                self.assertIn('does not match the rule (TK-REQ-016)', confirmation.test_problem(item, kind))
+        self.assertIsNone(confirmation.test_problem(deny, 'denial'))
+        self.assertIsNone(confirmation.test_problem(allow, 'allowed'))
+
+    def test_a_pending_s2_item_runs_and_a_pending_s1_item_blocks(self):
+        s2 = self.items['S2-TENANT-ISOLATION@documents']
+        s1 = dict(self.items[S1_PUBLIC['id']], status='pending')
+        self.assertIsNone(confirmation.test_problem(s2, 'denial'))
+        self.assertIn('待確認', confirmation.test_problem(s1, 'allowed'))
+
+    def test_not_applicable_out_of_scope_and_incompletely_reviewed_items_block(self):
+        owner = self.items['S2-OWNER-ONLY@documents']
+        cases = {
+            '不適用': dict(owner, status='not_applicable',
+                        review=dict(owner['review'], reason='single owner', basis='S1-X')),
+            'out of scope': dict(owner, out_of_scope=True),
+
+            'lacks at': dict(owner, review=dict(owner['review'], at=None)),
+            # Out of scope even while pending: the item makes no test (〈定義：確認清單〉 更新).
+            'is out of scope': dict(self.items['S2-TENANT-ISOLATION@documents'], out_of_scope=True),
+        }
+        for expected, item in cases.items():
+            with self.subTest(expected):
+                self.assertIn(expected, confirmation.test_problem(item, 'denial'))
+
+    def test_a_modified_item_is_matched_by_its_modified_rule(self):
+        owner = self.items['S2-OWNER-ONLY@documents']
+        allowed = dict(owner, status='modified', review=dict(
+            owner['review'], reason='shared drafts', basis='S1-X', modified_rule='allow',
+            allowed_tests=['READ-shared'], expiry='2027-01-01'))
+        self.assertIsNone(confirmation.test_problem(allowed, 'allowed'))
+        self.assertIn('does not match the rule (TK-REQ-016)', confirmation.test_problem(allowed, 'denial'))
+
+
+class FindingCap(unittest.TestCase):
+    """The highest finding status a failed test may give, by the item it rests on (TK-REQ-003)."""
+
+    def test_only_a_reviewed_item_can_confirm_a_finding(self):
+        doc = accept(confirmation.generate(policy.load_template(), ['documents'], []), 'S2-OWNER-ONLY@documents')
+        items = {i['item_id']: i for i in doc['items']}
+        owner = items['S2-OWNER-ONLY@documents']
+        modified = dict(owner, status='modified', review=dict(owner['review'], reason='r', basis='b', modified_rule='deny'))
+        self.assertEqual(confirmation.finding_cap(owner), 'confirmed')
+        self.assertEqual(confirmation.finding_cap(modified), 'confirmed')
+        self.assertEqual(confirmation.finding_cap(items['S2-TENANT-ISOLATION@documents']), 'evidence_pending')
