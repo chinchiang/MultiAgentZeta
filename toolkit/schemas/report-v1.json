@@ -61,7 +61,10 @@
             "required": ["by", "at", "version"],
             "additionalProperties": false,
             "properties": {"by": {"type": ["string", "null"]}, "at": {"type": ["string", "null"]},
-                           "version": {"type": "integer", "minimum": 1}}
+                           "version": {"type": "integer", "minimum": 1},
+                           "allowed_tests": {"type": "array", "items": {"$ref": "#/$defs/text"}, "minItems": 1,
+                                             "description": "Given for a 合法例外 only: the tests on the item judged by allow; rule is the one of every other test (TK-DYN-003)."},
+                           "expiry": {"type": "string", "description": "Expiry time of the 合法例外."}}
           }
         }
       }

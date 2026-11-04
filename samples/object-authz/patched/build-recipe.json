@@ -2,7 +2,7 @@
   "recipe_version": "1",
   "sample": "object-authz/patched",
   "source_build": {
-    "source_digest": "sha256:1e208d60ac77860be6ff91d86f24baa42fca4d7059c9768c629638b5313ff3c8",
+    "source_digest": "sha256:d1cbee15bef56d46628d96f2a58f52d1e43439293511e166da087b24e3be76bd",
     "lockfiles": [],
     "tools": [
       "supabase-cli"
@@ -42,13 +42,23 @@
     "roles": [
       "member"
     ],
-    "sharing_exceptions": [],
+    "sharing_exceptions": [
+      {
+        "marker": "MARK-A-ALICE-SHARED-TO-B",
+        "readers": "members of Tenant B (document_shares)",
+        "actions": [
+          "read"
+        ]
+      }
+    ],
     "related_resources": [
-      "memberships"
+      "memberships",
+      "document_shares"
     ],
     "markers": [
       "MARK-A-ALICE-PRIVATE",
       "MARK-A-ALICE-SHARED",
+      "MARK-A-ALICE-SHARED-TO-B",
       "MARK-B-CAROL-PRIVATE"
     ]
   },
@@ -88,7 +98,7 @@
     ]
   },
   "snapshot_reset": {
-    "seed_version": "2026-10-31.1",
+    "seed_version": "2026-11-04.1",
     "reset_scope": "database: migrations and seed are re-applied",
     "reset_check": "the documents table holds exactly the test_data markers",
     "cleanup": "containers and volumes removed"

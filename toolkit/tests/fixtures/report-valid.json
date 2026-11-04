@@ -22,12 +22,16 @@
                         "s2_template": {"policy_template_id": "nextjs-supabase-object-authz", "version": "1",
                                         "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"},
                         "summary": {"S1": {"pending": 0, "accepted": 0, "modified": 0, "not_applicable": 0},
-                                    "S2": {"pending": 2, "accepted": 1, "modified": 0, "not_applicable": 0}},
-                        "out_of_scope": 0, "single_approval": []},
+                                    "S2": {"pending": 1, "accepted": 1, "modified": 1, "not_applicable": 0}},
+                        "out_of_scope": 0, "single_approval": ["S2-TENANT-ISOLATION@documents"]},
   "requirements": [
     {"id": "S2-OWNER-ONLY@documents", "source": "S2", "statement": "資源預設僅擁有者可讀寫。", "rule": "deny",
      "status": "accepted", "out_of_scope": false,
-     "confirmation": {"by": "app-owner", "at": "2026-11-01T09:00:00Z", "version": 1}}
+     "confirmation": {"by": "app-owner", "at": "2026-11-01T09:00:00Z", "version": 1}},
+    {"id": "S2-TENANT-ISOLATION@documents", "source": "S2", "statement": "租戶間預設完全隔離。", "rule": "deny",
+     "status": "modified", "out_of_scope": false,
+     "confirmation": {"by": "app-owner", "at": "2026-11-01T09:00:00Z", "version": 1,
+                      "allowed_tests": ["SHARED-READ-other-tenant"], "expiry": "2027-05-01T00:00:00Z"}}
   ],
   "authorization_matrix": [
     {"identity": "anonymous", "transport": "apikey-header", "path": "anon API key -> /rest/v1"},
@@ -76,6 +80,18 @@
        {"id": "ev-0005", "channel": "actor", "identity_ref": "other_tenant_user", "api_key_format": "publishable",
         "request": {"method": "GET", "path": "/rest/v1/documents?select=title&title=eq.MARK-A-ALICE-PRIVATE"},
         "response": {"status": 200, "rows": 0}}
+     ]},
+    {"schema_version": "1", "run_id": "run-20261101-0001", "id": "exec-0003", "created_at": "2026-11-01T10:00:05Z",
+     "source_id": "toolkit.scan", "commit": "a89be51",
+     "test_id": "SHARED-READ-other-tenant", "template_id": "shared-read-v1",
+     "requirement_id": "S2-TENANT-ISOLATION@documents", "requirement_version": 1,
+     "actor_ref": "other_tenant_user", "resource_ref": "MARK-A-ALICE-SHARED-TO-B",
+     "started_at": "2026-11-01T10:00:05Z", "ended_at": "2026-11-01T10:00:05Z",
+     "result": "passed", "error": null, "case_kind": "allowed", "checks": {"access_granted": true},
+     "evidence": [
+       {"id": "ev-0006", "channel": "actor", "identity_ref": "other_tenant_user", "api_key_format": "anon-jwt",
+        "request": {"method": "GET", "path": "/rest/v1/documents?title=eq.MARK-A-ALICE-SHARED-TO-B&select=title"},
+        "response": {"status": 200, "rows": 1}}
      ]}
   ],
   "findings": [
@@ -91,6 +107,6 @@
   "coverage": {"schema_version": "1", "run_id": "run-20261101-0001", "id": "coverage-0001", "created_at": "2026-11-01T10:00:05Z",
                "source_id": "toolkit.scan", "commit": "a89be51",
                "inventory_source": "fixed test plan (tracer bullet)",
-               "denominator": 3, "executed": 2, "valid_judgements": 2, "blocked": 0, "untested": 0, "unsupported": 1,
+               "denominator": 4, "executed": 3, "valid_judgements": 3, "blocked": 0, "untested": 0, "unsupported": 1,
                "unsupported_items": [{"scope": "rls-views", "reason": "no verified test method for views in this toolkit version"}]}
 }

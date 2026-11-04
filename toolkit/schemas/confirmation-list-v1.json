@@ -44,8 +44,9 @@
         "basis": {"type": ["string", "null"], "description": "Spec basis: an S1 entry id or the owner's spec text."},
         "modified_rule": {"oneOf": [{"$ref": "#/$defs/rule"}, {"type": "null"}]},
         "allowed_tests": {"type": "array", "items": {"type": "string", "minLength": 1},
-                          "description": "Allowed-case tests that show a 合法例外 (TK-DYN-003)."},
-        "expiry": {"type": ["string", "null"], "description": "Expiry condition of a 合法例外."}
+                          "description": "Allowed-case tests that show a 合法例外 (TK-DYN-003): the only tests on the item judged by allow."},
+        "expiry": {"type": ["string", "null"], "format": "date-time",
+                   "description": "Expiry time of a 合法例外, ISO 8601 UTC such as 2027-05-01T00:00:00Z. Another value is read, but the 合法例外 lacks its expiry and the tests resting on it are blocked."}
       }
     },
     "version_fields": {
@@ -68,7 +69,9 @@
         "rule": {"$ref": "#/$defs/rule"},
         "version": {"type": "integer", "minimum": 1},
         "status": {"$ref": "#/$defs/status"},
-        "review": {"$ref": "#/$defs/review"}
+        "review": {"$ref": "#/$defs/review"},
+        "reset_reason": {"const": "expired",
+                         "description": "Why the toolkit made this version without a change of text: the 合法例外 of the previous version expired."}
       }
     },
     "item": {

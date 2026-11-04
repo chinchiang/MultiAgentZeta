@@ -4,12 +4,17 @@ Fast tests only. Expected values are written from the definition, not derived fr
 """
 import copy
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 from toolkit import confirmation, policy, report
 
 S1_PUBLIC = {'id': 'S1-ANNOUNCEMENTS-PUBLIC-READ', 'statement': 'Anyone, signed in or not, may read announcements.',
              'resources': ['announcements'], 'rule': 'allow'}
+
+
+# A time before every expiry these tests write (〈定義：確認清單〉 到期).
+NOW = datetime(2026, 11, 4, 9, 0, tzinfo=timezone.utc)
 
 
 def plain(*names):
@@ -102,11 +107,11 @@ class Update(unittest.TestCase):
         return next(i for i in doc['items'] if i['item_id'] == item_id)
 
     def test_nothing_changed_keeps_the_list_as_it_is(self):
-        new = confirmation.update(self.doc, self.template, plain('documents'), [S1_PUBLIC])
+        new = confirmation.update(self.doc, self.template, plain('documents'), [S1_PUBLIC], now=NOW)
         self.assertEqual(new, self.doc)
 
     def test_a_new_resource_adds_pending_items_and_keeps_reviewed_ones(self):
-        new = confirmation.update(self.doc, self.template, plain('documents', 'files'), [S1_PUBLIC])
+        new = confirmation.update(self.doc, self.template, plain('documents', 'files'), [S1_PUBLIC], now=NOW)
         self.assertEqual(new['list_version'], 2)
         self.assertEqual(self.item(new, 'S2-OWNER-ONLY@files')['status'], 'pending')
         kept = self.item(new, 'S2-OWNER-ONLY@documents')
@@ -115,7 +120,7 @@ class Update(unittest.TestCase):
     def test_a_category_change_moves_an_item_and_keeps_its_version_and_review_state(self):
         # Categories are not the item's text (CONTENT): only its impact and place change, and the list's version.
         confidential = [{'name': 'documents', 'impact': ['confidential']}]
-        new = confirmation.update(self.doc, self.template, confidential, [S1_PUBLIC])
+        new = confirmation.update(self.doc, self.template, confidential, [S1_PUBLIC], now=NOW)
         item = self.item(new, 'S2-OWNER-ONLY@documents')
         self.assertEqual((item['impact'], item['status'], item['version'], item['review']['by']),
                          (['confidential'], 'accepted', 1, 'app-owner'))
@@ -126,11 +131,11 @@ class Update(unittest.TestCase):
 
     def test_a_list_in_another_order_is_sorted_without_a_new_version(self):
         shuffled = {**self.doc, 'items': self.doc['items'][::-1]}
-        new = confirmation.update(shuffled, self.template, plain('documents'), [S1_PUBLIC])
+        new = confirmation.update(shuffled, self.template, plain('documents'), [S1_PUBLIC], now=NOW)
         self.assertEqual(new, self.doc)
 
     def test_items_that_leave_the_scope_go_last(self):
-        new = confirmation.update(self.doc, self.template, plain('files'), [S1_PUBLIC])
+        new = confirmation.update(self.doc, self.template, plain('files'), [S1_PUBLIC], now=NOW)
         self.assertEqual([i['item_id'] for i in new['items']], [
             'S2-TENANT-ISOLATION@files', 'S2-ANON-NO-ACCESS@files', 'S2-OWNER-ONLY@files',
             'S1-ANNOUNCEMENTS-PUBLIC-READ', 'S2-ANON-NO-ACCESS@documents', 'S2-OWNER-ONLY@documents',
@@ -141,19 +146,19 @@ class Update(unittest.TestCase):
         # every review state, so the owner's work is not lost (TK-REQ-004).
         both = plain('documents', 'announcements')
         doc = accept(confirmation.generate(self.template, both, [S1_PUBLIC]), 'S1-ANNOUNCEMENTS-PUBLIC-READ')
-        gone = confirmation.update(doc, self.template, plain('documents'), [S1_PUBLIC])  # S1 item out of scope
+        gone = confirmation.update(doc, self.template, plain('documents'), [S1_PUBLIC], now=NOW)  # S1 item out of scope
         old = copy.deepcopy(gone)
         for item in old['items']:
             del item['impact']
         self.assertEqual(confirmation.validate(old), [])
-        new = confirmation.update(old, self.template, plain('documents'), [S1_PUBLIC])
+        new = confirmation.update(old, self.template, plain('documents'), [S1_PUBLIC], now=NOW)
         self.assertEqual(new, {**gone, 'list_version': gone['list_version'] + 1})
 
     def test_a_changed_clause_gets_a_new_version_back_at_pending_and_keeps_the_old_one(self):
         changed = copy.deepcopy(self.template)
         changed['version'] = '2'
         changed['clauses'][0]['statement'] = '資源預設僅擁有者可讀寫，含封存資料。'
-        new = confirmation.update(self.doc, changed, plain('documents'), [S1_PUBLIC])
+        new = confirmation.update(self.doc, changed, plain('documents'), [S1_PUBLIC], now=NOW)
         item = self.item(new, 'S2-OWNER-ONLY@documents')
         self.assertEqual((item['version'], item['status'], item['review']['by']), (2, 'pending', None))
         self.assertEqual(item['statement'], '資源預設僅擁有者可讀寫，含封存資料。')
@@ -164,10 +169,10 @@ class Update(unittest.TestCase):
         self.assertEqual(self.item(new, 'S2-TENANT-ISOLATION@documents')['version'], 1)
 
     def test_a_resource_out_of_scope_is_marked_and_keeps_its_review_state(self):
-        gone = confirmation.update(self.doc, self.template, plain('files'), [S1_PUBLIC])
+        gone = confirmation.update(self.doc, self.template, plain('files'), [S1_PUBLIC], now=NOW)
         item = self.item(gone, 'S2-OWNER-ONLY@documents')
         self.assertEqual((item['out_of_scope'], item['status']), (True, 'accepted'))
-        back = confirmation.update(gone, self.template, plain('documents', 'files'), [S1_PUBLIC])
+        back = confirmation.update(gone, self.template, plain('documents', 'files'), [S1_PUBLIC], now=NOW)
         item = self.item(back, 'S2-OWNER-ONLY@documents')
         self.assertEqual((item['out_of_scope'], item['status'], item['version']), (False, 'accepted', 1))
 
@@ -176,13 +181,13 @@ class Update(unittest.TestCase):
         removed = copy.deepcopy(self.template)
         removed['version'] = '2'
         removed['clauses'] = [c for c in removed['clauses'] if c['id'] != 'S2-OWNER-ONLY']
-        gone = confirmation.update(self.doc, removed, plain('documents'), [S1_PUBLIC])
+        gone = confirmation.update(self.doc, removed, plain('documents'), [S1_PUBLIC], now=NOW)
         item = self.item(gone, 'S2-OWNER-ONLY@documents')
         self.assertEqual((item['out_of_scope'], item['status'], item['review']['by'], item['version']),
                          (True, 'accepted', 'app-owner', 1))
         self.assertNotIn('history', item)  # no new version: the text did not change, the clause left
         self.assertFalse(self.item(gone, 'S2-TENANT-ISOLATION@documents')['out_of_scope'])
-        back = confirmation.update(gone, self.template, plain('documents'), [S1_PUBLIC])
+        back = confirmation.update(gone, self.template, plain('documents'), [S1_PUBLIC], now=NOW)
         item = self.item(back, 'S2-OWNER-ONLY@documents')
         self.assertEqual((item['out_of_scope'], item['status'], item['version']), (False, 'accepted', 1))
 
@@ -190,21 +195,21 @@ class Update(unittest.TestCase):
         # 〈定義：確認清單〉 更新: an S1 entry the ScanManifest no longer gives marks its item out of scope.
         both = plain('documents', 'announcements')
         doc = accept(confirmation.generate(self.template, both, [S1_PUBLIC]), 'S1-ANNOUNCEMENTS-PUBLIC-READ')
-        gone = confirmation.update(doc, self.template, both, [])
+        gone = confirmation.update(doc, self.template, both, [], now=NOW)
         item = self.item(gone, 'S1-ANNOUNCEMENTS-PUBLIC-READ')
         self.assertEqual((item['out_of_scope'], item['status'], item['version']), (True, 'accepted', 1))
         reworded = dict(S1_PUBLIC, statement='Anyone may read published announcements.')
-        back = self.item(confirmation.update(gone, self.template, both, [reworded]), 'S1-ANNOUNCEMENTS-PUBLIC-READ')
+        back = self.item(confirmation.update(gone, self.template, both, [reworded], now=NOW), 'S1-ANNOUNCEMENTS-PUBLIC-READ')
         # Back in scope with a changed text: a new version, pending again (TK-REQ-004).
         self.assertEqual((back['out_of_scope'], back['status'], back['version']), (False, 'pending', 2))
 
     def test_s1_entry_whose_resources_left_the_scope_is_out_of_scope(self):
         both = plain('documents', 'announcements')
         doc = accept(confirmation.generate(self.template, both, [S1_PUBLIC]), 'S1-ANNOUNCEMENTS-PUBLIC-READ')
-        gone = confirmation.update(doc, self.template, plain('documents'), [S1_PUBLIC])
+        gone = confirmation.update(doc, self.template, plain('documents'), [S1_PUBLIC], now=NOW)
         item = self.item(gone, 'S1-ANNOUNCEMENTS-PUBLIC-READ')
         self.assertEqual((item['out_of_scope'], item['status']), (True, 'accepted'))
-        back = confirmation.update(gone, self.template, both, [S1_PUBLIC])
+        back = confirmation.update(gone, self.template, both, [S1_PUBLIC], now=NOW)
         self.assertEqual((self.item(back, 'S1-ANNOUNCEMENTS-PUBLIC-READ')['out_of_scope'],
                           self.item(back, 'S1-ANNOUNCEMENTS-PUBLIC-READ')['status']), (False, 'accepted'))
 
@@ -212,10 +217,64 @@ class Update(unittest.TestCase):
         scope = plain('documents', 'announcements')
         doc = accept(confirmation.generate(self.template, scope, [S1_PUBLIC]), 'S1-ANNOUNCEMENTS-PUBLIC-READ')
         changed = {**S1_PUBLIC, 'rule': 'deny'}
-        item = self.item(confirmation.update(doc, self.template, scope, [changed]), 'S1-ANNOUNCEMENTS-PUBLIC-READ')
+        item = self.item(confirmation.update(doc, self.template, scope, [changed], now=NOW), 'S1-ANNOUNCEMENTS-PUBLIC-READ')
         self.assertEqual((item['version'], item['status'], item['rule']), (2, 'pending', 'deny'))
-        item = self.item(confirmation.update(doc, self.template, scope, []), 'S1-ANNOUNCEMENTS-PUBLIC-READ')
+        item = self.item(confirmation.update(doc, self.template, scope, [], now=NOW), 'S1-ANNOUNCEMENTS-PUBLIC-READ')
         self.assertEqual((item['out_of_scope'], item['status']), (True, 'accepted'))
+
+    def exception(self, expiry):
+        """self.doc with S2-TENANT-ISOLATION@documents a 合法例外 expiring at expiry (as the owner would edit it)."""
+        doc = copy.deepcopy(self.doc)
+        item = self.item(doc, 'S2-TENANT-ISOLATION@documents')
+        item['status'] = 'modified'
+        item['review'].update(by='app-owner', at='2026-11-02T09:00:00Z', reason='shared with another tenant',
+                              basis='sharing spec §4', modified_rule='allow',
+                              allowed_tests=['SHARED-READ-other-tenant'], expiry=expiry)
+        return doc
+
+    def test_an_expired_exception_gets_a_new_version_back_at_pending_and_keeps_the_review_in_its_history(self):
+        # 〈定義：確認清單〉 到期: an expiry not later than the run's start has come.
+        for expiry in ('2026-11-01T00:00:00Z', '2026-11-04T09:00:00Z'):
+            with self.subTest(expiry):
+                doc = self.exception(expiry)
+                old = copy.deepcopy(self.item(doc, 'S2-TENANT-ISOLATION@documents'))
+                new = confirmation.update(doc, self.template, plain('documents'), [S1_PUBLIC], now=NOW)
+                item = self.item(new, 'S2-TENANT-ISOLATION@documents')
+                self.assertEqual((item['version'], item['status'], item['reset_reason']), (2, 'pending', 'expired'))
+                self.assertEqual(item['review'], {'by': None, 'at': None, 'reason': None, 'basis': None,
+                                                  'modified_rule': None, 'allowed_tests': [], 'expiry': None})
+                self.assertEqual(item['history'], [{k: v for k, v in old.items() if k not in ('out_of_scope', 'impact')}])
+                self.assertEqual(new['list_version'], doc['list_version'] + 1)
+                self.assertEqual(self.item(new, 'S2-OWNER-ONLY@documents'), self.item(doc, 'S2-OWNER-ONLY@documents'))
+                self.assertEqual(confirmation.validate(new), [])
+
+    def test_an_exception_not_yet_expired_or_without_a_valid_expiry_is_kept(self):
+        # A malformed expiry is no time that has come; the tests on the item are blocked instead (review_problem).
+        for expiry in ('2026-11-04T09:00:01Z', 'next quarter'):
+            with self.subTest(expiry):
+                doc = self.exception(expiry)
+                self.assertEqual(confirmation.update(doc, self.template, plain('documents'), [S1_PUBLIC], now=NOW), doc)
+
+    def test_an_exception_out_of_scope_is_not_reset_until_it_is_back_in_scope(self):
+        # 〈定義：確認清單〉 更新: an item out of scope keeps its review state and version; 到期 is judged in scope.
+        doc = self.exception('2026-11-01T00:00:00Z')
+        gone = confirmation.update(doc, self.template, plain('files'), [S1_PUBLIC], now=NOW)
+        item = self.item(gone, 'S2-TENANT-ISOLATION@documents')
+        self.assertEqual((item['out_of_scope'], item['version'], item['status']), (True, 1, 'modified'))
+        back = self.item(confirmation.update(gone, self.template, plain('documents'), [S1_PUBLIC], now=NOW),
+                         'S2-TENANT-ISOLATION@documents')
+        self.assertEqual((back['out_of_scope'], back['version'], back['status'], back['reset_reason']),
+                         (False, 2, 'pending', 'expired'))
+
+    def test_a_text_change_after_an_expiry_drops_the_reset_reason_and_keeps_it_in_the_history(self):
+        expired = confirmation.update(self.exception('2026-11-01T00:00:00Z'), self.template, plain('documents'),
+                                      [S1_PUBLIC], now=NOW)
+        changed = copy.deepcopy(self.template)
+        changed['clauses'][1]['statement'] = '租戶間預設完全隔離，包括分享。'
+        item = self.item(confirmation.update(expired, changed, plain('documents'), [S1_PUBLIC], now=NOW),
+                         'S2-TENANT-ISOLATION@documents')
+        self.assertEqual((item['version'], 'reset_reason' in item), (3, False))
+        self.assertEqual([h.get('reset_reason') for h in item['history']], [None, 'expired'])
 
     def test_the_toolkit_writes_no_review_decision(self):
         # TK-REQ-009: only pending comes from the toolkit; decisions it kept were already in the list.
@@ -223,7 +282,7 @@ class Update(unittest.TestCase):
         changed['version'] = '2'
         for c in changed['clauses']:
             c['statement'] += '（修訂）'
-        new = confirmation.update(self.doc, changed, plain('documents', 'files'), [S1_PUBLIC])
+        new = confirmation.update(self.doc, changed, plain('documents', 'files'), [S1_PUBLIC], now=NOW)
         self.assertEqual({i['status'] for i in new['items']}, {'pending'})
 
 
@@ -279,158 +338,180 @@ class Validate(unittest.TestCase):
                 change(d)
                 self.assertNotEqual(confirmation.validate(d), [])
 
+
+TENANT_ITEM = 'S2-TENANT-ISOLATION@documents'
+SHARED_READ = 'SHARED-READ-other-tenant'
+# A 合法例外 complete in every field, on TENANT_ITEM: documents shared with another tenant (TK-DYN-003).
+EXCEPTION = dict(by='app-owner', at='2026-11-02T09:00:00Z', reason='documents shared with another tenant',
+                 basis=S1_PUBLIC['id'], modified_rule='allow', allowed_tests=[SHARED_READ],
+                 expiry='2027-05-01T00:00:00Z')
+
+
+class Reviewed(unittest.TestCase):
+    """A list where the owner accepted S1_PUBLIC, and a plan with one allowed and one denial test on
+    TENANT_ITEM; item() gives TENANT_ITEM in a review state."""
+
+    def setUp(self):
+        doc = confirmation.generate(policy.load_template(), plain('documents', 'announcements'), [S1_PUBLIC])
+        self.items = {i['item_id']: i for i in accept(doc, S1_PUBLIC['id'])['items']}
+        self.plan = {SHARED_READ: {'requirement_id': TENANT_ITEM, 'case_kind': 'allowed'},
+                     'READ-other-tenant': {'requirement_id': TENANT_ITEM, 'case_kind': 'denial'},
+                     'PUBLIC-READ-other-tenant': {'requirement_id': 'S2-TENANT-ISOLATION@announcements',
+                                                  'case_kind': 'allowed'}}
+
     def item(self, status, **review):
-        item = copy.deepcopy(self.doc['items'][0])
+        item = copy.deepcopy(self.items[TENANT_ITEM])
         item['status'] = status
         item['review'].update(review)
         return item
 
+    def problem(self, item):
+        return confirmation.review_problem(item, self.items)
+
+
+class ReviewProblem(Reviewed):
+    """review_problem(): the fields each review state needs (〈定義：確認清單〉, TK-SCP-003, TK-DYN-003)."""
+
     def test_pending_needs_nothing(self):
-        self.assertIsNone(confirmation.review_problem(self.item('pending')))
+        self.assertIsNone(self.problem(self.item('pending')))
 
     def test_accepted_needs_who_and_when(self):
-        self.assertIsNone(confirmation.review_problem(self.item('accepted', by='app-owner', at='2026-11-02T09:00:00Z')))
-        self.assertIn('by', confirmation.review_problem(self.item('accepted', at='2026-11-02T09:00:00Z')))
-        self.assertIn('at', confirmation.review_problem(self.item('accepted', by='app-owner')))
+        self.assertIsNone(self.problem(self.item('accepted', by='app-owner', at='2026-11-02T09:00:00Z')))
+        self.assertIn('by', self.problem(self.item('accepted', at='2026-11-02T09:00:00Z')))
+        self.assertIn('at', self.problem(self.item('accepted', by='app-owner')))
 
     def test_not_applicable_needs_a_reason_and_a_basis(self):
-        done = dict(by='app-owner', at='2026-11-02T09:00:00Z', reason='documents have no owner', basis='S1-X')
-        self.assertIsNone(confirmation.review_problem(self.item('not_applicable', **done)))
+        done = dict(by='app-owner', at='2026-11-02T09:00:00Z', reason='documents have no tenant', basis='spec §2')
+        self.assertIsNone(self.problem(self.item('not_applicable', **done)))
         for name in ('reason', 'basis'):
             with self.subTest(missing=name):
-                self.assertIn(name, confirmation.review_problem(self.item('not_applicable', **{**done, name: None})))
+                self.assertIn(name, self.problem(self.item('not_applicable', **{**done, name: None})))
 
     def test_modified_needs_a_reason_a_basis_and_the_new_rule(self):
-        done = dict(by='app-owner', at='2026-11-02T09:00:00Z', reason='stricter', basis='spec §3',
-                    modified_rule='deny')
-        self.assertIsNone(confirmation.review_problem(self.item('modified', **done)))
+        done = dict(by='app-owner', at='2026-11-02T09:00:00Z', reason='stricter', basis='spec §3', modified_rule='deny')
+        self.assertIsNone(self.problem(self.item('modified', **done)))
         for name in ('reason', 'basis', 'modified_rule'):
             with self.subTest(missing=name):
-                self.assertIn(name, confirmation.review_problem(self.item('modified', **{**done, name: None})))
+                self.assertIn(name, self.problem(self.item('modified', **{**done, name: None})))
 
-    def test_modified_that_permits_what_s2_denies_needs_an_allowed_test_and_an_expiry(self):
-        # 〈定義：確認清單〉: such a modification is a 合法例外 (TK-DYN-003).
-        done = dict(by='app-owner', at='2026-11-02T09:00:00Z', reason='public data', basis='S1-X',
-                    modified_rule='allow', allowed_tests=['PUBLIC-READ-anonymous'], expiry='2027-01-01')
-        self.assertIsNone(confirmation.review_problem(self.item('modified', **done)))
+    def test_a_legitimate_exception_needs_an_allowed_test_and_an_expiry(self):
+        self.assertIsNone(self.problem(self.item('modified', **EXCEPTION)))
         for name, empty in (('allowed_tests', []), ('expiry', None)):
             with self.subTest(missing=name):
-                self.assertIn(name, confirmation.review_problem(self.item('modified', **{**done, name: empty})))
+                self.assertIn(f'lacks {name}', self.problem(self.item('modified', **{**EXCEPTION, name: empty})))
+
+    def test_a_basis_naming_an_s1_entry_needs_that_entry_in_scope_and_reviewed(self):
+        entry = self.items[S1_PUBLIC['id']]
+        for change, expected in ((dict(status='pending'), 'is pending (待確認)'),
+                                 (dict(status='not_applicable'), 'is not_applicable (不適用)'),
+                                 (dict(out_of_scope=True), 'is out of scope')):
+            with self.subTest(expected):
+                self.items[S1_PUBLIC['id']] = dict(entry, **change)
+                self.assertIn(f"its basis, S1 entry {S1_PUBLIC['id']!r}, {expected}", self.problem(self.item('modified', **EXCEPTION)))
+        self.items[S1_PUBLIC['id']] = dict(entry, status='modified')
+        self.assertIsNone(self.problem(self.item('modified', **EXCEPTION)))
+
+    def test_a_basis_of_spec_text_must_not_be_blank(self):
+        self.assertIsNone(self.problem(self.item('modified', **{**EXCEPTION, 'basis': 'sharing spec §4'})))
+        self.assertIn('its basis is blank', self.problem(self.item('modified', **{**EXCEPTION, 'basis': '  '})))
+        # Not an S1 entry id in the list, so it is spec text: an id-like text is not refused.
+        self.assertIsNone(self.problem(self.item('modified', **{**EXCEPTION, 'basis': 'S1-NOT-IN-THE-LIST'})))
+
+    def test_the_expiry_is_an_iso_8601_utc_time(self):
+        for expiry in ('2027-05-01T00:00:00Z', '2027-05-01T00:00:00.5Z'):
+            with self.subTest(expiry):
+                self.assertIsNone(self.problem(self.item('modified', **{**EXCEPTION, 'expiry': expiry})))
+        for expiry in ('2027-05-01', 'next quarter', '2027-05-01T00:00:00+08:00', '2027-02-30T00:00:00Z'):
+            with self.subTest(expiry):
+                self.assertIn('is not an ISO 8601 UTC time', self.problem(self.item('modified', **{**EXCEPTION, 'expiry': expiry})))
+
+    def test_a_modification_that_does_not_relax_s2_lists_no_allowed_test(self):
+        # Tightening, or rewriting an allow rule, is no 合法例外: allowed_tests and expiry are not needed.
+        self.assertIsNone(self.problem(self.item('modified', **{**EXCEPTION, 'modified_rule': 'deny',
+                                                                 'allowed_tests': [], 'expiry': None})))
 
 
-class EffectiveRule(unittest.TestCase):
-    """〈定義：確認清單〉 修改: the rewritten allow/deny rule replaces the original."""
+class RuleFor(Reviewed):
+    """〈定義：確認清單〉 修改: a 合法例外 allows only its allowed tests; another modification's rule replaces the original."""
 
-    def test_a_modified_item_uses_its_modified_rule_and_others_their_own(self):
-        doc = confirmation.generate(policy.load_template(), plain('announcements'), [])
-        item = doc['items'][0]
-        self.assertEqual(confirmation.effective_rule(item), 'deny')
-        item['status'] = 'modified'
-        item['review'].update(modified_rule='allow')
-        self.assertEqual(confirmation.effective_rule(item), 'allow')
-        item['status'] = 'accepted'  # a leftover modified_rule does not count unless the item is modified
-        self.assertEqual(confirmation.effective_rule(item), 'deny')
+    def test_a_legitimate_exception_allows_only_the_allowed_cases_it_lists(self):
+        item = self.item('modified', **EXCEPTION)
+        self.assertEqual(confirmation.rule_for(item, SHARED_READ, 'allowed'), 'allow')
+        self.assertEqual(confirmation.rule_for(item, 'OTHER-ALLOWED', 'allowed'), 'deny')
+        self.assertEqual(confirmation.rule_for(item, 'READ-other-tenant', 'denial'), 'deny')
+        self.assertEqual(confirmation.base_rule(item), 'deny')
+        # A denial case it lists is still judged by deny.
+        listed = self.item('modified', **{**EXCEPTION, 'allowed_tests': [SHARED_READ, 'READ-other-tenant']})
+        self.assertEqual(confirmation.rule_for(listed, 'READ-other-tenant', 'denial'), 'deny')
 
-
-class ReadWrite(unittest.TestCase):
-    """The list is a record in the control zone, outside the sample source, referenced by path and digest."""
-
-    def setUp(self):
-        import tempfile
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.source = Path(self.tmp.name) / 'project'
-        self.source.mkdir()
-        self.control = Path(self.tmp.name) / 'control'
-        self.doc = confirmation.generate(policy.load_template(), plain('documents'), [S1_PUBLIC])
-
-    def test_written_list_reads_back_with_its_digest(self):
-        path = self.control / 'confirmation-list.json'
-        digest = confirmation.write(path, self.doc, self.source)
-        self.assertRegex(digest, r'^sha256:[0-9a-f]{64}$')
-        self.assertEqual(confirmation.read(path, digest, self.source), self.doc)
-
-    def test_a_path_inside_the_sample_source_is_refused(self):
-        for path in (self.source / 'confirmation-list.json', self.source / 'sub' / '..' / 'list.json'):
-            with self.subTest(path=str(path)):
-                with self.assertRaises(confirmation.ConfirmationListUnusable) as cm:
-                    confirmation.write(path, self.doc, self.source)
-                self.assertIn('inside the sample source', str(cm.exception))
-        outside = self.control / 'list.json'
-        digest = confirmation.write(outside, self.doc, self.source)
-        inside = self.source / 'list.json'
-        inside.write_bytes(outside.read_bytes())
-        with self.assertRaises(confirmation.ConfirmationListUnusable):
-            confirmation.read(inside, digest, self.source)
-
-    def test_a_digest_that_does_not_match_is_refused(self):
-        path = self.control / 'list.json'
-        confirmation.write(path, self.doc, self.source)
-        with self.assertRaises(confirmation.ConfirmationListUnusable) as cm:
-            confirmation.read(path, 'sha256:' + '0' * 64, self.source)
-        self.assertIn('digest', str(cm.exception))
-
-    def test_an_invalid_list_is_refused(self):
-        path = self.control / 'list.json'
-        self.control.mkdir()
-        path.write_text('{"schema_version": "1"}', encoding='utf-8')
-        digest = confirmation.file_digest(path)
-        with self.assertRaises(confirmation.ConfirmationListUnusable) as cm:
-            confirmation.read(path, digest, self.source)
-        self.assertIn('items', str(cm.exception))
+    def test_another_modification_rewrites_the_rule_of_every_test(self):
+        public = dict(self.items[S1_PUBLIC['id']], status='modified')
+        public['review'] = dict(public['review'], modified_rule='deny')
+        self.assertEqual(confirmation.rule_for(public, 'PUBLIC-READ-other-tenant', 'allowed'), 'deny')
+        self.assertEqual(confirmation.base_rule(public), 'deny')
+        # A leftover modified_rule does not count unless the item is modified.
+        self.assertEqual(confirmation.rule_for(self.item('accepted', modified_rule='allow'), SHARED_READ, 'allowed'), 'deny')
 
 
-class TestProblem(unittest.TestCase):
+class TestProblem(Reviewed):
     """Whether a test may run on the item it rests on (〈定義：確認清單〉, TK-REQ-003, TK-REQ-016)."""
 
-    def setUp(self):
-        doc = confirmation.generate(policy.load_template(), plain('documents', 'announcements'), [S1_PUBLIC])
-        accept(accept(doc, 'S2-OWNER-ONLY@documents'), S1_PUBLIC['id'])
-        self.items = {i['item_id']: i for i in doc['items']}
+    def check(self, item, test_id, kind):
+        return confirmation.test_problem(item, test_id, kind, self.items, self.plan)
 
     def test_case_kind_must_match_the_items_rule(self):
-        deny, allow = self.items['S2-OWNER-ONLY@documents'], self.items[S1_PUBLIC['id']]
+        deny, allow = self.item('accepted', by='app-owner', at='2026-11-02T09:00:00Z'), self.items[S1_PUBLIC['id']]
         for item, kind in ((deny, 'allowed'), (allow, 'denial')):
             with self.subTest(rule=item['rule'], kind=kind):
-                self.assertIn('does not match the rule (TK-REQ-016)', confirmation.test_problem(item, kind))
-        self.assertIsNone(confirmation.test_problem(deny, 'denial'))
-        self.assertIsNone(confirmation.test_problem(allow, 'allowed'))
+                self.assertIn('does not match the rule (TK-REQ-016)', self.check(item, 'T', kind))
+        self.assertIsNone(self.check(deny, 'T', 'denial'))
+        self.assertIsNone(self.check(allow, 'T', 'allowed'))
 
     def test_a_pending_s2_item_runs_and_a_pending_s1_item_blocks(self):
-        s2 = self.items['S2-TENANT-ISOLATION@documents']
         s1 = dict(self.items[S1_PUBLIC['id']], status='pending')
-        self.assertIsNone(confirmation.test_problem(s2, 'denial'))
-        self.assertIn('待確認', confirmation.test_problem(s1, 'allowed'))
+        self.assertIsNone(self.check(self.items[TENANT_ITEM], 'READ-other-tenant', 'denial'))
+        self.assertIn('待確認', self.check(s1, 'PUBLIC-READ-anonymous', 'allowed'))
 
     def test_not_applicable_out_of_scope_and_incompletely_reviewed_items_block(self):
-        owner = self.items['S2-OWNER-ONLY@documents']
+        tenant = self.items[TENANT_ITEM]
         cases = {
-            '不適用': dict(owner, status='not_applicable',
-                        review=dict(owner['review'], reason='single owner', basis='S1-X')),
-            'out of scope': dict(owner, out_of_scope=True),
-
-            'lacks at': dict(owner, review=dict(owner['review'], at=None)),
+            '不適用': self.item('not_applicable', by='app-owner', at='2026-11-02T09:00:00Z', reason='one tenant', basis='spec'),
+            'out of scope': dict(self.item('accepted', by='app-owner', at='2026-11-02T09:00:00Z'), out_of_scope=True),
+            'lacks at': self.item('accepted', by='app-owner'),
             # Out of scope even while pending: the item makes no test (〈定義：確認清單〉 更新).
-            'is out of scope': dict(self.items['S2-TENANT-ISOLATION@documents'], out_of_scope=True),
+            'is out of scope': dict(tenant, out_of_scope=True),
         }
         for expected, item in cases.items():
             with self.subTest(expected):
-                self.assertIn(expected, confirmation.test_problem(item, 'denial'))
+                self.assertIn(expected, self.check(item, 'READ-other-tenant', 'denial'))
 
-    def test_a_modified_item_is_matched_by_its_modified_rule(self):
-        owner = self.items['S2-OWNER-ONLY@documents']
-        allowed = dict(owner, status='modified', review=dict(
-            owner['review'], reason='shared drafts', basis='S1-X', modified_rule='allow',
-            allowed_tests=['READ-shared'], expiry='2027-01-01'))
-        self.assertIsNone(confirmation.test_problem(allowed, 'allowed'))
-        self.assertIn('does not match the rule (TK-REQ-016)', confirmation.test_problem(allowed, 'denial'))
+    def test_a_legitimate_exception_runs_its_allowed_tests_and_keeps_denying_the_others(self):
+        item = self.item('modified', **EXCEPTION)
+        self.assertIsNone(self.check(item, SHARED_READ, 'allowed'))
+        self.assertIsNone(self.check(item, 'READ-other-tenant', 'denial'))
+        # An allowed case it does not list is still judged by deny.
+        self.assertIn("has rule 'deny' for test 'OTHER-ALLOWED'", self.check(item, 'OTHER-ALLOWED', 'allowed'))
 
+    def test_an_allowed_test_that_is_no_allowed_case_on_the_item_in_the_plan_blocks_only_the_allowed_cases(self):
+        # TK-DYN-003: the exception must be shown by its allowed tests; a denial case is judged by deny
+        # whatever the exception lists, so a plan without them still runs it.
+        cases = {'NOT-PLANNED': "allowed test 'NOT-PLANNED' is not in the test plan",
+                 'PUBLIC-READ-other-tenant': "rests on 'S2-TENANT-ISOLATION@announcements', not on this item",
+                 'READ-other-tenant': "allowed test 'READ-other-tenant' is not an allowed case"}
+        for test_id, expected in cases.items():
+            with self.subTest(test_id):
+                item = self.item('modified', **{**EXCEPTION, 'allowed_tests': [SHARED_READ, test_id]})
+                problem = self.check(item, SHARED_READ, 'allowed')
+                self.assertIn(expected, problem)
+                self.assertIn('is a 合法例外 but', problem)
+                self.assertIsNone(self.check(item, 'UPDATE-other-tenant', 'denial'))  # a denial case it does not list
+                self.assertIsNone(self.check(item, 'READ-other-tenant', 'denial'))  # nor one it lists
 
     def test_a_modification_without_its_rule_is_named_before_the_case_kind(self):
         # Without modified_rule the original rule would apply and the reason would wrongly be a mismatch.
-        owner = self.items['S2-OWNER-ONLY@documents']
-        unfinished = dict(owner, status='modified', review=dict(owner['review'], reason='shared drafts', basis='S1-X'))
-        self.assertIn('lacks modified_rule', confirmation.test_problem(unfinished, 'allowed'))
+        unfinished = self.item('modified', by='app-owner', at='2026-11-02T09:00:00Z', reason='shared', basis='spec')
+        self.assertIn('lacks modified_rule', self.check(unfinished, SHARED_READ, 'allowed'))
+
 
 class FindingCap(unittest.TestCase):
     """The highest finding status a failed test may give, by the item it rests on (TK-REQ-003)."""
@@ -468,6 +549,10 @@ class EnumsAgreeWithSchemas(unittest.TestCase):
 
     def test_impact_categories(self):
         self.assertEqual(confirmation.SCHEMA['$defs']['impact']['items']['enum'], list(policy.IMPACT_CATEGORIES))
+
+    def test_reset_reasons(self):
+        self.assertEqual(confirmation.SCHEMA['$defs']['version_fields']['properties']['reset_reason']['const'],
+                         confirmation.RESET_EXPIRED)
 
     def test_case_kinds(self):
         kinds = list(report.CASE_KINDS)

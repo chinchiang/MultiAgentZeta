@@ -276,7 +276,7 @@ class PrepareOtherVersionsEnv(unittest.TestCase):
 
 
 # The markers written by the samples' seed.sql (literal, not read back from the recipe).
-SEED_MARKERS = ['MARK-A-ALICE-PRIVATE', 'MARK-A-ALICE-SHARED', 'MARK-B-CAROL-PRIVATE']
+SEED_MARKERS = ['MARK-A-ALICE-PRIVATE', 'MARK-A-ALICE-SHARED', 'MARK-A-ALICE-SHARED-TO-B', 'MARK-B-CAROL-PRIVATE']
 
 
 def document_titles(project_id):
@@ -308,7 +308,7 @@ class ResetEnv(unittest.TestCase):
             self.assertEqual(document_titles(env.project_id), SEED_MARKERS)
             deleted = delete_as(env, 'owner', 'MARK-A-ALICE-SHARED')
             self.assertEqual([d['title'] for d in deleted], ['MARK-A-ALICE-SHARED'])
-            self.assertEqual(document_titles(env.project_id), ['MARK-A-ALICE-PRIVATE', 'MARK-B-CAROL-PRIVATE'])
+            self.assertEqual(document_titles(env.project_id), [m for m in SEED_MARKERS if m != 'MARK-A-ALICE-SHARED'])
 
             after = e1.reset(env)
             self.assertIsInstance(after, e1.Ready, after)
@@ -465,7 +465,7 @@ class ObserverRoleEnv(unittest.TestCase):
                          {'role': 'maz_observer', 'select_on': ['public.documents'], 'bypassrls': True})
 
     def test_observer_reads_every_row_of_the_judged_table(self):
-        self.assertEqual(self.query('select count(*) from public.documents'), (True, '3'))
+        self.assertEqual(self.query('select count(*) from public.documents'), (True, str(len(SEED_MARKERS))))
 
     def test_wrong_password_is_refused(self):
         ok, out = psql_as(self.env, self.role, 'not-the-password', 'select 1')

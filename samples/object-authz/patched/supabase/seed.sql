@@ -33,7 +33,12 @@ insert into public.documents (id, tenant_id, owner_id, title, body, shared) valu
   ('d0000000-0000-4000-8000-0000000000a2', '7e000000-0000-4000-8000-00000000000a',
    'a0000000-0000-4000-8000-00000000a11c', 'MARK-A-ALICE-SHARED', 'alice shared note', true),
   ('d0000000-0000-4000-8000-0000000000b1', '7e000000-0000-4000-8000-00000000000b',
-   'b0000000-0000-4000-8000-0000000ca201', 'MARK-B-CAROL-PRIVATE', 'carol private note', false);
+   'b0000000-0000-4000-8000-0000000ca201', 'MARK-B-CAROL-PRIVATE', 'carol private note', false),
+  ('d0000000-0000-4000-8000-0000000000a3', '7e000000-0000-4000-8000-00000000000a',
+   'a0000000-0000-4000-8000-00000000a11c', 'MARK-A-ALICE-SHARED-TO-B', 'alice note shared with tenant B', false);
+
+insert into public.document_shares (document_id, tenant_id) values
+  ('d0000000-0000-4000-8000-0000000000a3', '7e000000-0000-4000-8000-00000000000b');
 
 insert into public.announcements (id, title, body) values
   ('a1000000-0000-4000-8000-000000000001', 'MARK-PUBLIC-ANNOUNCEMENT', 'maintenance window on Sunday');

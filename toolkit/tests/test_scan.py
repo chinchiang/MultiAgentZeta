@@ -19,14 +19,17 @@ from pathlib import Path
 from toolkit import e1, report, scan
 from toolkit.tests.test_e1 import SAMPLES, needs_env
 
-# S1: the owner's own spec, given in the ScanManifest without any confirmation (〈定義：確認清單〉).
+# S1: the owner's own spec, given in the ScanManifest without any confirmation (〈定義：確認清單〉). It is the
+# 規格依據 of the 合法例外 that let anyone read announcements (EXCEPTIONS).
 S1_PUBLIC = {'id': 'S1-ANNOUNCEMENTS-PUBLIC-READ', 'statement': 'Anyone, signed in or not, may read announcements.',
              'resources': ['announcements'], 'rule': 'allow'}
 # Confirmation items the tests rest on: an S2 clause on a resource, or an S1 entry.
 OWNER_ITEM, TENANT_ITEM, ANON_ITEM = 'S2-OWNER-ONLY@documents', 'S2-TENANT-ISOLATION@documents', 'S2-ANON-NO-ACCESS@documents'
 PUBLIC_ITEM = S1_PUBLIC['id']
+# A test rests on the clause its actor is about (〈定義：確認清單〉): of documents, and of announcements.
 ITEM_FOR_ACTOR = {'same_tenant_non_owner': OWNER_ITEM, 'other_tenant_user': TENANT_ITEM, 'anonymous': ANON_ITEM}
-ACCEPTED = (OWNER_ITEM, TENANT_ITEM, ANON_ITEM, PUBLIC_ITEM)
+ANNOUNCEMENT_ITEM = {actor: item.replace('@documents', '@announcements') for actor, item in ITEM_FOR_ACTOR.items()}
+ACCEPTED = (OWNER_ITEM, ANON_ITEM, PUBLIC_ITEM)  # TENANT_ITEM is a 合法例外 (EXCEPTIONS)
 # Seeded identifiers (samples/object-authz/*/supabase/seed.sql).
 ALICE_ID = 'a0000000-0000-4000-8000-00000000a11c'
 TENANT_A = '7e000000-0000-4000-8000-00000000000a'
@@ -48,13 +51,24 @@ TESTS += [{'test_id': f'READ-anonymous-{fmt}', 'requirement_id': ANON_ITEM, 'own
            'observation_ref': 'document-row-state-v1', 'actor_ref': 'anonymous', 'api_key': fmt,
            **OPERATIONS['READ']}
           for fmt in ('anon-jwt', 'publishable')]
-# TK-DYN-004: USING (true) on public data is a legitimate read policy, not a finding.
+# TK-DYN-004: USING (true) on public data is a legitimate read policy, not a finding. Each reader's
+# clause on announcements is a 合法例外 allowing its reads (EXCEPTIONS).
 PUBLIC_READERS = {'anonymous-anon-jwt': ('anonymous', 'anon-jwt'), 'anonymous-publishable': ('anonymous', 'publishable'),
-                  'other-tenant': ('other_tenant_user', 'anon-jwt')}
+                  'same-tenant': ('same_tenant_non_owner', 'anon-jwt'), 'other-tenant': ('other_tenant_user', 'anon-jwt')}
 TESTS += [{'test_id': f'PUBLIC-READ-{short}', 'template_id': 'public-read-v1',
-           'requirement_id': PUBLIC_ITEM, 'actor_ref': actor, 'api_key': fmt,
+           'requirement_id': ANNOUNCEMENT_ITEM[actor], 'actor_ref': actor, 'api_key': fmt,
            'resource_ref': 'MARK-PUBLIC-ANNOUNCEMENT'}
           for short, (actor, fmt) in PUBLIC_READERS.items()]
+# TK-DYN-003: a document alice shares with tenant B; carol reading it is the allowed case of the 合法例外
+# on TENANT_ITEM, so it is legitimate, not a cross-tenant leak.
+SHARED_READ = {'test_id': 'SHARED-READ-other-tenant', 'template_id': 'shared-read-v1', 'requirement_id': TENANT_ITEM,
+               'actor_ref': 'other_tenant_user', 'api_key': 'anon-jwt', 'resource_ref': 'MARK-A-ALICE-SHARED-TO-B'}
+TESTS += [SHARED_READ]
+# The 合法例外 of the owner (〈定義：確認清單〉 修改): each item and the allowed tests it lists.
+EXCEPTIONS = {TENANT_ITEM: [SHARED_READ['test_id']],
+              **{item: [t['test_id'] for t in TESTS if t['requirement_id'] == item] for item in ANNOUNCEMENT_ITEM.values()}}
+# An allowed case resting on the S1 entry itself, for the tests about S1 entries.
+S1_READ = {**next(t for t in TESTS if t['test_id'] == 'PUBLIC-READ-anonymous-anon-jwt'), 'test_id': 'S1-PUBLIC-READ', 'requirement_id': PUBLIC_ITEM}
 
 EXPECTED = {
     'vulnerable': {'READ-same-tenant': 'failed', 'UPDATE-same-tenant': 'failed', 'DELETE-same-tenant': 'failed',
@@ -62,7 +76,8 @@ EXPECTED = {
                    'DELETE-other-tenant': 'passed', 'CREATE-other-tenant': 'passed',
                    'READ-anonymous-anon-jwt': 'passed', 'READ-anonymous-publishable': 'passed',
                    'PUBLIC-READ-anonymous-anon-jwt': 'passed', 'PUBLIC-READ-anonymous-publishable': 'passed',
-                   'PUBLIC-READ-other-tenant': 'passed'},
+                   'PUBLIC-READ-same-tenant': 'passed', 'PUBLIC-READ-other-tenant': 'passed',
+                   'SHARED-READ-other-tenant': 'passed'},
 }
 ALL_PASSED = {t['test_id']: 'passed' for t in TESTS}
 # Denial cases (TK-DYN-001); allowed cases are checked in PublicDataEnv.
@@ -80,17 +95,24 @@ LIMITS = {'max_cost_usd': 0, 'max_duration_seconds': 3600, 'max_requests': 500, 
           'model_providers': [], 'network_allowlist': ['127.0.0.1']}
 
 
+EXPIRY = '2099-01-01T00:00:00Z'  # later than every run of these tests (〈定義：確認清單〉 到期)
 CONTROL = Path(tempfile.mkdtemp(prefix='maz-control-'))  # the control zone of these tests, outside every sample
 atexit.register(shutil.rmtree, CONTROL, ignore_errors=True)
 
 
-def reviewed_list(source, accepted=ACCEPTED, s1=(S1_PUBLIC,), resources=None):
-    """A confirmation list in the control zone where the owner accepted the given items (test only:
-    in a real run a person edits the list). Returns the ScanManifest reference {path, digest}."""
+def reviewed_list(source, accepted=ACCEPTED, s1=(S1_PUBLIC,), resources=None, exceptions=EXCEPTIONS):
+    """A confirmation list in the control zone where the owner accepted the given items and made the
+    exceptions 合法例外, each allowing its tests until EXPIRY (test only: in a real run a person edits the
+    list). An item in both is a 合法例外. Returns the ScanManifest reference {path, digest}."""
     from toolkit import confirmation, policy
     doc = confirmation.generate(policy.load_template(), resources or SCOPE['resources'], list(s1))
     for item in doc['items']:
-        if item['item_id'] in accepted:
+        if item['item_id'] in exceptions:
+            item['status'] = 'modified'
+            item['review'].update(by='app-owner', at='2026-11-02T09:00:00Z', reason='the owner allows these reads',
+                                  basis=PUBLIC_ITEM if item['resource'] == 'announcements' else 'sharing spec §4',
+                                  modified_rule='allow', allowed_tests=exceptions[item['item_id']], expiry=EXPIRY)
+        elif item['item_id'] in accepted:
             item['status'] = 'accepted'
             item['review'].update(by='app-owner', at='2026-11-02T09:00:00Z')
     path = Path(tempfile.mkdtemp(dir=CONTROL)) / 'confirmation-list.json'
@@ -475,6 +497,23 @@ class PublicDataEnv(unittest.TestCase):
                                   for ev in attempt], [(fmt, 200, 1)])
 
 
+@needs_env
+class SharedDocumentEnv(unittest.TestCase):
+    """TK-DYN-003: reading a document shared with the reader's tenant is the allowed case of a 合法例外,
+    judged legitimate in every sample version, not a cross-tenant leak."""
+
+    def test_the_shared_document_is_readable_in_every_version_and_not_a_finding(self):
+        for version in ('vulnerable', 'patched', 'legit', 'lax-update-policy'):
+            with self.subTest(version=version):
+                rep = run_once(version).report
+                e = next(e for e in rep['execution_records'] if e['test_id'] == SHARED_READ['test_id'])
+                self.assertEqual((e['result'], e['case_kind'], e['checks']), ('passed', 'allowed', {'access_granted': True}))
+                self.assertFalse({i for f in rep['findings'] for i in f['execution_record_ids']} & {e['id']})
+                attempt = [ev for ev in e['evidence'] if ev['channel'] == 'actor']
+                self.assertEqual([(ev['identity_ref'], ev['response']['status'], ev['response']['rows']) for ev in attempt],
+                                 [('other_tenant_user', 200, 1)])
+
+
 class UnsupportedScopes(unittest.TestCase):
     """TK-DYN-004 scope not covered yet stays in the report and in the denominator (AG-07)."""
 
@@ -786,7 +825,8 @@ class UnknownRequirement(unittest.TestCase):
         import tempfile
         with tempfile.TemporaryDirectory() as d:
             m = preflight_manifest(d)
-            m['confirmation_list'] = reviewed_list(d, accepted=())
+            m['confirmation_list'] = reviewed_list(d, accepted=(), exceptions={})
+            m['tests'].append(S1_READ)
             rep = scan.run(m).report
             self.assertEqual(report.validate(rep), [])
             for e in rep['execution_records']:
@@ -794,9 +834,11 @@ class UnknownRequirement(unittest.TestCase):
                     self.assertEqual(e['result'], 'blocked')
                     if e['requirement_id'] == PUBLIC_ITEM:
                         self.assertIn('待確認', e['error'])
+                    elif e['template_id'] in scan.ALLOWED_TEMPLATES:  # a pending S2 clause still denies
+                        self.assertIn('does not match the rule (TK-REQ-016)', e['error'])
                     else:
                         self.assertIn('BuildRecipe', e['error'])
-            self.assertEqual(rep['coverage']['denominator'], len(TESTS) + len(scan.UNSUPPORTED_SCOPES))
+            self.assertEqual(rep['coverage']['denominator'], len(TESTS) + 1 + len(scan.UNSUPPORTED_SCOPES))
 
 
 class CaseKindMatchesItem(unittest.TestCase):
@@ -855,9 +897,10 @@ class ConfirmationListInScan(unittest.TestCase):
         self.assertIn(confirmation.file_digest(path), rep['status_reason'])
         # Pending S2 items do not stop their tests (TK-REQ-003): this run went on to the BuildRecipe step.
         self.assertEqual(rep['stages'][0], {'stage': 'preflight', 'status': 'completed'})
-        for e in rep['execution_records']:
+        for e in rep['execution_records']:  # every allowed case rests on a pending S2 clause, which denies
             self.assertEqual(e['result'], 'blocked')
-            self.assertIn('待確認' if e['requirement_id'] == PUBLIC_ITEM else 'BuildRecipe', e['error'])
+            self.assertIn('does not match the rule' if e['template_id'] in scan.ALLOWED_TEMPLATES else 'BuildRecipe',
+                          e['error'])
 
     def test_a_list_referenced_with_its_digest_but_missing_is_blocked_not_regenerated(self):
         # A digest means the list existed; generating a new, all-pending one would drop the owner's
@@ -888,7 +931,8 @@ class ConfirmationListInScan(unittest.TestCase):
 
     def test_errors_name_review_states_with_their_spec_labels(self):
         # Spec names (〈定義：確認清單〉 處理狀態), written here, not taken from report.REVIEW_LABELS.
-        self.m['confirmation_list'] = reviewed_list(self.tmp.name, accepted=())
+        self.m['confirmation_list'] = reviewed_list(self.tmp.name, accepted=(), exceptions={})
+        self.m['tests'].append(S1_READ)
         errors = [e['error'] for e in self.blocked(self.m)['execution_records'] if e['requirement_id'] == PUBLIC_ITEM]
         self.assertTrue(errors and all('待確認' in e for e in errors), errors)
 
@@ -901,9 +945,15 @@ class ConfirmationListInScan(unittest.TestCase):
         public['status'] = 'modified'
         public['review'].update(reason='owner restricts reads', basis='spec §2', modified_rule='deny')
         self.m['confirmation_list'] = {'path': ref['path'], 'digest': confirmation.write(ref['path'], doc, self.tmp.name)}
+        self.m['tests'].append(S1_READ)
         reported = {r['id']: r for r in scan.run(self.m).report['requirements']}
         self.assertEqual((reported[PUBLIC_ITEM]['status'], reported[PUBLIC_ITEM]['rule']), ('modified', 'deny'))
+        self.assertNotIn('allowed_tests', reported[PUBLIC_ITEM]['confirmation'])  # a rewritten rule is no 合法例外
         self.assertEqual(reported[OWNER_ITEM]['rule'], 'deny')
+        # A 合法例外 keeps the rule of the tests it does not list, and names those it allows and its expiry.
+        self.assertEqual((reported[TENANT_ITEM]['status'], reported[TENANT_ITEM]['rule']), ('modified', 'deny'))
+        self.assertEqual({k: reported[TENANT_ITEM]['confirmation'][k] for k in ('allowed_tests', 'expiry')},
+                         {'allowed_tests': [SHARED_READ['test_id']], 'expiry': EXPIRY})
 
     def test_the_report_summarises_review_states_by_source(self):
         # TK-REQ-003 報告列出各類待確認數量; 〈定義：確認清單〉 單人核准 for modified and not applicable items.
@@ -917,20 +967,78 @@ class ConfirmationListInScan(unittest.TestCase):
         items[ANON_ITEM]['review'].update(reason='owner wording', basis='spec §3', modified_rule='deny')
         self.m['confirmation_list'] = {'path': ref['path'], 'digest': confirmation.write(ref['path'], doc, self.tmp.name)}
         listed = scan.run(self.m).report['confirmation_list']
-        # Six S2 items (three clauses × documents, announcements) and one S1 entry, none out of scope.
+        # Six S2 items (three clauses × documents, announcements) and one S1 entry, none out of scope; the
+        # three on announcements are 合法例外 (EXCEPTIONS).
         self.assertEqual(listed['summary'], {
             'S1': {'pending': 0, 'accepted': 1, 'modified': 0, 'not_applicable': 0},
-            'S2': {'pending': 3, 'accepted': 1, 'modified': 1, 'not_applicable': 1}})
+            'S2': {'pending': 0, 'accepted': 1, 'modified': 4, 'not_applicable': 1}})
         self.assertEqual(listed['out_of_scope'], 0)
-        self.assertEqual(listed['single_approval'], [ANON_ITEM, TENANT_ITEM])  # in the list's order
+        # In the list's order: high-impact items first, S2-TENANT-ISOLATION@announcements by its clause's cross_tenant.
+        self.assertEqual(listed['single_approval'], [ANON_ITEM, 'S2-TENANT-ISOLATION@announcements', TENANT_ITEM,
+                                                     'S2-ANON-NO-ACCESS@announcements', 'S2-OWNER-ONLY@announcements'])
         self.assertEqual(listed['s2_template'], doc['s2_template'])
         self.assertEqual(listed['list_version'], doc['list_version'])
+
+    def edit_list(self, change):
+        """change(items by id) on the manifest's list, written back and referenced as the owner would."""
+        from toolkit import confirmation
+        ref = self.m['confirmation_list']
+        doc = json.loads(Path(ref['path']).read_text(encoding='utf-8'))
+        change({i['item_id']: i for i in doc['items']})
+        self.m['confirmation_list'] = {'path': ref['path'], 'digest': confirmation.write(ref['path'], doc, self.tmp.name)}
+
+    def errors(self):
+        return {e['test_id']: e['error'] for e in self.blocked(self.m)['execution_records']}
+
+    def test_a_legitimate_exception_lacking_a_part_blocks_the_tests_on_it_and_names_the_part(self):
+        # TK-DYN-003: a 合法例外 needs its basis, an allowed-case test and an expiry (〈定義：確認清單〉 修改).
+        for name, value, expected in (('basis', None, 'lacks basis'), ('allowed_tests', [], 'lacks allowed_tests'),
+                                      ('expiry', None, 'lacks expiry'),
+                                      ('expiry', 'next quarter', "its expiry 'next quarter' is not an ISO 8601 UTC time")):
+            with self.subTest(name=name, value=value):
+                self.m['confirmation_list'] = reviewed_list(self.tmp.name)  # each part on its own
+                self.edit_list(lambda items: items[TENANT_ITEM]['review'].update({name: value}))
+                errors = self.errors()
+                for test_id in (SHARED_READ['test_id'], 'READ-other-tenant'):
+                    self.assertIn(expected, errors[test_id])
+                self.assertIn('BuildRecipe', errors['READ-same-tenant'])  # another item: not affected
+
+    def test_an_allowed_test_not_in_the_plan_blocks_only_the_allowed_cases_on_the_exception(self):
+        # TK-DYN-003: the exception must be shown by its allowed tests; denial cases are judged by deny anyway.
+        self.edit_list(lambda items: items[TENANT_ITEM]['review'].update(allowed_tests=[SHARED_READ['test_id'], 'NOT-PLANNED']))
+        errors = self.errors()
+        self.assertIn("allowed test 'NOT-PLANNED' is not in the test plan", errors[SHARED_READ['test_id']])
+        self.assertIn('BuildRecipe', errors['READ-other-tenant'])
+
+    def test_an_expired_exception_is_reset_to_pending_and_its_tests_go_back_to_the_s2_clause(self):
+        # 〈定義：確認清單〉 到期: the expiry has come by the run's start; the toolkit resets the item, and the
+        # list is written back as a new version for the owner (TK-REQ-004, TK-REQ-009).
+        self.edit_list(lambda items: items[TENANT_ITEM]['review'].update(expiry='2026-01-01T00:00:00Z'))
+        path = self.m['confirmation_list']['path']
+        before = json.loads(Path(path).read_text(encoding='utf-8'))
+        rep = self.blocked(self.m)
+        after = json.loads(Path(path).read_text(encoding='utf-8'))
+        self.assertEqual((after['list_version'], rep['confirmation_list']['updated']), (before['list_version'] + 1, True))
+        item = next(i for i in after['items'] if i['item_id'] == TENANT_ITEM)
+        self.assertEqual((item['version'], item['status'], item['reset_reason']), (2, 'pending', 'expired'))
+        self.assertEqual((item['history'][-1]['status'], item['history'][-1]['review']['expiry']),
+                         ('modified', '2026-01-01T00:00:00Z'))
+        records = {e['test_id']: e for e in rep['execution_records']}
+        # The pending S2 clause denies again: the allowed case no longer matches, the denial cases go on.
+        self.assertIn('does not match the rule (TK-REQ-016)', records[SHARED_READ['test_id']]['error'])
+        self.assertIn('BuildRecipe', records['READ-other-tenant']['error'])
+        self.assertEqual(records['READ-other-tenant']['requirement_version'], 2)
+        self.assertNotIn(TENANT_ITEM, rep['confirmation_list']['single_approval'])
+
+    def test_a_legitimate_exception_is_shown_as_approved_by_one_person(self):
+        # 〈定義：確認清單〉 單人核准: a 合法例外 relaxes S2, and no second approver exists yet (TK-REQ-014).
+        self.assertIn(TENANT_ITEM, self.blocked(self.m)['confirmation_list']['single_approval'])
 
     def test_items_out_of_scope_are_counted_apart_from_review_states(self):
         self.m['scope']['resources'] = [{'name': 'announcements', 'impact': []}]
         listed = scan.run(self.m).report['confirmation_list']
         self.assertEqual(listed['out_of_scope'], 3)  # the three S2 clauses on documents
-        self.assertEqual(listed['summary']['S2'], {'pending': 3, 'accepted': 0, 'modified': 0, 'not_applicable': 0})
+        self.assertEqual(listed['summary']['S2'], {'pending': 0, 'accepted': 0, 'modified': 3, 'not_applicable': 0})
 
     def test_the_list_path_is_required(self):
         for value in (None, {}, {'digest': 'sha256:' + '0' * 64}):
@@ -1020,7 +1128,7 @@ class ConfirmationListInScan(unittest.TestCase):
         items[TENANT_ITEM].update(status='not_applicable')
         items[TENANT_ITEM]['review'].update(reason='single tenant', basis='S1-X')
         items[ANON_ITEM]['review']['by'] = None
-        items[PUBLIC_ITEM]['review']['by'] = None
+        items[ANNOUNCEMENT_ITEM['other_tenant_user']]['review']['by'] = None
         self.m['confirmation_list'] = {'path': ref['path'], 'digest': confirmation.write(ref['path'], doc, self.tmp.name)}
         errors = {e['test_id']: e['error'] for e in self.blocked(self.m)['execution_records']}
         self.assertIn('lacks at', errors['READ-same-tenant'])
@@ -1031,7 +1139,6 @@ class ConfirmationListInScan(unittest.TestCase):
     def test_tests_on_items_out_of_scope_are_blocked(self):
         # documents leaves the scope: its items are marked out of scope and keep their review state.
         self.m['scope']['resources'] = [{'name': 'announcements', 'impact': []}]
-        self.m['tests'] = [t for t in self.m['tests'] if t['requirement_id'] != PUBLIC_ITEM]
         errors = {e['test_id']: e['error'] for e in self.blocked(self.m)['execution_records']}
         self.assertIn('out of scope', errors['READ-same-tenant'])
         self.assertIn('out of scope', errors['READ-anonymous-anon-jwt'])
@@ -1062,6 +1169,7 @@ class RecordsKeepTheItemVersion(unittest.TestCase):
     def test_after_the_item_changes_the_old_report_still_points_at_the_old_version(self):
         with tempfile.TemporaryDirectory() as d:
             m = preflight_manifest(d)
+            m['tests'].append(S1_READ)
             first = scan.run(m).report
             m['requirements'][0]['statement'] = 'Only signed-in users may read announcements.'
             second = scan.run(m).report  # the S1 entry changed: its item is now version 2, pending
@@ -1090,9 +1198,10 @@ class SharedPlan(unittest.TestCase):
         from toolkit import policy
         plan = shared_plan(policy.load_template(), TESTS)
         ids = [t['test_id'] for t in plan]
-        # 16 template cases; the 10 judgement tests of the same name are those cases; 3 public reads are S1 only.
-        self.assertEqual(len(ids), 19)
-        self.assertEqual(len(set(ids)), 19)
+        # 16 template cases; the 10 judgement tests of the same name are those cases; 4 public reads and the
+        # shared read are judgement tests only.
+        self.assertEqual(len(ids), 21)
+        self.assertEqual(len(set(ids)), 21)
         self.assertIn('UPDATE-anonymous-publishable', ids)  # a case only the template has
         self.assertIn('PUBLIC-READ-other-tenant', ids)  # a test only the judgement plan has
         case = next(t for t in plan if t['test_id'] == 'READ-same-tenant')

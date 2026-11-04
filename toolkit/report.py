@@ -70,6 +70,13 @@ DENIAL, ALLOWED = CASE_KINDS = ('denial', 'allowed')
 RULE_FOR_CASE = {DENIAL: policy.DENY, ALLOWED: policy.ALLOW}
 
 
+def rule_for(rule, allowed_tests, test_id, case_kind):
+    """The rule a test of case_kind is judged by on an item with rule and the allowed_tests of its 合法例外:
+    an allowed case it lists is allowed; every other test, a denial case it lists included, keeps the
+    rule (〈定義：確認清單〉 修改, TK-DYN-003)."""
+    return policy.ALLOW if case_kind == ALLOWED and test_id in allowed_tests else rule
+
+
 def untestable(item):
     """Why tests on item must be blocked, or None: out of scope, not applicable, or a pending S1
     entry (〈定義：確認清單〉, TK-REQ-003). A pending S2 clause may still be tested."""
@@ -116,9 +123,12 @@ def _requirement_problems(doc):
             problems.append(f'execution_records/{i}: {item["id"]!r} {reason}; a test on it must be blocked, '
                             f'not {e.get("result")!r} (〈定義：確認清單〉)')
         kind = e.get('case_kind', DENIAL)
-        if e.get('result') in ('passed', 'failed') and RULE_FOR_CASE.get(kind) != item.get('rule'):
-            problems.append(f'execution_records/{i}: a {kind} case on {item["id"]!r} (rule {item.get("rule")!r}) '
-                            f'must be blocked, not {e.get("result")!r} (TK-REQ-016)')
+        # Only a modified item can be a 合法例外 (〈定義：確認清單〉 修改); allowed_tests on another one count for nothing.
+        allowed_tests = ((item.get('confirmation') or {}).get('allowed_tests') or []) if item.get('status') == MODIFIED else []
+        rule = rule_for(item.get('rule'), allowed_tests, e.get('test_id'), kind)
+        if e.get('result') in ('passed', 'failed') and RULE_FOR_CASE.get(kind) != rule:
+            problems.append(f'execution_records/{i}: a {kind} case on {item["id"]!r} (rule {rule!r} for '
+                            f'{e.get("test_id")!r}) must be blocked, not {e.get("result")!r} (TK-REQ-016)')
     for i, f in enumerate(_list(doc, 'findings')):
         item = listed_item(items, f)
         if item and f.get('status') == 'confirmed' and finding_cap(item) != 'confirmed':
@@ -186,6 +196,9 @@ def render_markdown(doc):
         for r in doc['requirements']:
             c = r['confirmation']
             state = REVIEW_LABELS[r['status']] + ('（範圍外）' if r['out_of_scope'] else '')
+            if c.get('allowed_tests'):
+                state += ('（合法例外：放行 ' + '、'.join(f'`{t}`' for t in c['allowed_tests'])
+                          + f'，到期 {c.get("expiry", "（未填）")}）')
             who = f'{c["by"]} {c["at"]}' if c['by'] else '（未確認）'
             lines.append(f'| `{r["id"]}` v{c["version"]} | {r["source"]} | {r["statement"]} | {state} | {who} |')
 

@@ -329,12 +329,16 @@ def _denial_case(env, test, evidence):
     return 'passed', checks
 
 
-# Allowed-case templates: the requirement permits the access, so the case passes when it is granted.
-ALLOWED_TEMPLATES = {'public-read-v1': {'method': 'GET', 'table': 'announcements'}}
+# Allowed-case templates: the requirement permits the access, so the case passes when it is granted. Each is
+# on one table (TK-DYN-003, TK-DYN-004): the test names a marker, not the table,
+# so a test cannot pick where it is allowed to read (TK-REQ-016).
+ALLOWED_TEMPLATES = {'public-read-v1': {'method': 'GET', 'table': 'announcements'},
+                     'shared-read-v1': {'method': 'GET', 'table': 'documents'}}
 
 
 def _allowed_case(env, test, evidence):
-    """Template public-read-v1 (e.g. USING (true) on public data, TK-DYN-004). Returns (result, checks)."""
+    """An allowed-case template: public-read-v1 (e.g. USING (true) on public data, TK-DYN-004) or
+    shared-read-v1 (a document shared with the actor's tenant, TK-DYN-003). Returns (result, checks)."""
     template = ALLOWED_TEMPLATES[test['template_id']]
     marker, key = test['resource_ref'], test.get('api_key', 'anon-jwt')
     path = f'/rest/v1/{template["table"]}?title=eq.{marker}&select=title'
@@ -387,9 +391,9 @@ def _identity_problem(test, identities):
     return None
 
 
-def _test_problem(test, items, identities, restorable=True):
+def _test_problem(test, items, plan, identities, restorable=True):
     """(result, reason) for a test that cannot run, or None."""
-    reason = _plan_problem(test) or _item_problem(test, items)
+    reason = _plan_problem(test) or _item_problem(test, items, plan)
     if reason:
         return 'blocked', reason
     if not restorable and DENIAL_TEMPLATES.get(test['template_id'], {}).get('writes'):
@@ -409,17 +413,26 @@ def _identity_gaps(manifest, identities):
 
 
 def _case_kind(test):
-    return report.DENIAL if test['template_id'] in DENIAL_TEMPLATES else report.ALLOWED
+    """The case kind of a test's template, or None for a template on no allow-list (blocked by _plan_problem)."""
+    template = test.get('template_id')
+    return report.DENIAL if template in DENIAL_TEMPLATES else report.ALLOWED if template in ALLOWED_TEMPLATES else None
 
 
-def _item_problem(test, items):
+def _plan(manifest):
+    """Each planned test_id with its requirement_id and case kind, for the allowed tests of a 合法例外
+    (TK-DYN-003)."""
+    return {t.get('test_id'): {'requirement_id': t.get('requirement_id'), 'case_kind': _case_kind(t)}
+            for t in manifest['tests']}
+
+
+def _item_problem(test, items, plan):
     """需求不明: the confirmation item the test rests on must be in the list; the toolkit never infers a
     requirement from the implementation (TK-REQ-005). Whether the item lets the test run is
     confirmation.test_problem (〈定義：確認清單〉, TK-REQ-003, TK-REQ-016)."""
     item = report.listed_item(items, test)
     if item is None:
         return f'requirement {test.get("requirement_id")!r} is not in the confirmation list; requirement unknown, not inferred from the code'
-    return confirmation.test_problem(item, _case_kind(test))
+    return confirmation.test_problem(item, test['test_id'], _case_kind(test), items, plan)
 
 
 S1_FIELDS = ('id', 'statement', 'resources', 'rule')
@@ -448,10 +461,11 @@ def _s1_problems(manifest):
     return problems
 
 
-def _load_confirmation_list(manifest):
+def _load_confirmation_list(manifest, now):
     """Read the referenced list, or generate it and hand it over when there is none yet (no digest and no
     file; a list referenced with its digest is read even when its file is gone, TK-REQ-004);
-    bring it up to date with the S2 template and the scope. Returns (_Listed, None), or (None, problem)."""
+    bring it up to date with the S2 template and the scope, and reset the 合法例外 expired by `now`, the
+    run's start (〈定義：確認清單〉 到期). Returns (_Listed, None), or (None, problem)."""
     ref = manifest.get('confirmation_list')
     path = ref.get('path') if isinstance(ref, dict) else None
     if not path:
@@ -465,7 +479,7 @@ def _load_confirmation_list(manifest):
     try:
         if ref.get('digest'):  # the list existed: read it, even when its file is gone (TK-REQ-004)
             existing = confirmation.read(path, ref['digest'], source)
-            doc = confirmation.update(existing, template, resources, s1)
+            doc = confirmation.update(existing, template, resources, s1, now=now)
             updated = doc != existing
         elif Path(path).exists():
             return None, f'confirmation_list.digest is missing: the list at {path} is read only with its digest'
@@ -598,7 +612,8 @@ def run(manifest):
     A run that cannot start (source digest mismatch, BuildRecipe step blocked) is
     reported with status blocked and the reason; every planned test is blocked.
     """
-    run_id = f'run-{datetime.now(timezone.utc):%Y%m%d%H%M%S}-{secrets.token_hex(3)}'
+    run_start = datetime.now(timezone.utc)
+    run_id = f'run-{run_start:%Y%m%d%H%M%S}-{secrets.token_hex(3)}'
     records, listed = _Records(run_id, _commit(manifest)), _Listed()
     missing = _input_problems(manifest)
     if missing:
@@ -612,14 +627,15 @@ def run(manifest):
     if pinned != actual:
         return _blocked(manifest, records, listed, f'source_digest of the ScanManifest ({pinned}) does not match '
                                            f'the project ({actual}); nothing was started', stage='preflight')
-    loaded, problem = _load_confirmation_list(manifest)
+    loaded, problem = _load_confirmation_list(manifest, run_start)
     if problem:
         return _blocked(manifest, records, listed, f'nothing was started: {problem}', stage='preflight')
     listed = loaded
     recipe, _ = e1.load_recipe(project)
     identities = {i['name'] for i in recipe['auth']['identities']} if recipe else None
     restorable = not (recipe and recipe['snapshot_reset'].get('reset_scope') == 'none')
-    problems = {t['test_id']: _test_problem(t, listed.items, identities, restorable) for t in manifest['tests']}
+    plan = _plan(manifest)
+    problems = {t['test_id']: _test_problem(t, listed.items, plan, identities, restorable) for t in manifest['tests']}
     gaps = _identity_gaps(manifest, identities)
     if all(problems.values()):
         return _blocked(manifest, records, listed, 'no test in the ScanManifest can run; nothing was started',
@@ -718,10 +734,21 @@ def _handover_note(listed):
 def _requirements(manifest, listed):
     """The confirmation items the planned tests rest on, as the report shows them."""
     used = {i['item_id']: i for t in manifest['tests'] if (i := listed.item(t))}  # each item once, in plan order
-    return [{'id': i['item_id'], 'source': i['source'], 'statement': i['statement'], 'rule': confirmation.effective_rule(i),
-             'status': i['status'], 'out_of_scope': i['out_of_scope'],
-             'confirmation': {'by': i['review']['by'], 'at': i['review']['at'], 'version': i['version']}}
+    return [{'id': i['item_id'], 'source': i['source'], 'statement': i['statement'], 'rule': confirmation.base_rule(i),
+             'status': i['status'], 'out_of_scope': i['out_of_scope'], 'confirmation': _confirmation(i)}
             for i in used.values()]
+
+
+def _confirmation(item):
+    """Who confirmed the item and its version; for a 合法例外 also the tests it allows and its expiry, so
+    report.validate() judges each test by the same rule as the run (TK-DYN-003)."""
+    review = item['review']
+    shown = {'by': review['by'], 'at': review['at'], 'version': item['version']}
+    if confirmation.is_exception(item) and review['allowed_tests']:
+        shown['allowed_tests'] = review['allowed_tests']
+        if review['expiry'] is not None:  # an exception lacking it is blocked; the report shows what is there
+            shown['expiry'] = review['expiry']
+    return shown
 
 
 def _blocked(manifest, records, listed, reason, per_test=None, stage='preflight', gaps=()):

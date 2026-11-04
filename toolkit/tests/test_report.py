@@ -265,6 +265,16 @@ class RenderMarkdown(unittest.TestCase):
         self.assertIn('（未確認）', md)
         self.assertNotIn('None', md)
 
+    def test_a_legitimate_exception_shows_the_tests_it_allows_and_its_expiry(self):
+        md = report.render_markdown(self.listed_item(status='modified', confirmation={
+            'by': 'app-owner', 'at': '2026-11-01T09:00:00Z', 'version': 1,
+            'allowed_tests': ['SHARED-READ-other-tenant'], 'expiry': '2027-05-01T00:00:00Z'}))
+        self.assertIn('| 修改（合法例外：放行 `SHARED-READ-other-tenant`，到期 2027-05-01T00:00:00Z） |', md)
+        md = report.render_markdown(self.listed_item(status='modified', confirmation={
+            'by': 'app-owner', 'at': '2026-11-01T09:00:00Z', 'version': 1, 'allowed_tests': ['SHARED-READ-other-tenant']}))
+        self.assertIn('到期 （未填）', md)
+        self.assertNotIn('None', md)
+
     def test_an_item_out_of_scope_is_marked(self):
         self.assertIn('範圍外', report.render_markdown(self.listed_item(out_of_scope=True)))
 
@@ -606,6 +616,35 @@ class AllowedCases(unittest.TestCase):
         e['case_kind'] = 'allowed'
         e['checks'] = {'access_granted': granted}
         return doc
+
+    def exception(self, doc):
+        """An allowed case on the deny item of the example report, made a 合法例外; returns the case's test_id."""
+        doc['findings'] = []
+        doc['requirements'][0].update(status='modified')
+        doc['requirements'][0]['confirmation']['expiry'] = '2027-05-01T00:00:00Z'
+        e = doc['execution_records'][1]
+        e.update(case_kind='allowed', checks={'access_granted': True})
+        return doc, e['test_id']
+
+    def test_a_legitimate_exception_allows_only_the_tests_it_lists(self):
+        # TK-DYN-003: the item's rule is deny; only its allowed tests are judged by allow (〈定義：確認清單〉 修改).
+        doc, test_id = self.exception(valid_report())
+        doc['requirements'][0]['confirmation']['allowed_tests'] = [test_id]
+        self.assertEqual(report.validate(doc), [])
+        for change in ({'confirmation': dict(doc['requirements'][0]['confirmation'], allowed_tests=['ANOTHER-TEST'])},
+                       {'status': 'accepted'}):  # only a modified item can be a 合法例外
+            with self.subTest(change=change):
+                bad = copy.deepcopy(doc)
+                bad['requirements'][0].update(change)
+                problems = report.validate(bad)
+                self.assertTrue(any('execution_records/1' in p and "rule 'deny'" in p and 'TK-REQ-016' in p
+                                    for p in problems), problems)
+
+    def test_a_denial_case_a_legitimate_exception_lists_keeps_the_items_rule(self):
+        doc, test_id = self.exception(valid_report())
+        denial = doc['execution_records'][0]
+        doc['requirements'][0]['confirmation']['allowed_tests'] = [test_id, denial['test_id']]
+        self.assertEqual(report.validate(doc), [])  # the denial case stays judged by deny
 
     def test_passed_allowed_case_needs_no_denial_checks(self):
         self.assertEqual(report.validate(self.allowed(valid_report())), [])

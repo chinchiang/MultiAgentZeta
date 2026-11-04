@@ -2,7 +2,7 @@
   "recipe_version": "1",
   "sample": "object-authz/lax-update-policy",
   "source_build": {
-    "source_digest": "sha256:f186484bd4377bf3b879d9af229099e638a48605cc98ff77b030c120e5030102",
+    "source_digest": "sha256:8a2acba187fc696ff3ca563b61e64052eb71c9475d38b6cf54e1f957a8fa669f",
     "lockfiles": [],
     "tools": [
       "supabase-cli"
@@ -42,13 +42,23 @@
     "roles": [
       "member"
     ],
-    "sharing_exceptions": [],
+    "sharing_exceptions": [
+      {
+        "marker": "MARK-A-ALICE-SHARED-TO-B",
+        "readers": "members of Tenant B (document_shares)",
+        "actions": [
+          "read"
+        ]
+      }
+    ],
     "related_resources": [
-      "memberships"
+      "memberships",
+      "document_shares"
     ],
     "markers": [
       "MARK-A-ALICE-PRIVATE",
       "MARK-A-ALICE-SHARED",
+      "MARK-A-ALICE-SHARED-TO-B",
       "MARK-B-CAROL-PRIVATE"
     ]
   },
@@ -88,7 +98,7 @@
     ]
   },
   "snapshot_reset": {
-    "seed_version": "2026-10-31.1",
+    "seed_version": "2026-11-04.1",
     "reset_scope": "database: migrations and seed are re-applied",
     "reset_check": "the documents table holds exactly the test_data markers",
     "cleanup": "containers and volumes removed"

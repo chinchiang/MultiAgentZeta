@@ -36,6 +36,26 @@ create policy "users read their memberships" on public.memberships
   for select to authenticated
   using (user_id = auth.uid());
 
+-- Documents shared with another tenant: a 合法例外 of tenant isolation the owner confirms with its
+-- spec basis and an allowed-case test (TK-DYN-003). Every version lets that tenant's members read
+-- the shared document, so the allowed case is legitimate in each one.
+create table public.document_shares (
+  document_id uuid not null references public.documents (id) on delete cascade,
+  tenant_id uuid not null references public.tenants (id),
+  primary key (document_id, tenant_id)
+);
+
+alter table public.document_shares enable row level security;
+grant select on public.document_shares to authenticated;
+
+create policy "members read their tenants' shares" on public.document_shares
+  for select to authenticated
+  using (tenant_id in (select tenant_id from public.memberships where user_id = auth.uid()));
+
+create policy "members read documents shared with their tenant" on public.documents
+  for select to authenticated
+  using (id in (select document_id from public.document_shares));
+
 -- Public data: announcements are readable by anyone, signed in or not. USING (true) is the
 -- legitimate read policy here (TK-DYN-004), not a vulnerability.
 create table public.announcements (
