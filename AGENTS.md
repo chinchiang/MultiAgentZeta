@@ -6,7 +6,7 @@ Before committing doc changes, run `python3 -I docs/toolkit/tools/build.py --che
 
 ## Toolkit prototype
 
-Code lives in `toolkit/`, samples in `samples/`. Fast tests: `python3 -I -m unittest discover -s toolkit/tests -t .` (install from the hash-pinned `toolkit/requirements.lock`); one file: add `-p test_scan.py` (under `-I`, `-m unittest toolkit.tests.x` cannot import `toolkit`). Environment tests need Docker, `MAZ_ENV_TESTS=1` and `MAZ_SUPABASE_BIN="$(toolkit/tools/fetch-supabase-cli.sh)"`, which fetches and verifies the pinned CLI into `scratch/tools/`.
+Code lives in `toolkit/`, samples in `samples/`. Fast tests: `python3 -I -m unittest discover -s toolkit/tests -t .` (install from the hash-pinned `toolkit/requirements.lock`); one file: add `-p test_scan.py` (under `-I`, `-m unittest toolkit.tests.x` cannot import `toolkit`). Environment tests need Docker; start them with `toolkit/tools/run-env-tests.sh NAME [-p …] [-k …]`, which runs them detached from the session, and check with `--status NAME`.
 
 ## Agent skills
 
