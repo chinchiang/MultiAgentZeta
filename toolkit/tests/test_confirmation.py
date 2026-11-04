@@ -307,10 +307,6 @@ class ReadWrite(unittest.TestCase):
         self.assertIn('items', str(cm.exception))
 
 
-if __name__ == '__main__':
-    unittest.main()
-
-
 class TestProblem(unittest.TestCase):
     """Whether a test may run on the item it rests on (〈定義：確認清單〉, TK-REQ-003, TK-REQ-016)."""
 
@@ -402,3 +398,7 @@ class EnumsAgreeWithSchemas(unittest.TestCase):
         self.assertEqual(kinds, ['denial', 'allowed'])
         self.assertEqual(report.SCHEMA['$defs']['execution_record']['properties']['case_kind']['enum'], kinds)
         self.assertEqual(list(report.RULE_FOR_CASE), kinds)
+
+
+if __name__ == '__main__':
+    unittest.main()
