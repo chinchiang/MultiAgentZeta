@@ -28,7 +28,7 @@ v1.3.6 以前的單一文件 `docs/research/vibe-coding-multiagent-testing-toolk
 ## 版本規則
 
 - 四份文件共用一個版本號，寫在每份文件的檔頭。
-- 改動 `docs/toolkit/`（含本檔與 `tools/`）、`GLOSSARY.md`、`docs/adr/`、`CODING_STANDARDS.md` 或代理指示檔（`AGENTS.md`、`docs/agents/`）時，四份文件一起升版；沒改內容的文件只改檔頭版本號與修訂日期。`toolkit/` 與 `samples/` 的程式改動不升版。
+- 改動 `docs/toolkit/`（含本檔與 `tools/`）、`GLOSSARY.md`、`docs/adr/`、`CODING_STANDARDS.md` 或代理指示檔（`AGENTS.md`、`docs/agents/`、`.claude/agents/`）時，四份文件一起升版；沒改內容的文件只改檔頭版本號與修訂日期。`toolkit/` 與 `samples/` 的程式改動不升版。
 - 結構性變更（拆分、重新分章）升第二位數；一般修訂升第三位數。
 - 修訂紀錄只記在 `review-log.md` 第 4 章，寫明改了哪幾份。
 

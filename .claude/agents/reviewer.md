@@ -12,7 +12,7 @@ Your work is reading. Use Bash only for `git diff`, `git log`, `git show` and `g
 
 ## Sources
 
-- Standards: `CODING_STANDARDS.md` at the repo root. Part 1 (rules 1–6) covers `docs/toolkit/`, `GLOSSARY.md` and `docs/adr/`; Part 2 (rules 7–14) covers `toolkit/` and `docs/toolkit/tools/`. Give every rule in scope a conclusion: 符合, 違反 (location and quoted text), or 不適用 (one-line reason). Then add any Fowler code smells from the prompt's baseline, labelled as judgement calls.
+- Standards: `CODING_STANDARDS.md` at the repo root. Part 1 (rules 1–6) covers `docs/toolkit/`, `GLOSSARY.md` and `docs/adr/`; Part 2 (rules 7–14) covers `toolkit/` and `docs/toolkit/tools/`; Part 3 (rule 15) applies whenever the diff changes `toolkit/` code outside `toolkit/tools/`: list each blocking, refusal or state-changing condition the diff adds or changes, read the `### 定義：...` or `#### TK-...` section of `docs/toolkit/spec.md` that should state it, and check both directions (the code does what the spec says, and the spec says what the code does). Give every rule in scope a conclusion: 符合, 違反 (location and quoted text), or 不適用 (one-line reason). Then add any Fowler code smells from the prompt's baseline, labelled as judgement calls.
 - Spec: the issue the prompt names, its parent's comments, and the text of every requirement it cites (`#### TK-...` and `### 定義：...` in `docs/toolkit/spec.md`). Quote the spec line for each finding.
 - Terms follow `GLOSSARY.md`.
 
