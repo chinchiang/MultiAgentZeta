@@ -80,6 +80,16 @@ class Validate(unittest.TestCase):
                 change(t)
                 self.assertRaises(policy.PolicyTemplateInvalid, policy.validate, t)
 
+    def test_each_clause_lists_its_high_impact_categories(self):
+        # TK-REQ-012: a clause names the 〈定義：高影響類別〉 it involves, [] for none; a missing list is never none.
+        self.assertEqual({c['id']: c['impact'] for c in policy.load_template()['clauses']},
+                         {'S2-OWNER-ONLY': [], 'S2-TENANT-ISOLATION': ['cross_tenant'], 'S2-ANON-NO-ACCESS': []})
+        self.assert_invalid(lambda t: t['clauses'][1].pop('impact'), 'clauses/1.impact (高影響類別) is missing')
+        self.assert_invalid(lambda t: t['clauses'][1].update(impact=None), 'clauses/1.impact (高影響類別) is missing')
+        self.assert_invalid(lambda t: t['clauses'][1].update(impact='cross_tenant'), 'clauses/1.impact must be a list')
+        self.assert_invalid(lambda t: t['clauses'][1].update(impact=['tenant']), "unknown high-impact category 'tenant'")
+        self.assert_invalid(lambda t: t['clauses'][1].update(impact=['payment', 'payment']), "lists 'payment' twice")
+
     def test_every_clause_has_a_self_acceptance_case(self):
         def drop_anonymous(t):
             t['self_acceptance']['cases'] = [c for c in t['self_acceptance']['cases']
@@ -89,7 +99,8 @@ class Validate(unittest.TestCase):
 
 # The digest of each released template version. A content change without a version bump fails here;
 # a bump adds its digest after the new template passes its self-acceptance (TK-REQ-008).
-PINNED_DIGESTS = {'1': 'sha256:c2eb783dab99c64a0a125b1940c58f2f6db23b94192fbaeb2ae190343e9fb8ce'}
+PINNED_DIGESTS = {'1': 'sha256:c2eb783dab99c64a0a125b1940c58f2f6db23b94192fbaeb2ae190343e9fb8ce',
+                  '2': 'sha256:2011b4bd70ce6ebacd1a0096e29f3585595f180274f28366d84a3eab461f8109'}
 
 
 class TemplateVersion(unittest.TestCase):

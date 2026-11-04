@@ -28,6 +28,11 @@
       "enum": ["pending", "accepted", "modified", "not_applicable"]
     },
     "rule": {"enum": ["deny", "allow"]},
+    "impact": {
+      "description": "High-impact categories (〈定義：高影響類別〉, TK-REQ-012) the item involves, in the order of the definition; [] for none. Worked out by the toolkit, not part of the item's text: a change keeps its version. Every list the toolkit writes has it; a list written before it existed is still read, and its update fills it in.",
+      "type": "array", "uniqueItems": true,
+      "items": {"enum": ["admin", "cross_tenant", "confidential", "payment", "third_party_callback"]}
+    },
     "review": {
       "type": "object",
       "required": ["by", "at", "reason", "basis", "modified_rule", "allowed_tests", "expiry"],
@@ -72,6 +77,7 @@
       "required": ["out_of_scope"],
       "properties": {
         "out_of_scope": {"type": "boolean"},
+        "impact": {"$ref": "#/$defs/impact"},
         "history": {"type": "array", "items": {"$ref": "#/$defs/version_fields", "unevaluatedProperties": false},
                     "description": "Earlier versions of the item, oldest first (TK-REQ-004)."}
       }

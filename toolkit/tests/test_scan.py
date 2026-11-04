@@ -88,7 +88,7 @@ def reviewed_list(source, accepted=ACCEPTED, s1=(S1_PUBLIC,), resources=None):
     """A confirmation list in the control zone where the owner accepted the given items (test only:
     in a real run a person edits the list). Returns the ScanManifest reference {path, digest}."""
     from toolkit import confirmation, policy
-    doc = confirmation.generate(policy.load_template(), resources or [r['name'] for r in SCOPE['resources']], list(s1))
+    doc = confirmation.generate(policy.load_template(), resources or SCOPE['resources'], list(s1))
     for item in doc['items']:
         if item['item_id'] in accepted:
             item['status'] = 'accepted'
@@ -922,7 +922,7 @@ class ConfirmationListInScan(unittest.TestCase):
             'S1': {'pending': 0, 'accepted': 1, 'modified': 0, 'not_applicable': 0},
             'S2': {'pending': 3, 'accepted': 1, 'modified': 1, 'not_applicable': 1}})
         self.assertEqual(listed['out_of_scope'], 0)
-        self.assertEqual(listed['single_approval'], [TENANT_ITEM, ANON_ITEM])
+        self.assertEqual(listed['single_approval'], [ANON_ITEM, TENANT_ITEM])  # in the list's order
         self.assertEqual(listed['s2_template'], doc['s2_template'])
         self.assertEqual(listed['list_version'], doc['list_version'])
 
@@ -982,6 +982,35 @@ class ConfirmationListInScan(unittest.TestCase):
         self.blocked(m)
         self.assertTrue(path.exists())
 
+    def test_an_s1_entry_may_list_high_impact_categories_and_unknown_ones_are_refused(self):
+        # TK-REQ-012: requirements[].impact is optional; given, it is checked like a resource's.
+        path = Path(tempfile.mkdtemp(dir=CONTROL)) / 'list.json'
+        m = copy.deepcopy(self.m)
+        m['confirmation_list'] = {'path': str(path)}
+        for impact, problem in ((['tenant'], "requirements/0.impact: unknown high-impact category 'tenant'"),
+                                ('payment', 'requirements/0.impact must be a list'),
+                                (None, 'requirements/0.impact must be a list'),  # optional means left out, not null
+                                (['payment', 'payment'], "requirements/0.impact lists 'payment' twice")):
+            with self.subTest(impact=impact):
+                m['requirements'][0]['impact'] = impact
+                self.assertIn(problem, self.blocked(m)['status_reason'])
+                self.assertFalse(path.exists())
+        m['requirements'][0]['impact'] = ['payment']
+        self.blocked(m)
+        items = {i['item_id']: i for i in json.loads(path.read_text(encoding='utf-8'))['items']}
+        self.assertEqual(items[PUBLIC_ITEM]['impact'], ['payment'])
+        self.assertEqual(items[OWNER_ITEM]['impact'], ['confidential'])  # from scope.resources
+
+    def test_the_report_lists_requirements_in_the_plan_order_not_the_lists(self):
+        # Only the confirmation list file is sorted (〈定義：確認清單〉 排序); the report keeps the test plan's order.
+        path = Path(tempfile.mkdtemp(dir=CONTROL)) / 'list.json'
+        self.m['confirmation_list'] = {'path': str(path)}
+        rep = self.blocked(self.m)
+        planned = list(dict.fromkeys(t['requirement_id'] for t in self.m['tests']))
+        listed = [i['item_id'] for i in json.loads(path.read_text(encoding='utf-8'))['items'] if i['item_id'] in planned]
+        self.assertNotEqual(listed, planned)  # the two orders differ, so the check below means something
+        self.assertEqual([r['id'] for r in rep['requirements']], planned)
+
     def test_tests_on_incomplete_or_not_applicable_items_are_blocked(self):
         from toolkit import confirmation
         ref = self.m['confirmation_list']
@@ -1012,7 +1041,7 @@ class ConfirmationListInScan(unittest.TestCase):
 
     def test_a_list_from_an_older_scope_is_updated_and_its_new_items_are_pending(self):
         from toolkit import confirmation
-        self.m['confirmation_list'] = reviewed_list(self.tmp.name, resources=['documents'])
+        self.m['confirmation_list'] = reviewed_list(self.tmp.name, resources=[{'name': 'documents', 'impact': ['confidential']}])
         before = json.loads(Path(self.m['confirmation_list']['path']).read_text(encoding='utf-8'))
         rep = scan.run(self.m).report
         after = json.loads(Path(self.m['confirmation_list']['path']).read_text(encoding='utf-8'))

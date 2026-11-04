@@ -427,8 +427,8 @@ S1_FIELDS = ('id', 'statement', 'resources', 'rule')
 
 def _s1_problems(manifest):
     """S1 entries are the owner's spec as input (〈定義：確認清單〉): id, statement, resources and an
-    allow/deny rule, and no confirmation, which belongs in the confirmation list. An id has no "@",
-    so it never equals an S2 item id."""
+    allow/deny rule, optionally the high-impact categories it involves, and no confirmation, which
+    belongs in the confirmation list. An id has no "@", so it never equals an S2 item id."""
     problems = []
     for i, entry in enumerate(manifest.get('requirements') or []):
         if not isinstance(entry, dict):
@@ -440,6 +440,8 @@ def _s1_problems(manifest):
                             f"ids (clause@resource), which an S1 entry id could otherwise take")
         if entry.get('rule') and entry['rule'] not in policy.RULES:
             problems.append(f'requirements/{i}.rule must be one of {policy.RULES}')
+        if 'impact' in entry:  # optional (TK-REQ-012); given, it is a list of high-impact categories
+            problems += policy.impact_problems(entry['impact'], f'requirements/{i}', required=False)
         if 'confirmation' in entry:
             problems.append(f'requirements/{i}.confirmation: S1 entries carry no confirmation; it is given '
                             f'in the confirmation list')
@@ -455,7 +457,7 @@ def _load_confirmation_list(manifest):
     if not path:
         return None, ('confirmation_list.path (獨立安全需求) is missing: there is no control-zone location to read '
                 'the confirmation list from or hand it over to')
-    source, resources, s1 = manifest['target']['project'], _resource_names(manifest), manifest.get('requirements') or []
+    source, resources, s1 = manifest['target']['project'], manifest['scope']['resources'], manifest.get('requirements') or []
     try:
         template = policy.load_template()
     except (OSError, ValueError, policy.PolicyTemplateInvalid) as e:
@@ -574,22 +576,8 @@ def _resource_problems(resources):
         if name in seen:
             problems.append(f'{where} is listed twice')
         seen.add(name)
-        impact = r.get('impact')
-        if impact is None:
-            problems.append(f'{where}.impact (高影響類別) is missing: list the categories it involves, [] for none')
-        elif not isinstance(impact, list):
-            problems.append(f'{where}.impact must be a list of high-impact categories, [] for none, got {impact!r}')
-        else:
-            problems += [f'{where}.impact: unknown high-impact category {c!r}, not one of {policy.IMPACT_CATEGORIES}'
-                         for c in impact if c not in policy.IMPACT_CATEGORIES]
-            problems += [f'{where}.impact lists {c!r} twice' for c in dict.fromkeys(impact)
-                         if c in policy.IMPACT_CATEGORIES and impact.count(c) > 1]
+        problems += policy.impact_problems(r.get('impact'), where)
     return problems
-
-
-def _resource_names(manifest):
-    """The names of the resources under test, as the confirmation list uses them."""
-    return [r['name'] for r in manifest['scope']['resources']]
 
 
 TEMPLATE_OVERRIDES = ('policy_template', 'policy_template_path')

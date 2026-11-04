@@ -22,21 +22,37 @@ def _empty_review():
     return {name: [] if name == 'allowed_tests' else None for name in REVIEW_FIELDS}
 
 
+def _impact(*lists):
+    """The union of high-impact category lists, in the order of 〈定義：高影響類別〉."""
+    found = {c for codes in lists for c in codes}
+    return [c for c in policy.IMPACT_CATEGORIES if c in found]
+
+
 def _s2_items(template, resources):
-    return [{'item_id': s2_item_id(c['id'], r), 'source': 'S2', 'clause_id': c['id'], 'resource': r,
-             'statement': c['statement'], 'rule': c['rule']}
+    return [{'item_id': s2_item_id(c['id'], r['name']), 'source': 'S2', 'clause_id': c['id'], 'resource': r['name'],
+             'statement': c['statement'], 'rule': c['rule'], 'impact': _impact(c['impact'], r['impact'])}
             for c in template['clauses'] for r in resources]
 
 
 def _s1_items(entries, resources):
-    """S1 entries with at least one of their resources in scope; the others are out of scope."""
+    """S1 entries with at least one of their resources in scope; the others are out of scope. An item's
+    categories are its entry's optional ones and those of its resources in scope."""
+    impact = {r['name']: r['impact'] for r in resources}
     return [{'item_id': e['id'], 'source': 'S1', 'resources': list(e['resources']),
-             'statement': e['statement'], 'rule': e['rule']}
-            for e in entries if set(e['resources']) & set(resources)]
+             'statement': e['statement'], 'rule': e['rule'],
+             'impact': _impact(e.get('impact', []), *(impact[r] for r in e['resources'] if r in impact))}
+            for e in entries if set(e['resources']) & set(impact)]
 
 
 def _new(item, out_of_scope=False):
     return {**item, 'version': 1, 'status': PENDING, 'review': _empty_review(), 'out_of_scope': out_of_scope}
+
+
+def _ordered(items):
+    """The list's order (〈定義：確認清單〉 排序): items in scope with a high-impact category, then the other
+    items in scope, then items out of scope; by item_id within each. Neither review state nor the tests
+    resting on an item count, so the order changes only with the scope or the categories."""
+    return sorted(items, key=lambda i: (2 if i['out_of_scope'] else 0 if i.get('impact') else 1, i['item_id']))
 
 
 def _template_ref(template):
@@ -45,13 +61,16 @@ def _template_ref(template):
 
 
 def generate(template, resources, s1_entries):
-    """A new confirmation list: every item pending, review fields empty, version 1 (TK-REQ-001)."""
+    """A new confirmation list: every item pending, review fields empty, version 1 (TK-REQ-001).
+
+    resources are the resources under test as scope.resources gives them, {name, impact}.
+    """
     in_scope = _s2_items(template, resources) + _s1_items(s1_entries, resources)
     produced = {i['item_id'] for i in in_scope}
-    out = [i for i in _s1_items(s1_entries, [r for e in s1_entries for r in e['resources']])
-           if i['item_id'] not in produced]
+    unknown = [{'name': r, 'impact': []} for e in s1_entries for r in e['resources']]  # not under test: no categories
+    out = [i for i in _s1_items(s1_entries, unknown) if i['item_id'] not in produced]
     return {'schema_version': '1', 'list_version': 1, 's2_template': _template_ref(template),
-            'items': [_new(i) for i in in_scope] + [_new(i, out_of_scope=True) for i in out]}
+            'items': _ordered([_new(i) for i in in_scope] + [_new(i, out_of_scope=True) for i in out])}
 
 
 CONTENT = ('statement', 'rule', 'resources')  # what makes an item's text; a change means a new version
@@ -69,23 +88,29 @@ def update(existing, template, resources, s1_entries):
     in its history (TK-REQ-004); an item no longer produced (its resource left the scope, its S2 clause
     left the template, or its S1 entry is no longer given) is marked out of scope and keeps its review
     state and version; produced again, it is back in scope, kept or given a new version as above.
-    list_version goes up only when something changed.
+    The whole list is sorted again; list_version goes up only when something other than the order
+    changed. An item's high-impact categories are worked
+    out again; they are not part of its text, so a change keeps its version and review state. An item
+    out of scope keeps its last ones: its resources under test, and with them their categories, are gone.
     """
     fresh = {i['item_id']: i for i in _s2_items(template, resources) + _s1_items(s1_entries, resources)}
+    clauses = {c['id']: c['impact'] for c in template['clauses']}
+    entries = {e['id']: e.get('impact', []) for e in s1_entries}
     items = []
     for old in existing['items']:
         new = fresh.pop(old['item_id'], None)
-        if new is None:
-            items.append({**old, 'out_of_scope': True})
+        if new is None:  # keeps its last categories; a list written before items had them gets those still declared
+            declared = clauses.get(old['clause_id'], []) if old['source'] == 'S2' else entries.get(old['item_id'], [])
+            items.append({'impact': _impact(declared), **old, 'out_of_scope': True})
         elif _content(new) == _content(old):
-            items.append({**old, 'out_of_scope': False})
+            items.append({**old, 'impact': new['impact'], 'out_of_scope': False})
         else:
-            previous = {k: v for k, v in old.items() if k not in ('history', 'out_of_scope')}
+            previous = {k: v for k, v in old.items() if k not in ('history', 'out_of_scope', 'impact')}
             items.append({**new, 'version': old['version'] + 1, 'status': PENDING, 'review': _empty_review(),
                           'out_of_scope': False, 'history': old.get('history', []) + [previous]})
     items += [_new(i) for i in fresh.values()]
-    doc = {**existing, 's2_template': _template_ref(template), 'items': items}
-    if doc != existing:
+    doc = {**existing, 's2_template': _template_ref(template), 'items': _ordered(items)}
+    if doc != {**existing, 'items': _ordered(existing['items'])}:  # a new order alone is no change
         doc['list_version'] = existing['list_version'] + 1
     return doc
 

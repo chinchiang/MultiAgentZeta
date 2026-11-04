@@ -31,7 +31,8 @@ def load_template():
 
 def validate(template):
     """Raise PolicyTemplateInvalid naming the first problem (TK-REQ-008): a malformed structure or
-    missing field, a duplicate clause id, a rule other than deny/allow, or self-acceptance that does
+    missing field, a clause impact that is not a list of high-impact categories, a duplicate clause id,
+    a rule other than deny/allow, or self-acceptance that does
     not cover the template: a case naming an unknown clause, a repeated case_id, a case without a
     passed/failed result for every sample version, or a clause without a case."""
     def need(ok, message):
@@ -48,6 +49,8 @@ def validate(template):
         for field in CLAUSE_FIELDS:
             need(clause.get(field), f'clauses/{i}: field {field!r} is missing')
         need(clause['rule'] in RULES, f'clauses/{i}: rule must be one of {RULES}, got {clause["rule"]!r}')
+        for problem in impact_problems(clause.get('impact'), f'clauses/{i}'):
+            need(False, problem)
         need(clause['id'] not in seen, f'clauses/{i}: clause id {clause["id"]!r} is used twice')
         seen.add(clause['id'])
     acceptance = template['self_acceptance']
@@ -71,6 +74,20 @@ def validate(template):
                  f'got {case["expected"].get(version)!r}')
     uncovered = seen - {c['clause'] for c in cases}
     need(not uncovered, f'self_acceptance has no case for clause(s) {sorted(uncovered)}')
+
+
+def impact_problems(impact, where, required=True):
+    """Why impact, the field at `where`, is not a list of 〈定義：高影響類別〉 codes (TK-REQ-012), [] for
+    none: missing where required (never taken as none), not a list, an unknown code, a code listed
+    twice. Where it is optional, leaving it out is fine and the caller does not ask; null is not a list."""
+    if impact is None and required:
+        return [f'{where}.impact (高影響類別) is missing: list the categories it involves, [] for none']
+    if not isinstance(impact, list):
+        return [f'{where}.impact must be a list of high-impact categories, [] for none, got {impact!r}']
+    return ([f'{where}.impact: unknown high-impact category {c!r}, not one of {IMPACT_CATEGORIES}'
+             for c in impact if c not in IMPACT_CATEGORIES]
+            + [f'{where}.impact lists {c!r} twice' for c in dict.fromkeys(impact)
+               if c in IMPACT_CATEGORIES and impact.count(c) > 1])
 
 
 def template_digest(template):

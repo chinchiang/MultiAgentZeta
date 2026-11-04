@@ -1,7 +1,7 @@
 {
   "_說明": "S2 預設政策範本（〈定義：需求來源〉、TK-REQ-008）。只由工具包提供；內容改變時須升 version，並通過 self_acceptance 的樣本。",
   "policy_template_id": "nextjs-supabase-object-authz",
-  "version": "1",
+  "version": "2",
   "stack": {
     "framework": "nextjs",
     "baas": "supabase"
@@ -11,19 +11,22 @@
       "id": "S2-OWNER-ONLY",
       "statement": "資源預設僅擁有者可讀寫。",
       "rule": "deny",
-      "actors": "same-tenant non-owner"
+      "actors": "same-tenant non-owner",
+      "impact": []
     },
     {
       "id": "S2-TENANT-ISOLATION",
       "statement": "租戶間預設完全隔離。",
       "rule": "deny",
-      "actors": "user of another tenant"
+      "actors": "user of another tenant",
+      "impact": ["cross_tenant"]
     },
     {
       "id": "S2-ANON-NO-ACCESS",
       "statement": "未登入者預設不可讀寫。",
       "rule": "deny",
-      "actors": "anonymous"
+      "actors": "anonymous",
+      "impact": []
     }
   ],
   "self_acceptance": {
