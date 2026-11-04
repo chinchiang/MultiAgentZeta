@@ -6,6 +6,7 @@
   "source_id": "toolkit.scan",
   "commit": "a89be51",
   "status": "partial",
+  "source_changes": [],
   "manifest": {
     "id": "manifest-object-authz-vulnerable",
     "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"

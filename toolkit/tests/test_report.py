@@ -232,6 +232,38 @@ class Validate(unittest.TestCase):
                     self.assertTrue(any(label in p and field in p for p in problems), problems)
 
 
+class Authorization(unittest.TestCase):
+    """〈定義：測試授權紀錄〉 in the report (TK-ENV-001, TK-ENV-002, TK-ENV-006)."""
+
+    def test_the_example_report_shows_its_authorization_and_no_source_changes(self):
+        doc = valid_report()
+        self.assertIs(doc['authorization']['identity_verified'], False)
+        self.assertEqual(doc['source_changes'], [])
+        self.assertEqual(report.validate(doc), [])
+
+    def test_names_in_the_authorization_are_never_reported_as_verified(self):
+        doc = valid_report()
+        doc['authorization']['identity_verified'] = True
+        self.assertNotEqual(report.validate(doc), [])
+
+    def test_a_source_change_is_not_reported_by_v01(self):
+        doc = valid_report()
+        doc['source_changes'] = [{'path': 'src/auth.ts', 'reason': 'disable MFA'}]
+        self.assertNotEqual(report.validate(doc), [])
+        del doc['source_changes']
+        self.assertNotEqual(report.validate(doc), [])
+
+    def test_a_record_names_only_an_extra_approval_of_the_authorization(self):
+        doc = valid_report()
+        doc['execution_records'][0]['approval_id'] = 'APR-001'
+        self.assertEqual(report.validate(doc), [])
+        doc['execution_records'][0]['approval_id'] = 'APR-999'
+        self.assertIn("execution_records/0: approval_id 'APR-999' is not an extra approval of the authorization",
+                      '; '.join(report.validate(doc)))
+        del doc['authorization']
+        self.assertTrue(any('execution_records/0: approval_id' in p for p in report.validate(doc)), report.validate(doc))
+
+
 class RenderMarkdown(unittest.TestCase):
     """TK-EVD-003: Markdown for human review is generated from the JSON report."""
 
@@ -274,6 +306,19 @@ class RenderMarkdown(unittest.TestCase):
             'by': 'app-owner', 'at': '2026-11-01T09:00:00Z', 'version': 1, 'allowed_tests': ['SHARED-READ-other-tenant']}))
         self.assertIn('到期 （未填）', md)
         self.assertNotIn('None', md)
+
+    def test_the_authorization_is_shown_with_its_unverified_names_and_the_approvals_used(self):
+        doc = valid_report()
+        doc['execution_records'][0]['approval_id'] = 'APR-001'
+        md = report.render_markdown(doc)
+        self.assertIn('## 測試授權', md)
+        self.assertIn('`object-authz/vulnerable`（E1）', md)
+        self.assertIn('2026-11-01T00:00:00Z 至 2026-12-01T00:00:00Z', md)
+        self.assertIn('身分未經驗證', md)
+        self.assertIn('`APR-001`', md)
+        self.assertIn('security-lead', md)
+        self.assertIn('`AUTHZ-001-same-tenant`', md.split('## 測試授權')[1].split('\n## ')[0])
+        self.assertIn('測試用原始碼變更：無', md)
 
     def test_an_item_out_of_scope_is_marked(self):
         self.assertIn('範圍外', report.render_markdown(self.listed_item(out_of_scope=True)))

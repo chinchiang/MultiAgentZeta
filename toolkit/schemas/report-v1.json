@@ -23,7 +23,7 @@
       "then": {"properties": {"execution_records": {"items": {"properties": {"result": {"enum": ["passed", "failed"]}}}}}}
     }
   ],
-  "required": ["status", "stages", "execution_records", "findings", "coverage"],
+  "required": ["status", "stages", "execution_records", "findings", "coverage", "source_changes"],
   "properties": {
     "stages": {
       "description": "TK-RUN-001, 〈定義：工作階段〉: preflight 前置檢查, static_analysis 靜態與架構分析, model_review 模型審查, threat_planning 威脅與測試規劃, dynamic_execution 動態執行, judgement_report 判定與報告. validate() also requires every stage to be listed.",
@@ -68,6 +68,39 @@
           }
         }
       }
+    },
+    "authorization": {
+      "description": "〈定義：測試授權紀錄〉 the run was authorized by: its control-zone reference and content. The names in it are declared, not verified (identity_verified false, TK-HRV-004).",
+      "type": "object",
+      "required": ["path", "digest", "targets", "environment", "data_scope", "valid_from", "valid_until", "operations",
+                   "roles", "issued_by", "issued_at", "extra_approvals", "identity_verified"],
+      "additionalProperties": false,
+      "properties": {
+        "path": {"$ref": "#/$defs/text"},
+        "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "targets": {"type": "array", "items": {"$ref": "#/$defs/text"}},
+        "environment": {"$ref": "#/$defs/text"},
+        "data_scope": {"$ref": "#/$defs/text"},
+        "valid_from": {"$ref": "#/$defs/text"},
+        "valid_until": {"$ref": "#/$defs/text"},
+        "operations": {"type": "array", "items": {"$ref": "#/$defs/authorized_operation"}},
+        "roles": {"type": "object", "required": ["app_owner", "operator"], "additionalProperties": false,
+                  "properties": {"app_owner": {"$ref": "#/$defs/text"}, "operator": {"$ref": "#/$defs/text"}}},
+        "issued_by": {"$ref": "#/$defs/text"},
+        "issued_at": {"$ref": "#/$defs/text"},
+        "extra_approvals": {"type": "array", "items": {
+          "type": "object", "required": ["approval_id", "operations", "by", "at", "reason", "valid_until"],
+          "additionalProperties": false,
+          "properties": {"approval_id": {"$ref": "#/$defs/text"},
+                         "operations": {"type": "array", "items": {"$ref": "#/$defs/authorized_operation"}},
+                         "by": {"$ref": "#/$defs/text"}, "at": {"$ref": "#/$defs/text"},
+                         "reason": {"$ref": "#/$defs/text"}, "valid_until": {"$ref": "#/$defs/text"}}}},
+        "identity_verified": {"const": false}
+      }
+    },
+    "source_changes": {
+      "description": "TK-ENV-006: changes made to the source under test for the run. v0.1 makes none: the source is the one source_digest pins.",
+      "type": "array", "maxItems": 0
     },
     "confirmation_list": {
       "description": "〈定義：確認清單〉: the list this run used or handed over, in the control zone. digest is the file as it is after the run: a list the run generated or updated (updated true) needs the owner's review and a new ScanManifest reference.",
@@ -135,6 +168,11 @@
           "anyOf": [{"$ref": "#/$defs/text"}, {"type": "null"}]
         }
       }
+    },
+    "authorized_operation": {
+      "type": "object", "required": ["resource", "methods"], "additionalProperties": false,
+      "properties": {"resource": {"$ref": "#/$defs/text"},
+                     "methods": {"type": "array", "items": {"enum": ["GET", "POST", "PATCH", "DELETE"]}}}
     },
     "execution_record": {
       "allOf": [
@@ -206,6 +244,10 @@
           "enum": ["denial", "allowed"]
         },
         "evidence": {"type": "array", "items": {"$ref": "#/$defs/evidence"}},
+        "approval_id": {
+          "description": "〈定義：測試授權紀錄〉: the extra approval that let the test past the authorization; it is one of authorization.extra_approvals (TK-ENV-001).",
+          "$ref": "#/$defs/text"
+        },
         "fault": {
           "description": "TK-VAL-001: the fault a self-validation run injected to make the case undeterminable.",
           "enum": ["session-revoked", "observer-unavailable", "observer-timeout", "api-unreachable", "api-key-missing"]

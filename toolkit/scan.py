@@ -17,7 +17,7 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from toolkit import confirmation, e1, observer, policy, report
+from toolkit import authorization, confirmation, e1, observer, policy, report
 
 SOURCE_ID = 'toolkit.scan'
 FINGERPRINT_VERSION = 'fp-authz-v1'
@@ -59,6 +59,20 @@ class _Listed:
     def item(self, test):
         """The item a planned test rests on, or None."""
         return report.listed_item(self.items, test)
+
+
+@dataclass
+class _Granted:
+    """〈定義：測試授權紀錄〉 as read in this run, and the extra approval each test runs under. Empty until
+    the record is read."""
+    doc: dict | None = None
+    ref: dict | None = None
+    approvals: dict = field(default_factory=dict)  # test_id -> approval_id
+
+    def report(self):
+        """The authorization as the report shows it; the names in it are declared, not verified (TK-HRV-004)."""
+        shown = {k: v for k, v in self.doc.items() if k != 'schema_version'}
+        return {**self.ref, **shown, 'extra_approvals': self.doc.get('extra_approvals', []), 'identity_verified': False}
 
 
 API_KEY_FORMATS = ('anon-jwt', 'publishable')
@@ -391,16 +405,37 @@ def _identity_problem(test, identities):
     return None
 
 
-def _test_problem(test, items, plan, identities, restorable=True):
-    """(result, reason) for a test that cannot run, or None."""
+def _test_problem(test, items, plan, identities, restorable, authorize):
+    """((result, reason) for a test that cannot run, or None; the approval_id it would run under, or None).
+    authorize(test) gives (approval_id, reason) of 〈定義：測試授權紀錄〉; a record shows the approval only
+    when its test ran."""
     reason = _plan_problem(test) or _item_problem(test, items, plan)
     if reason:
-        return 'blocked', reason
+        return ('blocked', reason), None
+    approval, reason = authorize(test)
+    if reason:
+        return ('blocked', reason), None
     if not restorable and DENIAL_TEMPLATES.get(test['template_id'], {}).get('writes'):
-        return 'blocked', ('the BuildRecipe declares no reset (snapshot_reset.reset_scope "none"): '
-                           'a write case cannot be restored safely and is not run (復原方式)')
+        # An extra approval never lets a test that cannot be restored run (〈定義：測試授權紀錄〉).
+        return ('blocked', ('the BuildRecipe declares no reset (snapshot_reset.reset_scope "none"): '
+                            'a write case cannot be restored safely and is not run (復原方式)')), approval
     reason = _identity_problem(test, identities)
-    return ('unsupported', reason) if reason else None
+    return (('unsupported', reason) if reason else None), approval
+
+
+def _authorizer(manifest, granted, now):
+    """authorize(test) for _test_problem (〈定義：測試授權紀錄〉): the test's method must be in the scope of the
+    run, which no approval widens; then its resource × method must be in the authorization or covered
+    by an extra approval (TK-ENV-001)."""
+    allowed = manifest['scope']['allowed_operations']
+
+    def authorize(test):
+        resource, method = test_operation(test)
+        if method not in allowed:
+            return None, (f'{method} is not in scope.allowed_operations (受測範圍): the test is outside the scope of '
+                          f'this run, which no approval widens; the test is not run')
+        return authorization.operation_problem(granted.doc, resource, method, now)
+    return authorize
 
 
 def _identity_gaps(manifest, identities):
@@ -410,6 +445,18 @@ def _identity_gaps(manifest, identities):
     names = sorted({ref for t in manifest['tests'] for ref in (t.get('actor_ref'), t.get('owner_ref'))
                     if ref and ref not in identities})
     return [{'scope': f'identity:{n}', 'reason': 'no such identity in the BuildRecipe (測試身分)'} for n in names]
+
+
+DENIAL_RESOURCE = 'documents'  # the table every denial-case template works on (RESOURCE_ROWS, CONTROL_ROWS, DOCUMENTS)
+
+
+def test_operation(test):
+    """(resource, HTTP method) of a test, from its template only (〈定義：測試授權紀錄〉): a test cannot name
+    what it is authorized for. The template must be allow-listed."""
+    template = test['template_id']
+    if template in DENIAL_TEMPLATES:
+        return DENIAL_RESOURCE, DENIAL_TEMPLATES[template]['method']
+    return ALLOWED_TEMPLATES[template]['table'], ALLOWED_TEMPLATES[template]['method']
 
 
 def _case_kind(test):
@@ -561,6 +608,10 @@ def _input_problems(manifest):
     else:
         problems += [f'scope.{p} (受測範圍) is missing' for p in SCOPE_PARTS if not scope.get(p)]
         problems += _resource_problems(scope.get('resources') or [])
+        ops = scope.get('allowed_operations')
+        if ops and (not isinstance(ops, list) or any(o not in authorization.METHODS for o in ops)):
+            problems.append(f'scope.allowed_operations (受測範圍) must list HTTP methods of {list(authorization.METHODS)}')
+    problems += _authorization_ref_problems(manifest)
     limits = manifest.get('limits')
     if not isinstance(limits, dict):
         problems.append('limits (執行限制) are missing: no unlimited default is used')
@@ -571,6 +622,31 @@ def _input_problems(manifest):
             elif not ok(limits[name]):
                 problems.append(f'limits.{name} must be {expected}, got {limits[name]!r}')
     return problems
+
+
+def _authorization_ref_problems(manifest):
+    """〈定義：必要輸入〉 測試授權: the ScanManifest references a control-zone record by path and digest and
+    never carries the record itself, which whoever writes the ScanManifest could then grant (TK-ENV-002)."""
+    if 'authorization' not in manifest:
+        return ['authorization (測試授權) is missing: the run is not started']
+    ref = manifest['authorization']
+    if not (isinstance(ref, dict) and set(ref) == {'path', 'digest'} and all(isinstance(v, str) and v for v in ref.values())):
+        return ['authorization (測試授權) must reference a control-zone record by path and digest, '
+                'never carry the record or an approval itself']
+    return []
+
+
+def _load_authorization(manifest, now):
+    """(_Granted, None) for the referenced record covering a run starting at now, or (None, problem)."""
+    ref = manifest['authorization']
+    try:
+        doc = authorization.read(ref['path'], ref['digest'], manifest['target']['project'])
+    except authorization.AuthorizationUnusable as e:
+        return None, f'test authorization unusable: {e}'
+    problem = authorization.period_problem(doc, now)
+    if problem:
+        return None, f'test authorization does not cover this run: {problem}'
+    return _Granted(doc, dict(ref)), None
 
 
 def _resource_problems(resources):
@@ -627,23 +703,35 @@ def run(manifest):
     if pinned != actual:
         return _blocked(manifest, records, listed, f'source_digest of the ScanManifest ({pinned}) does not match '
                                            f'the project ({actual}); nothing was started', stage='preflight')
-    loaded, problem = _load_confirmation_list(manifest, run_start)
+    granted, problem = _load_authorization(manifest, run_start)
     if problem:
         return _blocked(manifest, records, listed, f'nothing was started: {problem}', stage='preflight')
+    loaded, problem = _load_confirmation_list(manifest, run_start)
+    if problem:
+        return _blocked(manifest, records, listed, f'nothing was started: {problem}', stage='preflight', granted=granted)
     listed = loaded
-    recipe, _ = e1.load_recipe(project)
+    recipe, _ = e1.load_recipe(project)  # without one, e1.prepare blocks the run at the BuildRecipe step
+    problem = recipe and authorization.target_problem(granted.doc, recipe['sample'], e1.MODE)
+    if problem:
+        return _blocked(manifest, records, listed, f'nothing was started: test authorization does not cover this '
+                                                   f'run: {problem}', stage='preflight', granted=granted)
     identities = {i['name'] for i in recipe['auth']['identities']} if recipe else None
     restorable = not (recipe and recipe['snapshot_reset'].get('reset_scope') == 'none')
-    plan = _plan(manifest)
-    problems = {t['test_id']: _test_problem(t, listed.items, plan, identities, restorable) for t in manifest['tests']}
+    plan, authorize = _plan(manifest), _authorizer(manifest, granted, run_start)
+    problems = {}
+    for t in manifest['tests']:
+        problems[t['test_id']], approval = _test_problem(t, listed.items, plan, identities, restorable, authorize)
+        if approval:
+            granted.approvals[t['test_id']] = approval
     gaps = _identity_gaps(manifest, identities)
     if all(problems.values()):
         return _blocked(manifest, records, listed, 'no test in the ScanManifest can run; nothing was started',
-                        per_test=problems, stage='preflight', gaps=gaps)
+                        per_test=problems, stage='preflight', gaps=gaps, granted=granted)
     prepared = e1.prepare(project)
     if isinstance(prepared, e1.Blocked):
         return _blocked(manifest, records, listed, f'environment blocked at BuildRecipe step {prepared.step}: '
-                                           f'{prepared.reason}', per_test=problems, stage='dynamic_execution')
+                                           f'{prepared.reason}', per_test=problems, stage='dynamic_execution',
+                        granted=granted)
     executions, findings = [], []
     stopped = None  # reason the remaining tests cannot run
     try:
@@ -675,7 +763,8 @@ def run(manifest):
             finally:
                 if undo:
                     undo()
-            ex = _execution(records, listed, test, started, result, error)
+            ex = _execution(records, listed, test, started, result, error,
+                            approval_id=granted.approvals.get(test['test_id']))  # it ran under this approval
             if test.get('fault'):
                 ex['fault'] = test['fault']
             ex['case_kind'] = _case_kind(test)
@@ -705,7 +794,7 @@ def run(manifest):
                    reason='' if definite else 'some tests have no definite result',
                    stages=_stages(preflight={'status': 'completed'}, dynamic_execution=dynamic),
                    environment={'mode': prepared.profile['mode'], 'profile_digest': _digest(prepared.profile)},
-                   matrix=_authorization_matrix(prepared))
+                   matrix=_authorization_matrix(prepared), granted=granted)
 
 
 def _item_version(listed, test):
@@ -714,12 +803,15 @@ def _item_version(listed, test):
     return item['version'] if item else None
 
 
-def _execution(records, listed, test, started, result, error=None):
-    return records.new('exec', test_id=test['test_id'], template_id=test['template_id'],
-                       requirement_id=test['requirement_id'], requirement_version=_item_version(listed, test),
-                       actor_ref=test['actor_ref'],
-                       resource_ref=test['resource_ref'], started_at=started, ended_at=_now(),
-                       result=result, error=error, evidence=[])
+def _execution(records, listed, test, started, result, error=None, approval_id=None):
+    ex = records.new('exec', test_id=test['test_id'], template_id=test['template_id'],
+                     requirement_id=test['requirement_id'], requirement_version=_item_version(listed, test),
+                     actor_ref=test['actor_ref'],
+                     resource_ref=test['resource_ref'], started_at=started, ended_at=_now(),
+                     result=result, error=error, evidence=[])
+    if approval_id:  # the extra approval a test that ran was let past 〈定義：測試授權紀錄〉 by (TK-ENV-001)
+        ex['approval_id'] = approval_id
+    return ex
 
 
 def _handover_note(listed):
@@ -751,7 +843,7 @@ def _confirmation(item):
     return shown
 
 
-def _blocked(manifest, records, listed, reason, per_test=None, stage='preflight', gaps=()):
+def _blocked(manifest, records, listed, reason, per_test=None, stage='preflight', gaps=(), granted=None):
     """Every planned test blocked at `stage`; later stages do not run (〈定義：工作階段〉)."""
     now = _now()
     per_test = per_test or {}
@@ -763,7 +855,7 @@ def _blocked(manifest, records, listed, reason, per_test=None, stage='preflight'
     else:
         stages = _stages(preflight={'status': 'completed'}, dynamic_execution={'status': 'blocked', 'reason': reason})
     return _finish(manifest, records, listed, executions, [], status='blocked', reason=reason, stages=stages, gaps=gaps,
-                   environment=None, matrix=[])
+                   environment=None, matrix=[], granted=granted)
 
 
 NOT_IMPLEMENTED = {'status': 'not_run', 'reason': 'stage not implemented in this toolkit version'}
@@ -789,7 +881,8 @@ UNSUPPORTED_SCOPES = [
 ]
 
 
-def _finish(manifest, records, listed, executions, findings, status, reason, stages, environment, matrix, gaps=()):
+def _finish(manifest, records, listed, executions, findings, status, reason, stages, environment, matrix, gaps=(),
+            granted=None):
     counts = {k: sum(e['result'] == k for e in executions)
               for k in ('passed', 'failed', 'blocked', 'untested', 'unsupported')}
     coverage = records.new('coverage', inventory_source='fixed test plan in the ScanManifest (tracer bullet)',
@@ -802,13 +895,16 @@ def _finish(manifest, records, listed, executions, findings, status, reason, sta
            'source_id': SOURCE_ID, 'commit': records.commit, 'status': status,
            'manifest': {'id': manifest['id'], 'digest': _digest(manifest)},
            'stages': stages, 'requirements': _requirements(manifest, listed), 'authorization_matrix': matrix,
-           'execution_records': executions, 'findings': findings, 'coverage': coverage}
+           'execution_records': executions, 'findings': findings, 'coverage': coverage,
+           'source_changes': []}  # TK-ENV-006: the source under test is the pinned one (source_digest); v0.1 changes none
     if reason:  # status_reason says why the run is not completed, and what the owner has to do about it
         doc['status_reason'] = reason + _handover_note(listed)
     if environment:
         doc['environment'] = environment
     if listed.ref:
         doc['confirmation_list'] = dict(listed.ref)
+    if granted:
+        doc['authorization'] = granted.report()
     problems = report.validate(doc)
     if problems:
         raise RuntimeError('the toolkit produced an invalid report: ' + '; '.join(problems))

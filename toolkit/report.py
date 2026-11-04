@@ -55,7 +55,18 @@ def _cross_record_problems(doc):
         if not any(results.get(x) == 'failed' for x in ids):
             problems.append(f'findings/{i}: a confirmed finding needs a failed execution record; '
                             f'execution_record_ids {ids} do not include one')
-    return problems + _requirement_problems(doc)
+    return problems + _requirement_problems(doc) + _approval_problems(doc)
+
+
+def _approval_problems(doc):
+    """An execution record names only an extra approval the report's authorization holds (〈定義：測試授權紀錄〉)."""
+    granted = doc.get('authorization') if isinstance(doc, dict) else None
+    approvals = granted.get('extra_approvals') if isinstance(granted, dict) else None
+    ids = {a.get('approval_id') for a in approvals if isinstance(a, dict)} if isinstance(approvals, list) else set()
+    return [f'execution_records/{i}: approval_id {e["approval_id"]!r} is not an extra approval of the authorization '
+            f'(TK-ENV-001)'
+            for i, e in enumerate(_list(doc, 'execution_records'))
+            if isinstance(e, dict) and 'approval_id' in e and e['approval_id'] not in ids]
 
 
 # Rules on confirmation items shared by the toolkit and validate(), so that a run and the check of its
@@ -173,6 +184,36 @@ def _confirmation_summary(listed):
     return lines
 
 
+def _operations(ops):
+    """Resource × HTTP method operations of 〈定義：測試授權紀錄〉 as one line."""
+    return '；'.join(f'`{o["resource"]}` ' + '、'.join(o['methods']) for o in ops)
+
+
+def _authorization_section(doc):
+    """〈定義：測試授權紀錄〉: what the run was authorized for, by whom (declared, not verified), and the extra
+    approvals its tests ran under (TK-ENV-001); and the source changes made for it (TK-ENV-006)."""
+    a = doc['authorization']
+    lines = ['', '## 測試授權', '',
+             f'- **授權紀錄**：`{a["path"]}`（`{a["digest"]}`）',
+             '- **目標**：' + '、'.join(f'`{t}`' for t in a['targets']) + f'（{a["environment"]}）',
+             f'- **期間**：{a["valid_from"]} 至 {a["valid_until"]}',
+             f'- **資料範圍**：{a["data_scope"]}',
+             '- **允許操作**：' + _operations(a['operations']),
+             f'- **簽發**：{a["issued_by"]} {a["issued_at"]}；應用負責人 {a["roles"]["app_owner"]}，執行者 {a["roles"]["operator"]}'
+             '（身分未經驗證，TK-HRV-004 尚未實作）']
+    used = {}
+    for e in doc['execution_records']:
+        if e.get('approval_id'):
+            used.setdefault(e['approval_id'], []).append(e.get('test_id', e['id']))
+    for ap in a['extra_approvals']:
+        tests = '、'.join(f'`{t}`' for t in used.get(ap['approval_id'], [])) or '（本次未使用）'
+        lines.append(f'- **額外核准** `{ap["approval_id"]}`：{ap["by"]} {ap["at"]}，至 {ap["valid_until"]}；'
+                     + _operations(ap['operations'])
+                     + f'；理由：{ap["reason"]}；用於 {tests}')
+    lines.append('- 測試用原始碼變更：無（受測原始碼即 `source_digest` 釘選的版本）')
+    return lines
+
+
 def render_markdown(doc):
     """Markdown for human review, generated from a valid JSON report. Raises ValueError if invalid."""
     problems = validate(doc)
@@ -204,6 +245,9 @@ def render_markdown(doc):
 
     if doc.get('confirmation_list'):
         lines += _confirmation_summary(doc['confirmation_list'])
+
+    if doc.get('authorization'):
+        lines += _authorization_section(doc)
 
     if doc.get('authorization_matrix'):
         lines += ['', '## 授權矩陣中的身分', '', '| 身分 | 傳遞方式 | 路徑 |', '| :--- | :--- | :--- |']

@@ -6,15 +6,12 @@ only adds items, resets them to pending or marks them out of scope; it never wri
 modified or not_applicable (TK-REQ-009). Review state codes follow toolkit/schemas; their
 Chinese labels live in report.py.
 """
-import hashlib
 import json
-import re
-from datetime import datetime, timezone
 from pathlib import Path
 
 import jsonschema
 
-from toolkit import policy, report
+from toolkit import control, policy, report
 
 PENDING = report.PENDING
 REVIEW_FIELDS = ('by', 'at', 'reason', 'basis', 'modified_rule', 'allowed_tests', 'expiry')
@@ -211,20 +208,10 @@ def rule_for(item, test_id, case_kind):
     return report.rule_for(base_rule(item), allowed_tests, test_id, case_kind)
 
 
-# 〈定義：確認清單〉 到期: the expiry of a 合法例外 is an ISO 8601 UTC time such as 2027-05-01T00:00:00Z.
-EXPIRY = re.compile(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$')
-
-
 def expiry_time(review):
     """The expiry of a 合法例外 as an aware datetime, or None when it is not an ISO 8601 UTC time or no
     such time; then the exception lacks its expiry (〈定義：確認清單〉 到期)."""
-    value = review.get('expiry')
-    if not isinstance(value, str) or not EXPIRY.match(value):
-        return None
-    try:
-        return datetime.fromisoformat(value[:-1]).replace(tzinfo=timezone.utc)
-    except ValueError:  # the right shape but no such time, e.g. February 30
-        return None
+    return control.utc_time(review.get('expiry'))
 
 
 def test_problem(item, test_id, case_kind, items, plan):
@@ -306,44 +293,19 @@ def _allowed_test_problem(rid, test_id, plan):
     return None
 
 
-class ConfirmationListUnusable(Exception):
-    """The confirmation list cannot be used: inside the sample source, digest mismatch, unreadable or invalid."""
-
-
-def _outside_source(path, source_root):
-    path, root = Path(path).resolve(), Path(source_root).resolve()
-    if path == root or root in path.parents:
-        raise ConfirmationListUnusable(f'{path} is inside the sample source; the confirmation list belongs in '
-                                       f'the control zone')
-    return path
-
-
-def file_digest(path):
-    return 'sha256:' + hashlib.sha256(Path(path).read_bytes()).hexdigest()
+# The list cannot be used: inside the sample source, digest mismatch, unreadable or invalid.
+ConfirmationListUnusable = control.RecordUnusable
+file_digest = control.file_digest
 
 
 def write(path, doc, source_root):
     """Write the list to the control zone and return its digest, for the ScanManifest to reference."""
-    path = _outside_source(path, source_root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-    return file_digest(path)
+    return control.write(path, doc, source_root, 'confirmation list')
 
 
 def read(path, digest, source_root):
-    """The list at path, after checking where it is, its digest and its structure."""
-    path = _outside_source(path, source_root)
-    if not path.exists():
-        # Not "no list yet": a new, all-pending list would drop the owner's review states (TK-REQ-004).
-        raise ConfirmationListUnusable(f'{path} is referenced with digest {digest} but does not exist; '
-                                       f'restore the file')
-    try:
-        actual = file_digest(path)
-        doc = json.loads(path.read_text(encoding='utf-8'))
-    except (OSError, ValueError) as e:
-        raise ConfirmationListUnusable(f'{path} cannot be read: {e}') from e
-    if actual != digest:
-        raise ConfirmationListUnusable(f'digest of {path} is {actual}, the ScanManifest says {digest}')
+    """The list at path, after checking where it is, its digest (toolkit.control) and its structure."""
+    doc = control.read(path, digest, source_root, 'confirmation list')
     problems = validate(doc)
     if problems:
         raise ConfirmationListUnusable(f'{path} is not a valid confirmation list: {"; ".join(problems[:3])}')

@@ -119,6 +119,29 @@ def reviewed_list(source, accepted=ACCEPTED, s1=(S1_PUBLIC,), resources=None, ex
     return {'path': str(path), 'digest': confirmation.write(path, doc, source)}
 
 
+SAMPLE_IDS = [f'object-authz/{v}' for v in ('vulnerable', 'patched', 'legit', 'lax-update-policy')]
+# 〈定義：測試授權紀錄〉 of these tests: every sample version in E1 and every operation of the test templates,
+# DELETE on documents through an extra approval, so the delete cases of the E1 runs run under one.
+DELETE_APPROVAL = {'approval_id': 'APR-DELETE', 'operations': [{'resource': 'documents', 'methods': ['DELETE']}],
+                   'by': 'security-lead', 'at': '2026-01-01T00:00:00Z', 'reason': 'delete cases on the synthetic E1 data',
+                   'valid_until': '2098-01-01T00:00:00Z'}
+AUTHORIZATION = {'schema_version': '1', 'targets': SAMPLE_IDS, 'environment': 'E1',
+                 'data_scope': 'synthetic sample data of samples/object-authz only',
+                 'valid_from': '2026-01-01T00:00:00Z', 'valid_until': '2099-01-01T00:00:00Z',
+                 'operations': [{'resource': 'documents', 'methods': ['GET', 'POST', 'PATCH']},
+                                {'resource': 'announcements', 'methods': ['GET']}],
+                 'roles': {'app_owner': 'app-owner', 'operator': 'toolkit-tests'},
+                 'issued_by': 'app-owner', 'issued_at': '2026-01-01T00:00:00Z', 'extra_approvals': [DELETE_APPROVAL]}
+
+
+def authorized(source, doc=AUTHORIZATION):
+    """doc written to the control zone (test only: in a real run the app owner issues it). Returns the
+    ScanManifest reference {path, digest}."""
+    from toolkit import control
+    path = Path(tempfile.mkdtemp(dir=CONTROL)) / 'authorization.json'
+    return {'path': str(path), 'digest': control.write(path, doc, source)}
+
+
 def manifest(version):
     from toolkit import e1
     project = SAMPLES / version
@@ -129,6 +152,7 @@ def manifest(version):
         'target': {'project': str(project), 'source_digest': e1.source_digest(project)},
         'requirements': [copy.deepcopy(S1_PUBLIC)],
         'confirmation_list': reviewed_list(project),
+        'authorization': authorized(project),
         'scope': copy.deepcopy(SCOPE),
         'limits': copy.deepcopy(LIMITS),
         'tests': copy.deepcopy(TESTS),
@@ -212,6 +236,17 @@ class VulnerableRunEnv(unittest.TestCase):
             self.assertEqual(f['fingerprint_version'], 'fp-authz-v1')
             self.assertRegex(f['fingerprint'], r'^sha256:[0-9a-f]{64}$')
         self.assertEqual(len({f['fingerprint'] for f in findings}), 3)  # one problem per operation
+
+    def test_only_the_tests_that_ran_under_an_extra_approval_name_it(self):
+        # 〈定義：測試授權紀錄〉 報告: DELETE on documents is authorized through APR-DELETE (AUTHORIZATION).
+        # The shared run holds the template's delete cases too (shared_plan): every delete case ran under it.
+        from toolkit import policy
+        deletes = {t['test_id'] for t in shared_plan(policy.load_template(), TESTS) if t['template_id'] == 'cross-user-delete-v1'}
+        self.assertTrue({'DELETE-same-tenant', 'DELETE-anonymous-publishable'} <= deletes)
+        named = {e['test_id']: e.get('approval_id') for e in self.report['execution_records']}
+        self.assertEqual({t for t, a in named.items() if a}, deletes)
+        self.assertEqual({named[t] for t in deletes}, {'APR-DELETE'})
+        self.assertIn('`APR-DELETE`', self.outcome.markdown)
 
     def test_requirements_come_from_s1_or_s2_and_the_failures_rest_on_owner_only(self):
         # TK-REQ-005: no requirement comes from the implementation; the leak is judged on S2-OWNER-ONLY.
@@ -668,6 +703,8 @@ class RequiredInputs(unittest.TestCase):
       復原方式      NoRecovery, NoRecoveryMixedPlanEnv
       執行限制      test_missing_limits_block_the_run, test_each_limit_is_required_and_no_unlimited_default_is_used,
                     test_limits_must_be_bounded
+      測試授權      AuthorizationInScan (missing, not a control-zone reference, unusable, outside its period or
+                    targets: nothing is started)
     """
 
     def assert_blocked_before_start(self, m, reason_part):
@@ -1160,6 +1197,137 @@ class ConfirmationListInScan(unittest.TestCase):
         self.assertEqual(listed, {'path': self.m['confirmation_list']['path'],
                                                     'digest': confirmation.file_digest(self.m['confirmation_list']['path']),
                                                     'list_version': after['list_version'], 'updated': True})
+
+
+class AuthorizationInScan(unittest.TestCase):
+    """〈定義：測試授權紀錄〉 in a run (TK-ENV-001, TK-ENV-002). The empty project stops the run at the
+    BuildRecipe step (no Docker): a test the authorization lets through reaches that step."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = preflight_manifest(self.tmp.name)
+
+    def run_scan(self, m=None):
+        rep = scan.run(m or self.m).report
+        self.assertEqual(report.validate(rep), [])
+        return rep
+
+    def preflight_blocked(self, reason_part, m=None):
+        rep = self.run_scan(m)
+        self.assertEqual((rep['status'], rep['stages'][0]['status']), ('blocked', 'blocked'))
+        self.assertIn(reason_part, rep['status_reason'])
+        self.assertNotIn('environment', rep)
+        return rep
+
+    def authorize(self, **changes):
+        self.m['authorization'] = authorized(self.tmp.name, {**copy.deepcopy(AUTHORIZATION), **changes})
+
+    def errors(self):
+        return {e['test_id']: e for e in self.run_scan()['execution_records']}
+
+    def test_a_run_without_an_authorization_record_is_not_started(self):
+        del self.m['authorization']
+        self.preflight_blocked('authorization (測試授權) is missing')
+
+    def test_the_authorization_is_referenced_never_given_in_the_manifest(self):
+        # TK-ENV-002: whoever writes the ScanManifest cannot authorize the run by writing the record into it.
+        for value in (copy.deepcopy(AUTHORIZATION), {'path': self.m['authorization']['path']}, 'approved'):
+            with self.subTest(value=type(value).__name__):
+                self.m['authorization'] = value
+                self.preflight_blocked('authorization (測試授權) must reference a control-zone record by path and digest')
+
+    def test_an_unusable_record_is_not_used(self):
+        from toolkit import control
+        inside = Path(self.tmp.name) / 'authorization.json'
+        inside.write_text(json.dumps(AUTHORIZATION), encoding='utf-8')
+        self.m['target']['source_digest'] = e1.source_digest(self.tmp.name)  # the record is now part of the source
+        cases = {'inside the sample source': {'path': str(inside), 'digest': control.file_digest(inside)},
+                 'the ScanManifest says': {**self.m['authorization'], 'digest': 'sha256:' + '0' * 64},
+                 'not a valid test authorization record': authorized(self.tmp.name, {**AUTHORIZATION, 'environment': ''})}
+        for reason, ref in cases.items():
+            with self.subTest(reason):
+                self.m['authorization'] = ref
+                self.preflight_blocked(reason)
+
+    def test_a_run_outside_the_authorized_period_is_not_started(self):
+        self.authorize(valid_from='2026-01-01T00:00:00Z', valid_until='2026-02-01T00:00:00Z', extra_approvals=[])
+        self.preflight_blocked('outside the authorized period 2026-01-01T00:00:00Z to 2026-02-01T00:00:00Z')
+
+    def test_a_sample_or_an_environment_the_record_does_not_cover_is_not_started(self):
+        def other_sample(r):
+            r['sample'] = 'object-authz/somebody-else'
+        with tempfile.TemporaryDirectory() as d:
+            m = manifest_for_recipe_change(d, other_sample)
+            self.preflight_blocked("sample 'object-authz/somebody-else' is not a target", m)
+        self.authorize(environment='E2')
+        with tempfile.TemporaryDirectory() as d:
+            m = manifest_for_recipe_change(d, lambda r: None)
+            m['authorization'] = self.m['authorization']
+            self.preflight_blocked("environment 'E1' is not the authorized environment 'E2'", m)
+
+    def test_the_scopes_operations_are_http_methods_of_the_authorization(self):
+        self.assertEqual(self.run_scan()['stages'][0]['status'], 'completed')
+        for value in (['GET', 'TRUNCATE'], 'GET'):
+            with self.subTest(value=value):
+                self.m['scope']['allowed_operations'] = value
+                self.preflight_blocked("scope.allowed_operations (受測範圍) must list HTTP methods of ['GET', 'POST', 'PATCH', 'DELETE']")
+
+    def test_a_test_outside_the_scope_is_blocked_even_with_an_extra_approval(self):
+        self.m['scope']['allowed_operations'] = ['GET']
+        self.authorize(extra_approvals=[approval('APR-001', 'documents', 'PATCH')])
+        errors = self.errors()
+        self.assertIn("PATCH is not in scope.allowed_operations (受測範圍)", errors['UPDATE-same-tenant']['error'])
+        self.assertNotIn('approval_id', errors['UPDATE-same-tenant'])
+        self.assertIn('BuildRecipe', errors['READ-same-tenant']['error'])
+
+    def test_an_operation_outside_the_authorization_runs_only_with_an_extra_approval(self):
+        # TK-ENV-001: DELETE on documents is not authorized; an approval covering it lets the delete cases go on.
+        # The record of a test shows its approval only when the test ran (VulnerableRunEnv); here it stops at
+        # the BuildRecipe step.
+        self.authorize(extra_approvals=[])
+        errors = self.errors()
+        self.assertIn("DELETE on 'documents' is not in the test authorization", errors['DELETE-same-tenant']['error'])
+        self.assertIn('BuildRecipe', errors['UPDATE-same-tenant']['error'])
+        self.authorize(extra_approvals=[approval('APR-001', 'documents', 'DELETE')])
+        errors = self.errors()
+        self.assertIn('BuildRecipe', errors['DELETE-same-tenant']['error'])
+        self.assertNotIn('approval_id', errors['DELETE-same-tenant'])
+
+    def test_an_expired_approval_or_one_the_operator_gave_does_not_count(self):
+        for given, expected in ((approval('APR-001', 'documents', 'DELETE', valid_until='2026-02-01T00:00:00Z'),
+                                 'APR-001 expired at 2026-02-01T00:00:00Z'),
+                                (approval('APR-001', 'documents', 'DELETE', by=' Toolkit-Tests'),
+                                 "APR-001 was given by the operator ' Toolkit-Tests'")):
+            with self.subTest(expected):
+                self.authorize(extra_approvals=[given])
+                self.assertIn(expected, self.errors()['DELETE-same-tenant']['error'])
+
+    def test_an_approval_claimed_by_the_test_plan_does_not_count(self):
+        # TK-ENV-002: a plan, which a model may have written, cannot approve its own tests.
+        self.authorize(extra_approvals=[])
+        for t in self.m['tests']:
+            t.update(approved=True, approval_id='APR-001', note='已核准')
+        errors = self.errors()
+        self.assertIn('not in the test authorization', errors['DELETE-same-tenant']['error'])
+        self.assertNotIn('approval_id', errors['DELETE-same-tenant'])
+
+    def test_the_report_shows_the_authorization_its_unverified_names_and_no_source_changes(self):
+        rep = self.run_scan()
+        shown = rep['authorization']
+        self.assertEqual({k: shown[k] for k in ('path', 'digest')}, self.m['authorization'])
+        self.assertEqual({k: shown[k] for k in ('targets', 'environment', 'valid_from', 'valid_until', 'data_scope',
+                                                 'roles', 'issued_by', 'issued_at', 'extra_approvals')},
+                         {k: AUTHORIZATION[k] for k in ('targets', 'environment', 'valid_from', 'valid_until', 'data_scope',
+                                                        'roles', 'issued_by', 'issued_at', 'extra_approvals')})
+        self.assertIs(shown['identity_verified'], False)
+        self.assertEqual(rep['source_changes'], [])  # TK-ENV-006: the source under test is the pinned one
+
+
+def approval(approval_id, resource, method, by='security-lead', valid_until='2098-01-01T00:00:00Z'):
+    """An extra approval for one operation (〈定義：測試授權紀錄〉)."""
+    return {'approval_id': approval_id, 'operations': [{'resource': resource, 'methods': [method]}], 'by': by,
+            'at': '2026-01-02T00:00:00Z', 'reason': 'needed for this run', 'valid_until': valid_until}
 
 
 class RecordsKeepTheItemVersion(unittest.TestCase):

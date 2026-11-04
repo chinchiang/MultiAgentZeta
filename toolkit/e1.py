@@ -100,6 +100,9 @@ def recipe_problems(recipe):
     return problems
 
 
+MODE = 'E1'  # the environment mode this module provides (〈定義：測試授權紀錄〉 environment)
+
+
 def load_recipe(project_dir):
     """Return (recipe, None) or (None, Blocked)."""
     path = Path(project_dir) / RECIPE_FILE
@@ -440,7 +443,7 @@ def _profile(env, tools, matrix, health):
                                f'(matrix {pinned.get("image")}@{pinned.get("digest")})')
     return {
         'profile_version': '1',
-        'mode': 'E1',
+        'mode': MODE,
         'sample': env.recipe.get('sample', ''),
         'source_digest': env.recipe['source_build']['source_digest'],
         'seed_version': env.recipe['snapshot_reset']['seed_version'],

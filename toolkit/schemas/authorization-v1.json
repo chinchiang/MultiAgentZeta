@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/chinchiang/MultiAgentZeta/toolkit/schemas/authorization-v1.json",
+  "title": "Test authorization record (〈定義：測試授權紀錄〉)",
+  "description": "What the app owner authorizes a run to test (TK-ENV-001). Lives in the control zone, outside the sample source; a ScanManifest references it by path and digest. Who issued it and who approved are declared names: v0.1 does not verify them (TK-HRV-004 is later). Times are ISO 8601 UTC; toolkit.authorization checks what this schema cannot.",
+  "type": "object",
+  "required": ["schema_version", "targets", "environment", "data_scope", "valid_from", "valid_until", "operations",
+               "roles", "issued_by", "issued_at"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"const": "1"},
+    "targets": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/text"},
+                "description": "BuildRecipe sample ids the record covers, such as object-authz/vulnerable."},
+    "environment": {"$ref": "#/$defs/text", "description": "The environment mode the record covers, such as E1."},
+    "data_scope": {"$ref": "#/$defs/text", "description": "The data the tests may touch; recorded, not compared."},
+    "valid_from": {"type": "string", "format": "date-time"},
+    "valid_until": {"type": "string", "format": "date-time"},
+    "operations": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/operation"},
+                   "description": "Resource × HTTP method the tests may use without an extra approval."},
+    "roles": {"type": "object", "required": ["app_owner", "operator"], "additionalProperties": false,
+              "properties": {"app_owner": {"$ref": "#/$defs/text"}, "operator": {"$ref": "#/$defs/text"}}},
+    "issued_by": {"$ref": "#/$defs/text"},
+    "issued_at": {"type": "string", "format": "date-time"},
+    "extra_approvals": {"type": "array", "items": {"$ref": "#/$defs/approval"}}
+  },
+  "$defs": {
+    "text": {"type": "string", "pattern": "\\S"},
+    "operation": {"type": "object", "required": ["resource", "methods"], "additionalProperties": false,
+                  "properties": {"resource": {"$ref": "#/$defs/text"},
+                                 "methods": {"type": "array", "minItems": 1, "uniqueItems": true,
+                                             "items": {"enum": ["GET", "POST", "PATCH", "DELETE"]}}}},
+    "approval": {"type": "object", "required": ["approval_id", "operations", "by", "at", "reason", "valid_until"],
+                 "additionalProperties": false,
+                 "description": "An extra approval for operations the record does not list (TK-ENV-001); given by the operator, it does not count.",
+                 "properties": {"approval_id": {"$ref": "#/$defs/text"},
+                                "operations": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/operation"}},
+                                "by": {"$ref": "#/$defs/text"}, "at": {"type": "string", "format": "date-time"},
+                                "reason": {"$ref": "#/$defs/text"},
+                                "valid_until": {"type": "string", "format": "date-time"}}}
+  }
+}
