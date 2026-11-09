@@ -7,6 +7,8 @@
   "commit": "a89be51",
   "status": "partial",
   "source_changes": [],
+  "review_record": null,
+  "review_summary": {"pending": 1, "overdue": 0, "approved": 0, "rejected": 0, "evidence_pending": 0},
   "manifest": {
     "id": "manifest-object-authz-vulnerable",
     "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
@@ -258,6 +260,7 @@
       "requirement_version": 1,
       "root_cause": "object-ownership-not-enforced",
       "status": "confirmed",
+      "review": {"state": "pending"},
       "evidence_type": "dynamic",
       "execution_record_ids": [
         "exec-0001"

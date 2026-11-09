@@ -17,7 +17,7 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from toolkit import authorization, confirmation, e1, observer, policy, report
+from toolkit import authorization, confirmation, control, e1, observer, policy, report, review
 
 SOURCE_ID = 'toolkit.scan'
 FINGERPRINT_VERSION = 'fp-authz-v1'
@@ -74,6 +74,14 @@ class _Granted:
 
 
 @dataclass(frozen=True)
+class _Reviewed:
+    """〈定義：覆核紀錄〉 as read in this run: the record and the reference the report gives. Empty when the
+    ScanManifest references none, so every finding is pending."""
+    doc: dict | None = None
+    ref: dict | None = None
+
+
+@dataclass(frozen=True)
 class _Precheck:
     """A test's checks before the environment starts: (result, reason) when it cannot run, and the extra
     approval of 〈定義：測試授權紀錄〉 it would run under; a record shows the approval only when its test ran."""
@@ -99,6 +107,7 @@ class _RunState:
     listed: _Listed = field(default_factory=_Listed)
     granted: _Granted = field(default_factory=_Granted)
     prechecks: dict = field(default_factory=dict)  # test_id -> _Precheck
+    reviewed: _Reviewed = field(default_factory=_Reviewed)
     gaps: list = field(default_factory=list)  # 測試身分 the BuildRecipe cannot provide
 
 
@@ -649,16 +658,40 @@ def _input_problems(manifest):
     return problems
 
 
+def _is_ref(ref):
+    """A reference to a control-zone record: its path and digest, and nothing else."""
+    return (isinstance(ref, dict) and set(ref) == {'path', 'digest'}
+            and all(isinstance(v, str) and v for v in ref.values()))
+
+
 def _authorization_ref_problems(manifest):
     """〈定義：必要輸入〉 測試授權: the ScanManifest references a control-zone record by path and digest and
     never carries the record itself, which whoever writes the ScanManifest could then grant (TK-ENV-002)."""
     if 'authorization' not in manifest:
         return ['authorization (測試授權) is missing: the run is not started']
     ref = manifest['authorization']
-    if not (isinstance(ref, dict) and set(ref) == {'path', 'digest'} and all(isinstance(v, str) and v for v in ref.values())):
+    if not _is_ref(ref):
         return ['authorization (測試授權) must reference a control-zone record by path and digest, '
                 'never carry the record or an approval itself']
     return []
+
+
+def _load_review_record(manifest):
+    """(_Reviewed, None) for the review record the ScanManifest references, an empty one when it references
+    none, or (None, problem) (〈定義：覆核紀錄〉)."""
+    if 'review_record' not in manifest:
+        return _Reviewed(), None
+    ref = manifest['review_record']
+    if not _is_ref(ref):
+        return None, 'review record: review_record must reference a control-zone record by path and digest'
+    try:
+        doc = control.read(ref['path'], ref['digest'], manifest['target']['project'], 'review record')
+    except control.RecordUnusable as e:
+        return None, f'review record unusable: {e}'
+    problems = review.validate(doc)
+    if problems:
+        return None, 'review record unusable: not a valid review record: ' + '; '.join(problems)
+    return _Reviewed(doc, dict(ref)), None
 
 
 def _load_authorization(manifest, now):
@@ -736,6 +769,10 @@ def run(manifest):
     if problem:
         return _blocked(state, f'nothing was started: {problem}', stage='preflight')
     state.listed = listed
+    reviewed, problem = _load_review_record(manifest)
+    if problem:
+        return _blocked(state, f'nothing was started: {problem}', stage='preflight')
+    state.reviewed = reviewed
     recipe, _ = e1.load_recipe(project)  # without one, e1.prepare blocks the run at the BuildRecipe step
     problem = recipe and authorization.target_problem(state.granted.doc, recipe['sample'], e1.MODE)
     if problem:
@@ -926,6 +963,8 @@ def _finish(state, executions, findings, status, reason, stages, environment, ma
         doc['confirmation_list'] = dict(listed.ref)
     if state.granted.ref:
         doc['authorization'] = state.granted.report()
+    # Each finding's review state, as of when the report is made (TK-HRV-010).
+    doc = review.apply(doc, state.reviewed.doc, state.reviewed.ref, doc['created_at'])
     problems = report.validate(doc)
     if problems:
         raise RuntimeError('the toolkit produced an invalid report: ' + '; '.join(problems))

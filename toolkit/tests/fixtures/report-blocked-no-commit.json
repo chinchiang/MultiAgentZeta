@@ -7,6 +7,8 @@
   "commit": null,
   "status": "blocked",
   "source_changes": [],
+  "review_record": null,
+  "review_summary": {"pending": 0, "overdue": 0, "approved": 0, "rejected": 0, "evidence_pending": 0},
   "manifest": {
     "id": "manifest-object-authz-vulnerable",
     "digest": "sha256:495399cc068b19acd31f0cf22945c7c6f74ef7ae7125a962a7b6762e3cd43ada"

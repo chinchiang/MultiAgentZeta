@@ -5,6 +5,7 @@ results come from the spec's definitions rather than from the code under test.
 """
 import copy
 import json
+import re
 import unittest
 from pathlib import Path
 
@@ -147,6 +148,78 @@ class Validate(unittest.TestCase):
         doc['findings'][0]['status'] = 'evidence_pending'
         self.assertEqual(report.validate(doc), [])
 
+    # 〈定義：覆核紀錄〉: a finding's review, written by hand here, not by toolkit.review.
+    REVIEW = {'state': 'evidence_pending', 'opened_at': '2026-11-09T01:00:00Z',
+              'decision': {'option': 'evidence_pending', 'by': {'id': 101, 'login': 'sec-alice'},
+                           'at': '2026-11-09T03:00:00Z', 'reason': 'the evidence is thin'}}
+
+    def test_a_finding_sent_back_for_evidence_cannot_be_confirmed(self):
+        doc = valid_report()
+        doc['findings'][0]['review'] = copy.deepcopy(self.REVIEW)
+        doc['review_summary'].update(approved=0, evidence_pending=1)
+        self.assertTrue(any('findings/0' in p and '覆核紀錄' in p for p in report.validate(doc)), report.validate(doc))
+        doc['findings'][0]['status'] = 'evidence_pending'
+        self.assertEqual(report.validate(doc), [])
+
+    def test_every_report_shows_its_review_record_summary_and_each_finding_review(self):
+        # TK-HRV-010: an unreviewed finding stays in the report, with its review state.
+        for drop in ('review_record', 'review_summary', 'findings/0/review'):
+            with self.subTest(drop=drop):
+                doc = valid_report()
+                if drop.startswith('findings'):
+                    del doc['findings'][0]['review']
+                else:
+                    del doc[drop]
+                self.assertNotEqual(report.validate(doc), [])
+
+    def test_the_review_summary_counts_the_findings_review_states(self):
+        doc = valid_report()
+        doc['review_summary'] = {**doc['review_summary'], 'approved': 0, 'rejected': 1}  # the one finding is approved
+        self.assertTrue(any('review_summary' in p for p in report.validate(doc)), report.validate(doc))
+
+    def test_review_times_are_iso_8601_utc(self):
+        for where in ('opened_at', 'decision/at'):
+            with self.subTest(where=where):
+                doc = valid_report()
+                review = doc['findings'][0]['review']
+                (review['decision'] if where == 'decision/at' else review)[where.split('/')[-1]] = '2026-11-02 09:00'
+                problems = report.validate(doc)
+                self.assertTrue(any('findings/0' in p and 'UTC' in p for p in problems), problems)
+
+    def test_without_a_review_record_no_finding_can_be_decided(self):
+        doc = valid_report()
+        doc['review_record'] = None  # the finding still claims an approval
+        problems = report.validate(doc)
+        self.assertTrue(any('findings/0' in p and 'review_record' in p for p in problems), problems)
+
+    def test_without_a_review_record_no_review_has_started(self):
+        doc = valid_report()
+        doc['review_record'] = None
+        doc['findings'][0]['review'] = {'state': 'pending', 'opened_at': '2026-11-01T11:00:00Z'}
+        doc['review_summary'].update(approved=0, pending=1)
+        problems = report.validate(doc)
+        self.assertTrue(any('findings/0' in p and 'review_record' in p for p in problems), problems)
+
+    def test_a_review_state_matches_its_decision(self):
+        cases = {'a decided state with the decision of another state': {'state': 'rejected'},
+                 'a waiting state with a decision': {'state': 'pending'}}
+        for name, change in cases.items():
+            with self.subTest(name):
+                doc = valid_report()
+                doc['findings'][0]['review'].update(change)
+                doc['review_summary'] = dict.fromkeys(doc['review_summary'], 0)
+                doc['review_summary'][change['state']] = 1
+                self.assertTrue(any('findings/0' in p and 'decision' in p for p in report.validate(doc)),
+                                report.validate(doc))
+        doc = valid_report()
+        doc['findings'][0]['review'] = {'state': 'approved', 'opened_at': '2026-11-01T11:00:00Z'}  # no decision
+        self.assertTrue(any('findings/0' in p and 'decision' in p for p in report.validate(doc)), report.validate(doc))
+
+    def test_a_review_state_must_be_one_the_definition_lists(self):
+        doc = valid_report()
+        doc['findings'][0]['review'] = {**copy.deepcopy(self.REVIEW), 'state': 'auto_approved'}
+        self.assertNotEqual(report.validate(doc), [])
+
     def test_a_test_on_an_item_that_cannot_be_tested_must_be_blocked(self):
         # 〈定義：確認清單〉: a pending S1 entry, a not applicable or an out-of-scope item blocks its tests.
         s1_pending = {'id': 'S1-X', 'source': 'S1', 'status': 'pending'}
@@ -274,6 +347,61 @@ class RenderMarkdown(unittest.TestCase):
 
     # 〈定義：確認清單〉 處理狀態.
     REVIEW_LABELS = {'pending': '待確認', 'accepted': '接受', 'modified': '修改', 'not_applicable': '不適用'}
+
+    # 〈定義：覆核紀錄〉 報告: 覆核狀態.
+    FINDING_REVIEW_LABELS = {'pending': '待覆核', 'overdue': '逾期覆核', 'approved': '已核准', 'rejected': '已退回',
+                           'evidence_pending': '已轉證據待補'}
+
+    def test_the_review_section_names_the_record_the_counts_and_each_decision(self):
+        md = report.render_markdown(valid_report())
+        section = md.split('## 覆核', 1)[1].split('\n## ', 1)[0]
+        self.assertIn('`/control/review-record.json`', section)
+        self.assertIn('已核准 1', section)
+        self.assertIn('待覆核 0', section)
+        row = next(line for line in section.splitlines() if 'finding-0001' in line)
+        for part in ('已核准', 'sec-alice', '2026-11-02T09:00:00Z', "the other tenant's row came back"):
+            self.assertIn(part, row)
+
+    def test_without_a_review_record_the_section_says_so(self):
+        doc = valid_report()
+        doc['review_record'] = None
+        doc['findings'][0]['review'] = {'state': 'pending'}
+        doc['review_summary'].update(approved=0, pending=1)
+        section = report.render_markdown(doc).split('## 覆核', 1)[1].split('\n## ', 1)[0]
+        self.assertIn('這次執行沒有使用覆核紀錄', section)  # also when the run stopped before reading one
+        self.assertIn('| 待覆核 |', section)
+
+    def test_findings_waiting_for_review_come_first_longest_wait_first(self):
+        # 〈定義：覆核紀錄〉 報告: 待覆核 and 逾期覆核 by waiting time; decided ones after them, as listed.
+        doc = valid_report()
+        first = doc['findings'][0]  # approved
+        reviews = {'finding-0002': {'state': 'pending', 'opened_at': '2026-11-05T00:00:00Z'},
+                   'finding-0003': {'state': 'overdue', 'opened_at': '2026-11-01T00:00:00Z'},
+                   'finding-0004': {'state': 'pending'}}  # no issue opened yet: waiting time unknown
+        for fid, rev in reviews.items():
+            doc['findings'].append({**copy.deepcopy(first), 'id': fid, 'review': rev})
+        doc['review_summary'].update(pending=2, overdue=1)
+        self.assertEqual(report.validate(doc), [])
+        section = report.render_markdown(doc).split('## 覆核', 1)[1]
+        order = [fid for line in section.splitlines() for fid in re.findall(r'`(finding-\d{4})`', line)]
+        self.assertEqual(order, ['finding-0003', 'finding-0002', 'finding-0004', 'finding-0001'])
+
+    def test_a_reason_cannot_break_the_table_or_add_a_heading(self):
+        # The reason is a reviewer's comment, kept as written (〈定義：覆核紀錄〉 理由); in the Markdown it stays
+        # inside its cell.
+        doc = valid_report()
+        doc['findings'][0]['review']['decision']['reason'] = 'fine | really\n\n## 全部通過\n'
+        md = report.render_markdown(doc)
+        self.assertNotIn('\n## 全部通過', md)
+        row = next(line for line in md.splitlines() if '`finding-0001`' in line and '已核准' in line)
+        self.assertEqual(row.replace('\\|', '').count('|'), 5)  # four cells
+
+    def test_a_reason_cannot_hide_what_follows_it(self):
+        doc = valid_report()
+        doc['findings'][0]['review']['decision']['reason'] = 'ok <!-- the rest of the report is hidden'
+        md = report.render_markdown(doc)
+        self.assertNotIn('<!--', md)
+        self.assertIn('## 覆蓋', md.split('the rest of the report is hidden', 1)[1])
 
     @staticmethod
     def listed_item(**changes):
@@ -665,6 +793,7 @@ class AllowedCases(unittest.TestCase):
     def exception(self, doc):
         """An allowed case on the deny item of the example report, made a 合法例外; returns the case's test_id."""
         doc['findings'] = []
+        doc['review_summary'] = dict.fromkeys(doc['review_summary'], 0)  # no finding left to review
         doc['requirements'][0].update(status='modified')
         doc['requirements'][0]['confirmation']['expiry'] = '2027-05-01T00:00:00Z'
         e = doc['execution_records'][1]

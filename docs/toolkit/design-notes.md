@@ -1,7 +1,7 @@
 # 多代理 AI 輔助程式開發測試工具包：設計說明
 
-> **版本**：v1.4.24（四份文件共用版本號，各版變更見審查處置紀錄）  
-> **修訂日期**：2026-11-04（臺灣時間）  
+> **版本**：v1.4.25（四份文件共用版本號，各版變更見審查處置紀錄）  
+> **修訂日期**：2026-11-09（臺灣時間）  
 > **文件狀態**：架構設計草案，非已實作或已驗證的聲明。  
 > **資訊分級**：機密／僅供英業達內部使用；未取得正式文件編號或發布核准  
 > **文件組合**：規格 [`spec.md`](spec.md)、設計說明 [`design-notes.md`](design-notes.md)（本文件）、審查處置紀錄 [`review-log.md`](review-log.md)、《v0.1 最小範圍》 [`v0.1-scope.md`](v0.1-scope.md)  
@@ -301,6 +301,15 @@ Gitleaks 等機密資訊掃描器可作為檢查工具，但掃描範圍、忽�
 
 本文件有多處把判定交給人。若不估算工作量、不規定在哪裡處理、也不定義逾時怎麼辦，覆核會逐漸積壓，最後不是沒人處理，就是習慣性核准。規格第 13 章統一定義各類人工覆核；其他章節原本的判定規則不變（`TK-HRV-001`～`TK-HRV-010`）。
 
+v0.1 的覆核紀錄（〈定義：覆核紀錄〉）有四個取捨：
+
+- **身分取自平台，不取自宣告**：工單平台（v0.1 為 GitHub）回報的加標籤帳號，是工具能取得、又不由覆核者自己填寫的身分；以數字識別碼比對，因為登入名稱改名後，舊名稱可由任何人重新取得 [R60]。標籤事件附有操作者的數字識別碼與登入名稱 [R61]；數字識別碼在改名後維持不變，官方文件未明寫，屬待驗證，將在連真實 GitHub 的整合測試（#22）確認。決定用預先定義的標籤表示，留言只當理由，這樣在留言裡寫「核准」改變不了狀態。
+- **控制區才是依據**：同步指令把平台上的決定寫進控制區，掃描只讀控制區、不連平台。平台失敗或同步中斷時，掃描仍以已寫入的紀錄判定，不會因為讀不到工單而改變結果。
+- **決定只能更保守**：覆核者可以把已確認降為證據待補，但不能把證據待補升為已確認，也不能只憑退回就讓問題成為已排除；否則覆核會變成繞過判定規則的入口。
+- **只認記錄的工單編號**：工具開立工單後保存編號，不依內容搜尋工單；否則任何人開一張帶相同指紋標記的工單，就能冒充正式的覆核入口。
+
+已知限制：覆核角色紀錄本身由誰修改，工具分辨不出來，與確認清單的限制相同；角色紀錄須和其他控制區紀錄一樣，放在受測程式與代理都寫不到的地方。測試授權紀錄的簽發者與核准者仍是宣告的名稱，尚未改用平台身分。
+
 ### 3.14 工具包自我驗證（`VAL`）
 
 對應規格第 14 章。
@@ -513,3 +522,5 @@ BaxBench、SUSVIBES 與 LSCB 原本主要評估程式碼生成的功能與安全
 - **[R57]** Supabase 官方 Postgres 映像檔原始碼（`postgres` 角色屬性，commit `e2841e5`）：<https://github.com/supabase/postgres/blob/e2841e5fc3afdbb49ac8d52e5e570f7c9da7565a/migrations/db/migrations/10000000000000_demote-postgres.sql>
 - **[R58]** *The Rust Programming Language*（Rust 官方教材，2026-11-01 查閱線上版）：第 4 章〈Understanding Ownership〉，含 §4.1 所有權規則與 §4.2 參考與借用規則 <https://doc.rust-lang.org/book/ch04-00-understanding-ownership.html>；§20.1〈Unsafe Rust〉 <https://doc.rust-lang.org/book/ch20-01-unsafe-rust.html>
 - **[R59]** RFC 6761 *Special-Use Domain Names*（2026-11-02 查閱）：§6.2 `test.`、§6.3 `localhost.`、§6.4 `invalid.`、§6.5 `example.`、`example.com.`、`example.net.`、`example.org.` 及其下所有名稱 <https://www.rfc-editor.org/rfc/rfc6761>
+- **[R60]** GitHub Docs〈Changing your GitHub username〉（2026-11-09 查閱）：改名後舊使用者名稱可由任何人取得 <https://docs.github.com/en/account-and-profile/setting-up-and-managing-your-personal-account-on-github/managing-personal-account-settings/changing-your-github-username>
+- **[R61]** GitHub REST API〈Issue events〉，API 版本 2022-11-28（2026-11-09 查閱）：`GET /repos/{owner}/{repo}/issues/{issue_number}/events`，標籤事件含 `actor.id`、`actor.login`、`label.name`、`created_at`，分頁 `per_page` 最多 100 <https://docs.github.com/en/rest/issues/events?apiVersion=2022-11-28>

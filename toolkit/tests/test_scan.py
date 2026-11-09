@@ -237,6 +237,13 @@ class VulnerableRunEnv(unittest.TestCase):
             self.assertRegex(f['fingerprint'], r'^sha256:[0-9a-f]{64}$')
         self.assertEqual(len({f['fingerprint'] for f in findings}), 3)  # one problem per operation
 
+    def test_without_a_review_record_every_finding_waits_for_review(self):
+        # 〈定義：覆核紀錄〉: the ScanManifest references none, so nobody has decided anything yet.
+        self.assertIsNone(self.report['review_record'])
+        self.assertEqual([f['review'] for f in self.report['findings']], [{'state': 'pending'}] * 3)
+        self.assertEqual(self.report['review_summary'], {'pending': 3, 'overdue': 0, 'approved': 0, 'rejected': 0,
+                                                         'evidence_pending': 0})
+
     def test_only_the_tests_that_ran_under_an_extra_approval_name_it(self):
         # 〈定義：測試授權紀錄〉 報告: DELETE on documents is authorized through APR-DELETE (AUTHORIZATION).
         # The shared run holds the template's delete cases too (shared_plan): every delete case ran under it.
@@ -1328,6 +1335,71 @@ def approval(approval_id, resource, method, by='security-lead', valid_until='209
     """An extra approval for one operation (〈定義：測試授權紀錄〉)."""
     return {'approval_id': approval_id, 'operations': [{'resource': resource, 'methods': [method]}], 'by': by,
             'at': '2026-01-02T00:00:00Z', 'reason': 'needed for this run', 'valid_until': valid_until}
+
+
+class ReviewRecordInScan(unittest.TestCase):
+    """〈定義：覆核紀錄〉 in a run: an optional control-zone record, referenced by path and digest. The
+    empty project stops the run at the BuildRecipe step (no Docker)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = preflight_manifest(self.tmp.name)
+
+    def run_scan(self):
+        rep = scan.run(self.m).report
+        self.assertEqual(report.validate(rep), [])
+        return rep
+
+    def test_without_a_review_record_the_report_says_none_was_used(self):
+        rep = self.run_scan()
+        self.assertIsNone(rep['review_record'])
+        self.assertEqual(rep['review_summary'], {'pending': 0, 'overdue': 0, 'approved': 0, 'rejected': 0,
+                                                 'evidence_pending': 0})
+
+    RECORD = {'schema_version': '1', 'platform': 'github', 'repo': 'owner/reviews', 'items': []}
+
+    def review_record(self, doc=None):
+        from toolkit import control
+        path = Path(tempfile.mkdtemp(dir=CONTROL)) / 'review-record.json'
+        return {'path': str(path), 'digest': control.write(path, doc or self.RECORD, self.tmp.name)}
+
+    def with_item(self, **changes):
+        """The record with one undecided item; changes replace its fields."""
+        item = {'review_type': 'candidate_finding', 'fingerprint': 'sha256:' + '3' * 64,
+                'fingerprint_version': 'fp-authz-v1', 'issue': 7, 'opened_at': '2026-11-09T01:00:00Z',
+                'versions': {'requirement_id': OWNER_ITEM, 'requirement_version': 1, 'commit': 'c', 'run_id': 'r'},
+                'decisions': [], 'rejected': [], **changes}
+        return {**self.RECORD, 'items': [item]}
+
+    def test_the_review_record_the_manifest_references_is_named_in_the_report(self):
+        self.m['review_record'] = self.review_record()
+        self.assertEqual(self.run_scan()['review_record'], self.m['review_record'])
+
+    def test_an_unusable_review_record_blocks_the_run_at_preflight(self):
+        from toolkit import control
+        inside = Path(self.tmp.name) / 'review-record.json'
+        inside.write_text(json.dumps(self.RECORD), encoding='utf-8')
+        self.m['target']['source_digest'] = e1.source_digest(self.tmp.name)  # the record is now part of the source
+        gone = self.review_record()
+        Path(gone['path']).unlink()
+        cases = {'inside the sample source': {'path': str(inside), 'digest': control.file_digest(inside)},
+                 'the ScanManifest says': {**self.review_record(), 'digest': 'sha256:' + '0' * 64},
+                 'does not exist': gone,
+                 'must reference a control-zone record by path and digest': {'path': str(inside)},
+                 'not a valid review record': self.review_record({'schema_version': '1', 'items': 'none'}),
+                 'not an ISO 8601 UTC time': self.review_record(self.with_item(opened_at='2026-11-09 01:00')),
+                 "reason_comments/0/updated_at: 'x'": self.review_record(self.with_item(decisions=[
+                     {'event_id': 1, 'option': 'approve', 'by': {'id': 101, 'login': 'sec-alice'},
+                      'at': '2026-11-09T03:00:00Z', 'reason': 'checked',
+                      'reason_comments': [{'id': 2, 'updated_at': 'x'}]}]))}
+        for reason, ref in cases.items():
+            with self.subTest(reason):
+                self.m['review_record'] = ref
+                rep = self.run_scan()
+                self.assertEqual((rep['status'], rep['stages'][0]['status']), ('blocked', 'blocked'))
+                self.assertIn('review record', rep['status_reason'])
+                self.assertIn(reason, rep['status_reason'])
 
 
 class RecordsKeepTheItemVersion(unittest.TestCase):

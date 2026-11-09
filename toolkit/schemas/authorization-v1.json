@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/chinchiang/MultiAgentZeta/toolkit/schemas/authorization-v1.json",
   "title": "Test authorization record (〈定義：測試授權紀錄〉)",
-  "description": "What the app owner authorizes a run to test (TK-ENV-001). Lives in the control zone, outside the sample source; a ScanManifest references it by path and digest. Who issued it and who approved are declared names: v0.1 does not verify them (TK-HRV-004 is later). Times are ISO 8601 UTC; toolkit.authorization checks what this schema cannot.",
+  "description": "What the app owner authorizes a run to test (TK-ENV-001). Lives in the control zone, outside the sample source; a ScanManifest references it by path and digest. Who issued it and who approved are declared names: v0.1 does not verify them (TK-HRV-004's verified identity is used only by the review record, 〈定義：覆核紀錄〉). Times are ISO 8601 UTC; toolkit.authorization checks what this schema cannot.",
   "type": "object",
   "required": ["schema_version", "targets", "environment", "data_scope", "valid_from", "valid_until", "operations",
                "roles", "issued_by", "issued_at"],

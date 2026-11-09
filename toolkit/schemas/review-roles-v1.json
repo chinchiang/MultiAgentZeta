@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/chinchiang/MultiAgentZeta/toolkit/schemas/review-roles-v1.json",
+  "title": "Review roles record (〈定義：覆核紀錄〉 角色)",
+  "description": "Which platform accounts may make which review (TK-HRV-004). Accounts are matched by their numeric id; the login is only shown. Lives in the control zone and is read by path and digest. Who edits it is not something the toolkit can tell (design notes §3.13).",
+  "type": "object",
+  "required": ["schema_version", "accounts", "issued_by", "issued_at"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"const": "1"},
+    "issued_by": {"type": "string", "minLength": 1},
+    "issued_at": {"type": "string", "minLength": 1},
+    "accounts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "login", "roles"],
+        "additionalProperties": false,
+        "properties": {
+          "id": {"type": "integer"},
+          "login": {"type": "string", "minLength": 1},
+          "roles": {"type": "array", "items": {"enum": ["security"]}, "uniqueItems": true}
+        }
+      }
+    }
+  }
+}

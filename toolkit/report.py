@@ -9,7 +9,7 @@ from pathlib import Path
 
 import jsonschema
 
-from toolkit import policy
+from toolkit import control, policy
 
 SCHEMA = json.loads((Path(__file__).parent / 'schemas' / 'report-v1.json').read_text(encoding='utf-8'))
 
@@ -55,7 +55,46 @@ def _cross_record_problems(doc):
         if not any(results.get(x) == 'failed' for x in ids):
             problems.append(f'findings/{i}: a confirmed finding needs a failed execution record; '
                             f'execution_record_ids {ids} do not include one')
-    return problems + _requirement_problems(doc) + _approval_problems(doc)
+    return problems + _requirement_problems(doc) + _approval_problems(doc) + _review_problems(doc)
+
+
+def _review_problems(doc):
+    """A decision only ever makes a finding's status more cautious: one sent back for evidence is not
+    confirmed (〈定義：覆核紀錄〉 目前的決定)."""
+    problems = []
+    summary = doc.get('review_summary') if isinstance(doc, dict) else None
+    if isinstance(summary, dict):
+        states = [f['review'].get('state') for f in _list(doc, 'findings')
+                  if isinstance(f, dict) and isinstance(f.get('review'), dict)]
+        problems += [f'review_summary: {s} is {n}, but {states.count(s)} findings are in that review state '
+                     f'(〈定義：覆核紀錄〉 報告)' for s, n in summary.items() if isinstance(n, int) and n != states.count(s)]
+
+    for i, f in enumerate(_list(doc, 'findings')):
+        review = f.get('review') if isinstance(f, dict) else None
+        if not isinstance(review, dict):
+            continue
+        decision = review.get('decision') if isinstance(review.get('decision'), dict) else {}
+        state, option = review.get('state'), decision.get('option')
+        if doc.get('review_record') is None and (state != 'pending' or decision or 'opened_at' in review):
+            problems.append(f'findings/{i}: review_record is null, so no review started and nobody decided '
+                            f'anything: the review is pending with no start and no decision (〈定義：覆核紀錄〉)')
+        elif state in WAITING_STATES and decision:
+            problems.append(f'findings/{i}: review state {state} has a decision; a decided review is in the '
+                            f'state its decision leaves (〈定義：覆核紀錄〉)')
+        elif state in DECISION_STATES.values() and DECISION_STATES.get(option) != state:
+            problems.append(f'findings/{i}: review state {state} does not match its decision {option!r} '
+                            f'(〈定義：覆核紀錄〉)')
+        problems += [f'findings/{i}: review {where} {value!r} is not an ISO 8601 UTC time (〈定義：覆核紀錄〉)'
+                     for where, value in (('opened_at', review.get('opened_at')), ('decision at', decision.get('at')))
+                     if value is not None and control.utc_time(value) is None]
+
+    def sent_back(f):
+        decision = f.get('review', {}).get('decision') if isinstance(f.get('review'), dict) else None
+        return isinstance(decision, dict) and decision.get('option') == 'evidence_pending'
+    return problems + [f'findings/{i}: its current review decision is evidence_pending, so its status is '
+                       f'evidence_pending, not confirmed (〈定義：覆核紀錄〉)'
+                       for i, f in enumerate(_list(doc, 'findings'))
+                       if isinstance(f, dict) and f.get('status') == 'confirmed' and sent_back(f)]
 
 
 def _approval_problems(doc):
@@ -200,7 +239,7 @@ def _authorization_section(doc):
              f'- **資料範圍**：{a["data_scope"]}',
              '- **允許操作**：' + _operations(a['operations']),
              f'- **簽發**：{a["issued_by"]} {a["issued_at"]}；應用負責人 {a["roles"]["app_owner"]}，執行者 {a["roles"]["operator"]}'
-             '（身分未經驗證，TK-HRV-004 尚未實作）']
+             '（身分未經驗證：是宣告的名稱，TK-HRV-004 的經驗證身分目前只用於覆核紀錄）']
     used = {}
     for e in doc['execution_records']:
         if e.get('approval_id'):
@@ -211,6 +250,66 @@ def _authorization_section(doc):
                      + _operations(ap['operations'])
                      + f'；理由：{ap["reason"]}；用於 {tests}')
     lines.append('- 測試用原始碼變更：無（受測原始碼即 `source_digest` 釘選的版本）')
+    return lines
+
+
+# 〈定義：覆核紀錄〉: the options of 候選問題覆核 and the 覆核狀態 each one leaves; a finding with no decision
+# is pending, or overdue past its deadline. toolkit.review and validate() share these.
+DECISION_STATES = {'approve': 'approved', 'reject': 'rejected', 'evidence_pending': 'evidence_pending'}
+WAITING_STATES = ('pending', 'overdue')
+FINDING_REVIEW_STATES = WAITING_STATES + tuple(DECISION_STATES.values())  # in the report's order
+# 〈定義：覆核紀錄〉 報告: 覆核狀態 and the options of 候選問題覆核.
+FINDING_REVIEW_LABELS = {'pending': '待覆核', 'overdue': '逾期覆核', 'approved': '已核准', 'rejected': '已退回',
+                       'evidence_pending': '已轉證據待補'}
+OPTION_LABELS = {'approve': '核准', 'reject': '退回', 'evidence_pending': '轉證據待補'}
+REVIEW_TYPE_LABELS = {'candidate_finding': '候選問題覆核'}  # 〈定義：覆核類型〉
+
+
+def render_review_issue(finding, doc, option_of_label):
+    """Title and body of the issue a finding's review is made on (〈定義：覆核紀錄〉 工單). option_of_label maps
+    each predefined platform label to its option. The fingerprint is shown to people, never searched."""
+    title = f'{REVIEW_TYPE_LABELS["candidate_finding"]}：{finding["requirement_id"]}'
+    options = '、'.join(f'`{label}`（{OPTION_LABELS[option]}）' for label, option in option_of_label.items())
+    body = (f'- 指紋：`{finding["fingerprint"]}`（{finding["fingerprint_version"]}）\n'
+            f'- 需求：`{finding["requirement_id"]}` 第 {finding["requirement_version"]} 版\n'
+            f'- 提交：`{doc["commit"]}`，執行：`{doc["run_id"]}`\n\n'
+            f'決定方式：先留言寫下理由，再加上其中一個標籤：{options}。留言本身不算決定。')
+    return title, body
+
+
+def _cell(text):
+    """Free text (a reviewer's comment) inside one Markdown table cell: no line break, no cell border, and no
+    HTML, which a renderer would act on (a comment opener hides the rest of the report)."""
+    text = ' '.join(str(text).split()).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+    return text.replace('|', '\\|')
+
+
+def _waiting_first(finding):
+    """Sort key: findings waiting for review (待覆核, 逾期覆核) first, the longest wait first, those with no
+    issue opened yet after them; decided findings last. sorted() keeps the report's order among equals."""
+    review = finding['review']
+    if review['state'] not in WAITING_STATES:
+        return 2, 0
+    opened = control.utc_time(review.get('opened_at'))
+    return (1, 0) if opened is None else (0, opened.timestamp())
+
+
+def _review_section(doc):
+    """〈定義：覆核紀錄〉 報告: the record used, the count per review state and each finding's review."""
+    ref = doc['review_record']
+    lines = ['', '## 覆核', '',
+             f'- **覆核紀錄**：`{ref["path"]}`（`{ref["digest"]}`）' if ref
+             else '- **覆核紀錄**：這次執行沒有使用覆核紀錄，每一筆問題都待覆核',
+             '- **數量**：' + '、'.join(f'{FINDING_REVIEW_LABELS[k]} {n}' for k, n in doc['review_summary'].items())]
+    if not doc['findings']:
+        return lines
+    lines += ['', '| 問題 | 覆核狀態 | 開始覆核 | 目前的決定 |', '| :--- | :--- | :--- | :--- |']
+    for f in sorted(doc['findings'], key=_waiting_first):
+        r = f['review']
+        d = r.get('decision')
+        decided = (f'{OPTION_LABELS[d["option"]]}：{d["by"]["login"]}（帳號 {d["by"]["id"]}）{d["at"]}；'
+                   f'理由：{_cell(d["reason"])}' if d else '—')
+        lines.append(f'| `{f["id"]}` | {FINDING_REVIEW_LABELS[r["state"]]} | {r.get("opened_at", "—")} | {decided} |')
     return lines
 
 
@@ -268,6 +367,8 @@ def render_markdown(doc):
                          f'| `{f.get("fingerprint", "")}`（{f.get("fingerprint_version", "")}） |')
     else:
         lines.append('本次計畫內的測試未產生問題紀錄；這只代表上列測試的結果，不涵蓋計畫以外的範圍。')
+
+    lines += _review_section(doc)
 
     c = doc['coverage']
     lines += ['', '## 覆蓋', '', f'- 盤點來源：{c.get("inventory_source", "")}',

@@ -23,7 +23,8 @@
       "then": {"properties": {"execution_records": {"items": {"properties": {"result": {"enum": ["passed", "failed"]}}}}}}
     }
   ],
-  "required": ["status", "stages", "execution_records", "findings", "coverage", "source_changes"],
+  "required": ["status", "stages", "execution_records", "findings", "coverage", "source_changes", "review_record",
+               "review_summary"],
   "properties": {
     "stages": {
       "description": "TK-RUN-001, 〈定義：工作階段〉: preflight 前置檢查, static_analysis 靜態與架構分析, model_review 模型審查, threat_planning 威脅與測試規劃, dynamic_execution 動態執行, judgement_report 判定與報告. validate() also requires every stage to be listed.",
@@ -96,6 +97,31 @@
                          "by": {"$ref": "#/$defs/text"}, "at": {"$ref": "#/$defs/text"},
                          "reason": {"$ref": "#/$defs/text"}, "valid_until": {"$ref": "#/$defs/text"}}}},
         "identity_verified": {"const": false}
+      }
+    },
+    "review_record": {
+      "description": "〈定義：覆核紀錄〉: the review record this run used, in the control zone, by path and digest; null when the run used none (the ScanManifest referenced none, or the run stopped before reading it), so every finding is pending.",
+      "anyOf": [
+        {
+          "type": "object",
+          "required": ["path", "digest"],
+          "additionalProperties": false,
+          "properties": {"path": {"$ref": "#/$defs/text"}, "digest": {"$ref": "#/$defs/text"}}
+        },
+        {"type": "null"}
+      ]
+    },
+    "review_summary": {
+      "description": "〈定義：覆核紀錄〉 報告: how many findings are in each 覆核狀態; an unreviewed finding stays in the report (TK-HRV-010).",
+      "type": "object",
+      "required": ["pending", "overdue", "approved", "rejected", "evidence_pending"],
+      "additionalProperties": false,
+      "properties": {
+        "pending": {"type": "integer", "minimum": 0},
+        "overdue": {"type": "integer", "minimum": 0},
+        "approved": {"type": "integer", "minimum": 0},
+        "rejected": {"type": "integer", "minimum": 0},
+        "evidence_pending": {"type": "integer", "minimum": 0}
       }
     },
     "source_changes": {
@@ -334,12 +360,39 @@
     },
     "finding": {
       "allOf": [{"$ref": "#/$defs/common"}],
-      "required": ["requirement_version"],
+      "required": ["requirement_version", "review"],
       "properties": {
         "requirement_version": {
           "description": "TK-REQ-004: the version of the confirmation item the finding was judged on.",
           "type": "integer",
           "minimum": 1
+        },
+        "review": {"$ref": "#/$defs/finding_review"}
+      }
+    },
+    "finding_review": {
+      "description": "〈定義：覆核紀錄〉: the finding's 覆核狀態 and current decision. The decider is the account the platform reported (TK-HRV-004); an overdue review leaves the finding's status as it is (TK-HRV-007).",
+      "type": "object",
+      "required": ["state"],
+      "additionalProperties": false,
+      "properties": {
+        "state": {"enum": ["pending", "overdue", "approved", "rejected", "evidence_pending"]},
+        "opened_at": {"$ref": "#/$defs/text"},
+        "decision": {
+          "type": "object",
+          "required": ["option", "by", "at", "reason"],
+          "additionalProperties": false,
+          "properties": {
+            "option": {"enum": ["approve", "reject", "evidence_pending"]},
+            "by": {
+              "type": "object",
+              "required": ["id", "login"],
+              "additionalProperties": false,
+              "properties": {"id": {"type": "integer"}, "login": {"$ref": "#/$defs/text"}}
+            },
+            "at": {"$ref": "#/$defs/text"},
+            "reason": {"$ref": "#/$defs/text"}
+          }
         }
       }
     },
