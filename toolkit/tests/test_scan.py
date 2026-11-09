@@ -1442,6 +1442,23 @@ class UnsupportedIdentity(unittest.TestCase):
         gaps = {u['scope'] for u in rep['coverage']['unsupported_items']}
         self.assertIn('identity:tenant_admin', gaps)
 
+    def test_the_gap_stays_when_the_environment_is_blocked(self):
+        import tempfile
+        from toolkit import e1
+        from toolkit.tests.test_e1 import failing_copy
+        with tempfile.TemporaryDirectory() as d:
+            src = failing_copy(d, recipe_change=lambda r: r['source_build'].update(tools=['no-such-tool']))
+            m = manifest('vulnerable')
+            m['target'] = {'project': str(src), 'source_digest': e1.source_digest(src)}
+            m['tests'][0]['actor_ref'] = 'tenant_admin'  # the other tests can run, so the BuildRecipe step is reached
+            rep = scan.run(m).report
+        self.assertEqual(report.validate(rep), [])
+        dynamic = next(s for s in rep['stages'] if s['stage'] == 'dynamic_execution')
+        self.assertEqual(dynamic['status'], 'blocked')
+        self.assertIn('source_build', dynamic['reason'])
+        gaps = {u['scope'] for u in rep['coverage']['unsupported_items']}
+        self.assertIn('identity:tenant_admin', gaps)
+
 
 class NoRecovery(unittest.TestCase):
     """〈定義：必要輸入〉 復原方式: a test that cannot be restored safely is not run."""

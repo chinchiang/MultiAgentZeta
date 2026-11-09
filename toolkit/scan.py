@@ -63,16 +63,43 @@ class _Listed:
 
 @dataclass
 class _Granted:
-    """〈定義：測試授權紀錄〉 as read in this run, and the extra approval each test runs under. Empty until
-    the record is read."""
+    """〈定義：測試授權紀錄〉 as read in this run. Empty until the record is read."""
     doc: dict | None = None
     ref: dict | None = None
-    approvals: dict = field(default_factory=dict)  # test_id -> approval_id
 
     def report(self):
         """The authorization as the report shows it; the names in it are declared, not verified (TK-HRV-004)."""
         shown = {k: v for k, v in self.doc.items() if k != 'schema_version'}
         return {**self.ref, **shown, 'extra_approvals': self.doc.get('extra_approvals', []), 'identity_verified': False}
+
+
+@dataclass(frozen=True)
+class _Precheck:
+    """A test's checks before the environment starts: (result, reason) when it cannot run, and the extra
+    approval of 〈定義：測試授權紀錄〉 it would run under; a record shows the approval only when its test ran."""
+    result: str | None = None
+    reason: str | None = None
+    approval_id: str | None = None
+
+    @property
+    def runnable(self):
+        return self.result is None
+
+    def outcome(self, reason):
+        """(result, reason) of a test that does not run: its own when it cannot run, else blocked for reason."""
+        return ('blocked', reason) if self.runnable else (self.result, self.reason)
+
+
+@dataclass
+class _RunState:
+    """What one run carries from its start to its report. listed, granted and gaps stay empty until they
+    are read; prechecks has an entry per planned test once the tests are checked."""
+    manifest: dict
+    records: _Records
+    listed: _Listed = field(default_factory=_Listed)
+    granted: _Granted = field(default_factory=_Granted)
+    prechecks: dict = field(default_factory=dict)  # test_id -> _Precheck
+    gaps: list = field(default_factory=list)  # 測試身分 the BuildRecipe cannot provide
 
 
 API_KEY_FORMATS = ('anon-jwt', 'publishable')
@@ -406,21 +433,19 @@ def _identity_problem(test, identities):
 
 
 def _test_problem(test, items, plan, identities, restorable, authorize):
-    """((result, reason) for a test that cannot run, or None; the approval_id it would run under, or None).
-    authorize(test) gives (approval_id, reason) of 〈定義：測試授權紀錄〉; a record shows the approval only
-    when its test ran."""
+    """The _Precheck of a test. authorize(test) gives (approval_id, reason) of 〈定義：測試授權紀錄〉."""
     reason = _plan_problem(test) or _item_problem(test, items, plan)
     if reason:
-        return ('blocked', reason), None
+        return _Precheck('blocked', reason)
     approval, reason = authorize(test)
     if reason:
-        return ('blocked', reason), None
+        return _Precheck('blocked', reason)
     if not restorable and DENIAL_TEMPLATES.get(test['template_id'], {}).get('writes'):
         # An extra approval never lets a test that cannot be restored run (〈定義：測試授權紀錄〉).
-        return ('blocked', ('the BuildRecipe declares no reset (snapshot_reset.reset_scope "none"): '
-                            'a write case cannot be restored safely and is not run (復原方式)')), approval
+        return _Precheck('blocked', 'the BuildRecipe declares no reset (snapshot_reset.reset_scope "none"): '
+                                    'a write case cannot be restored safely and is not run (復原方式)', approval)
     reason = _identity_problem(test, identities)
-    return (('unsupported', reason) if reason else None), approval
+    return _Precheck('unsupported', reason, approval) if reason else _Precheck(approval_id=approval)
 
 
 def _authorizer(manifest, granted, now):
@@ -690,56 +715,52 @@ def run(manifest):
     """
     run_start = datetime.now(timezone.utc)
     run_id = f'run-{run_start:%Y%m%d%H%M%S}-{secrets.token_hex(3)}'
-    records, listed = _Records(run_id, _commit(manifest)), _Listed()
+    state = _RunState(manifest, _Records(run_id, _commit(manifest)))
     missing = _input_problems(manifest)
     if missing:
-        return _blocked(manifest, records, listed, 'required inputs missing; nothing was started: ' + '; '.join(missing),
+        return _blocked(state, 'required inputs missing; nothing was started: ' + '; '.join(missing),
                         stage='preflight')
     overrides = _template_override_problems(manifest) + _s1_problems(manifest)
     if overrides:
-        return _blocked(manifest, records, listed, 'nothing was started: ' + '; '.join(overrides), stage='preflight')
+        return _blocked(state, 'nothing was started: ' + '; '.join(overrides), stage='preflight')
     project = manifest['target']['project']
     pinned, actual = manifest['target']['source_digest'], e1.source_digest(project)
     if pinned != actual:
-        return _blocked(manifest, records, listed, f'source_digest of the ScanManifest ({pinned}) does not match '
-                                           f'the project ({actual}); nothing was started', stage='preflight')
+        return _blocked(state, f'source_digest of the ScanManifest ({pinned}) does not match '
+                               f'the project ({actual}); nothing was started', stage='preflight')
     granted, problem = _load_authorization(manifest, run_start)
     if problem:
-        return _blocked(manifest, records, listed, f'nothing was started: {problem}', stage='preflight')
-    loaded, problem = _load_confirmation_list(manifest, run_start)
+        return _blocked(state, f'nothing was started: {problem}', stage='preflight')
+    state.granted = granted
+    listed, problem = _load_confirmation_list(manifest, run_start)
     if problem:
-        return _blocked(manifest, records, listed, f'nothing was started: {problem}', stage='preflight', granted=granted)
-    listed = loaded
+        return _blocked(state, f'nothing was started: {problem}', stage='preflight')
+    state.listed = listed
     recipe, _ = e1.load_recipe(project)  # without one, e1.prepare blocks the run at the BuildRecipe step
-    problem = recipe and authorization.target_problem(granted.doc, recipe['sample'], e1.MODE)
+    problem = recipe and authorization.target_problem(state.granted.doc, recipe['sample'], e1.MODE)
     if problem:
-        return _blocked(manifest, records, listed, f'nothing was started: test authorization does not cover this '
-                                                   f'run: {problem}', stage='preflight', granted=granted)
+        return _blocked(state, f'nothing was started: test authorization does not cover this '
+                               f'run: {problem}', stage='preflight')
     identities = {i['name'] for i in recipe['auth']['identities']} if recipe else None
     restorable = not (recipe and recipe['snapshot_reset'].get('reset_scope') == 'none')
-    plan, authorize = _plan(manifest), _authorizer(manifest, granted, run_start)
-    problems = {}
-    for t in manifest['tests']:
-        problems[t['test_id']], approval = _test_problem(t, listed.items, plan, identities, restorable, authorize)
-        if approval:
-            granted.approvals[t['test_id']] = approval
-    gaps = _identity_gaps(manifest, identities)
-    if all(problems.values()):
-        return _blocked(manifest, records, listed, 'no test in the ScanManifest can run; nothing was started',
-                        per_test=problems, stage='preflight', gaps=gaps, granted=granted)
+    plan, authorize = _plan(manifest), _authorizer(manifest, state.granted, run_start)
+    state.prechecks = {t['test_id']: _test_problem(t, state.listed.items, plan, identities, restorable, authorize)
+                       for t in manifest['tests']}
+    state.gaps = _identity_gaps(manifest, identities)
+    if not any(p.runnable for p in state.prechecks.values()):
+        return _blocked(state, 'no test in the ScanManifest can run; nothing was started', stage='preflight')
     prepared = e1.prepare(project)
     if isinstance(prepared, e1.Blocked):
-        return _blocked(manifest, records, listed, f'environment blocked at BuildRecipe step {prepared.step}: '
-                                           f'{prepared.reason}', per_test=problems, stage='dynamic_execution',
-                        granted=granted)
+        return _blocked(state, f'environment blocked at BuildRecipe step {prepared.step}: '
+                               f'{prepared.reason}', stage='dynamic_execution')
     executions, findings = [], []
     stopped = None  # reason the remaining tests cannot run
     try:
         for test in manifest['tests']:
             started, evidence = _now(), []
-            problem = problems[test['test_id']] or (('blocked', stopped) if stopped else None)
-            if problem:
-                executions.append(_execution(records, listed, test, started, *problem))
+            precheck = state.prechecks[test['test_id']]
+            if not precheck.runnable or stopped:
+                executions.append(_execution(state, test, started, *precheck.outcome(stopped)))
                 continue
             denial = _case_kind(test) == report.DENIAL
             undo = None
@@ -763,8 +784,8 @@ def run(manifest):
             finally:
                 if undo:
                     undo()
-            ex = _execution(records, listed, test, started, result, error,
-                            approval_id=granted.approvals.get(test['test_id']))  # it ran under this approval
+            ex = _execution(state, test, started, result, error,
+                            approval_id=precheck.approval_id)  # it ran under this approval
             if test.get('fault'):
                 ex['fault'] = test['fault']
             ex['case_kind'] = _case_kind(test)
@@ -773,13 +794,13 @@ def run(manifest):
             ex['evidence'] = [{'id': f'{ex["id"]}-ev{i + 1}', **ev} for i, ev in enumerate(evidence)]
             executions.append(ex)
             if result == 'failed' and denial:  # a failed allowed case is a broken permitted access, not a leak
-                findings.append(records.new('finding', fingerprint=_fingerprint(test),
-                                            fingerprint_version=FINGERPRINT_VERSION,
-                                            requirement_id=test['requirement_id'],
-                                            requirement_version=_item_version(listed, test),
-                                            root_cause='object-ownership-not-enforced',
-                                            status=confirmation.finding_cap(listed.item(test)),
-                                            evidence_type='dynamic', execution_record_ids=[ex['id']]))
+                findings.append(state.records.new('finding', fingerprint=_fingerprint(test),
+                                                  fingerprint_version=FINGERPRINT_VERSION,
+                                                  requirement_id=test['requirement_id'],
+                                                  requirement_version=_item_version(state.listed, test),
+                                                  root_cause='object-ownership-not-enforced',
+                                                  status=confirmation.finding_cap(state.listed.item(test)),
+                                                  evidence_type='dynamic', execution_record_ids=[ex['id']]))
             if denial and DENIAL_TEMPLATES[test['template_id']]['writes']:
                 reset = e1.reset(prepared.env)
                 if isinstance(reset, e1.Blocked):
@@ -789,12 +810,12 @@ def run(manifest):
     definite = all(e['result'] in ('passed', 'failed') for e in executions)
     dynamic = ({'status': 'failed', 'reason': f'stopped, environment isolated: {stopped}'} if stopped
                else {'status': 'completed'})
-    return _finish(manifest, records, listed, executions, findings, gaps=gaps,
+    return _finish(state, executions, findings,
                    status='completed' if definite else 'partial',
                    reason='' if definite else 'some tests have no definite result',
                    stages=_stages(preflight={'status': 'completed'}, dynamic_execution=dynamic),
                    environment={'mode': prepared.profile['mode'], 'profile_digest': _digest(prepared.profile)},
-                   matrix=_authorization_matrix(prepared), granted=granted)
+                   matrix=_authorization_matrix(prepared))
 
 
 def _item_version(listed, test):
@@ -803,12 +824,12 @@ def _item_version(listed, test):
     return item['version'] if item else None
 
 
-def _execution(records, listed, test, started, result, error=None, approval_id=None):
-    ex = records.new('exec', test_id=test['test_id'], template_id=test['template_id'],
-                     requirement_id=test['requirement_id'], requirement_version=_item_version(listed, test),
-                     actor_ref=test['actor_ref'],
-                     resource_ref=test['resource_ref'], started_at=started, ended_at=_now(),
-                     result=result, error=error, evidence=[])
+def _execution(state, test, started, result, error=None, approval_id=None):
+    ex = state.records.new('exec', test_id=test['test_id'], template_id=test['template_id'],
+                           requirement_id=test['requirement_id'], requirement_version=_item_version(state.listed, test),
+                           actor_ref=test['actor_ref'],
+                           resource_ref=test['resource_ref'], started_at=started, ended_at=_now(),
+                           result=result, error=error, evidence=[])
     if approval_id:  # the extra approval a test that ran was let past 〈定義：測試授權紀錄〉 by (TK-ENV-001)
         ex['approval_id'] = approval_id
     return ex
@@ -843,19 +864,19 @@ def _confirmation(item):
     return shown
 
 
-def _blocked(manifest, records, listed, reason, per_test=None, stage='preflight', gaps=(), granted=None):
-    """Every planned test blocked at `stage`; later stages do not run (〈定義：工作階段〉)."""
+def _blocked(state, reason, stage='preflight'):
+    """Every planned test blocked at `stage`, or held by its own precheck; later stages do not run
+    (〈定義：工作階段〉)."""
     now = _now()
-    per_test = per_test or {}
-    executions = [_execution(records, listed, t, now, *(per_test.get(t['test_id']) or ('blocked', reason)))
-                  for t in manifest['tests']]
+    executions = [_execution(state, t, now, *state.prechecks.get(t['test_id'], _Precheck()).outcome(reason))
+                  for t in state.manifest['tests']]
     if stage == 'preflight':
         stages = _stages(preflight={'status': 'blocked', 'reason': reason},
                          dynamic_execution={'status': 'not_run', 'reason': 'preflight blocked; no dependent work'})
     else:
         stages = _stages(preflight={'status': 'completed'}, dynamic_execution={'status': 'blocked', 'reason': reason})
-    return _finish(manifest, records, listed, executions, [], status='blocked', reason=reason, stages=stages, gaps=gaps,
-                   environment=None, matrix=[], granted=granted)
+    return _finish(state, executions, [], status='blocked', reason=reason, stages=stages,
+                   environment=None, matrix=[])
 
 
 NOT_IMPLEMENTED = {'status': 'not_run', 'reason': 'stage not implemented in this toolkit version'}
@@ -881,8 +902,8 @@ UNSUPPORTED_SCOPES = [
 ]
 
 
-def _finish(manifest, records, listed, executions, findings, status, reason, stages, environment, matrix, gaps=(),
-            granted=None):
+def _finish(state, executions, findings, status, reason, stages, environment, matrix):
+    manifest, records, listed = state.manifest, state.records, state.listed
     counts = {k: sum(e['result'] == k for e in executions)
               for k in ('passed', 'failed', 'blocked', 'untested', 'unsupported')}
     coverage = records.new('coverage', inventory_source='fixed test plan in the ScanManifest (tracer bullet)',
@@ -890,7 +911,7 @@ def _finish(manifest, records, listed, executions, findings, status, reason, sta
                            executed=counts['passed'] + counts['failed'],
                            valid_judgements=counts['passed'] + counts['failed'], blocked=counts['blocked'],
                            untested=counts['untested'], unsupported=counts['unsupported'] + len(UNSUPPORTED_SCOPES),
-                           unsupported_items=[dict(u) for u in UNSUPPORTED_SCOPES] + [dict(g) for g in gaps])
+                           unsupported_items=[dict(u) for u in UNSUPPORTED_SCOPES] + [dict(g) for g in state.gaps])
     doc = {'schema_version': '1', 'run_id': records.run_id, 'id': f'report-{records.run_id}', 'created_at': _now(),
            'source_id': SOURCE_ID, 'commit': records.commit, 'status': status,
            'manifest': {'id': manifest['id'], 'digest': _digest(manifest)},
@@ -903,8 +924,8 @@ def _finish(manifest, records, listed, executions, findings, status, reason, sta
         doc['environment'] = environment
     if listed.ref:
         doc['confirmation_list'] = dict(listed.ref)
-    if granted:
-        doc['authorization'] = granted.report()
+    if state.granted.ref:
+        doc['authorization'] = state.granted.report()
     problems = report.validate(doc)
     if problems:
         raise RuntimeError('the toolkit produced an invalid report: ' + '; '.join(problems))
