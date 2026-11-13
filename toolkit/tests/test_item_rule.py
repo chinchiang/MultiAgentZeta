@@ -86,11 +86,11 @@ class ItemRule(unittest.TestCase):
 
     def test_only_a_modified_deny_item_listing_allowed_tests_is_a_legitimate_exception(self):
         base = {'status': 'modified', 'rule': 'deny', 'confirmation': {'allowed_tests': [SHARED_READ]}}
-        self.assertTrue(item_rule.is_exception(base))
+        self.assertTrue(item_rule.lists_allowed_tests(base))
         for change in ({'status': 'accepted'}, {'rule': 'allow'}, {'confirmation': {'allowed_tests': []}},
                        {'confirmation': {}}):
             with self.subTest(change):
-                self.assertFalse(item_rule.is_exception(dict(base, **change)))
+                self.assertFalse(item_rule.lists_allowed_tests(dict(base, **change)))
 
     def test_a_report_item_without_a_confirmation_judges_every_test_by_its_rule(self):
         # validate() meets malformed reports: the rules must not raise on them.

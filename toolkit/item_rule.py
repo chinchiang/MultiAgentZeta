@@ -21,11 +21,12 @@ def _allowed_tests(item):
     return (item.get('confirmation') or {}).get('allowed_tests') or []
 
 
-def is_exception(item):
-    """A 合法例外: a modification that permits what the item's rule denies and lists the tests it allows
-    (〈定義：確認清單〉 修改, TK-DYN-003). The report keeps only the rule that judges the item's other tests,
-    which is the original deny for an exception, so the rewritten allow is not visible here; a report of
-    a run lists allowed_tests for no other item."""
+def lists_allowed_tests(item):
+    """Whether the report shows item as a 合法例外: modified, judged by deny, and listing the tests it
+    allows (〈定義：確認清單〉 修改, TK-DYN-003). The report-shape counterpart of confirmation.is_exception,
+    which reads the list's modified_rule; the report keeps only the rule that judges the item's other
+    tests, which is the original deny for an exception, so the rewritten allow is not visible here. A
+    report of a run lists allowed_tests for no other item."""
     return item.get('status') == MODIFIED and item.get('rule') == policy.DENY and bool(_allowed_tests(item))
 
 
@@ -33,7 +34,7 @@ def rule_for(item, test_id, case_kind):
     """The allow/deny rule test_id, a test of case_kind, is judged by (〈定義：確認清單〉 修改): a 合法例外
     allows only the allowed cases its allowed_tests lists; every other test, a denial case it lists
     included, keeps the item's rule (TK-DYN-003)."""
-    if case_kind == ALLOWED and is_exception(item) and test_id in _allowed_tests(item):
+    if case_kind == ALLOWED and lists_allowed_tests(item) and test_id in _allowed_tests(item):
         return policy.ALLOW
     return item.get('rule')
 
