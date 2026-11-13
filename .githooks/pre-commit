@@ -12,3 +12,7 @@ fi
   echo "to regenerate stale outputs, then stage the changes again." >&2
   exit 1
 }
+"$PY" -I docs/toolkit/tools/build.py --check-staged || {
+  echo "pre-commit: version rule failed (see above). Bump the version, then stage the changes again." >&2
+  exit 1
+}

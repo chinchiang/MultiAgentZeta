@@ -3,8 +3,14 @@
 Run (from anywhere):
   python3 -I -m unittest discover -s docs/toolkit/tools -v
 """
+import contextlib
+import io
 import json
+import re
+import shutil
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -383,6 +389,173 @@ class Markers(unittest.TestCase):
         snap = make()
         snap[build.SPEC] = snap[build.SPEC].replace('<!-- END:APPENDIX_A -->', '')
         self.assertEqual(rules(snap), {('marker', build.SPEC)})
+
+
+def revision(version, rows=()):
+    """The two files check_revision reads: the spec header and review-log chapter 4."""
+    log = '# 審查處置紀錄\n\n## 4. 修訂紀錄\n\n| 版本 | 日期 | 內容 |\n|---|---|---|\n'
+    log += ''.join(f'| {v} | 2026-01-01 | 修訂。 |\n' for v in rows)
+    log += '\n## 5. 已取消的宣稱\n\n| v9.9.9 | 不是修訂紀錄 |\n'
+    return {build.SPEC: f'# 規格\n\n> **版本**：{version}（四份文件共用版本號）\n', build.REVIEW: log}
+
+
+BASE = revision('v1.4.5', rows=['v1.4.5'])
+BUMPED = revision('v1.4.6', rows=['v1.4.5', 'v1.4.6'])
+GOVERNED = ['docs/toolkit/spec.md', 'docs/toolkit/tools/build.py', 'docs/toolkit/README.md', 'GLOSSARY.md',
+            'docs/adr/0001-x.md', 'CODING_STANDARDS.md', 'AGENTS.md', 'docs/agents/issue-tracker.md',
+            '.claude/agents/reviewer.md']
+EXEMPT = ['toolkit/scan.py', 'samples/a/b.json', 'README.md', 'CLAUDE.md', '.github/workflows/docs-check.yml',
+          '.githooks/pre-commit']
+
+
+class RevisionMustBumpVersion(unittest.TestCase):
+    """check_revision(changed, base, new, parents): one revision, the paths it changed, two snapshots."""
+
+    def test_each_governed_path_without_a_bump_is_a_problem(self):
+        for path in GOVERNED:
+            with self.subTest(path=path):
+                problems = build.check_revision([path], BASE, BASE)
+                self.assertEqual([p.rule for p in problems], ['revision-version'])
+                self.assertIn(path, problems[0].message)
+                self.assertIn('v1.4.5', problems[0].message)
+
+    def test_every_changed_governed_path_is_named(self):
+        problems = build.check_revision(['GLOSSARY.md', 'toolkit/scan.py', 'AGENTS.md'], BASE, BASE)
+        self.assertEqual(len(problems), 1)
+        self.assertIn('GLOSSARY.md', problems[0].message)
+        self.assertIn('AGENTS.md', problems[0].message)
+        self.assertNotIn('toolkit/scan.py', problems[0].message)
+
+    def test_newer_version_with_its_row_passes(self):
+        for path in GOVERNED:
+            with self.subTest(path=path):
+                self.assertEqual(build.check_revision([path], BASE, BUMPED), [])
+
+    def test_newer_version_without_its_row_is_a_problem(self):
+        new = revision('v1.4.6', rows=['v1.4.5'])
+        problems = build.check_revision(['GLOSSARY.md'], BASE, new)
+        self.assertEqual([p.rule for p in problems], ['revision-log'])
+        self.assertIn('v1.4.6', problems[0].message)
+
+    def test_row_in_another_chapter_does_not_count(self):
+        new = revision('v1.4.6', rows=['v1.4.5'])
+        new[build.REVIEW] = new[build.REVIEW].replace('v9.9.9', 'v1.4.6')
+        self.assertEqual([p.rule for p in build.check_revision(['GLOSSARY.md'], BASE, new)], ['revision-log'])
+
+    def test_older_version_is_a_problem(self):
+        new = revision('v1.4.4', rows=['v1.4.5', 'v1.4.4'])
+        problems = build.check_revision(['GLOSSARY.md'], BASE, new)
+        self.assertEqual([p.rule for p in problems], ['revision-version'])
+        self.assertIn('v1.4.4', problems[0].message)
+
+    def test_versions_compare_as_numbers(self):
+        base, new = revision('v1.4.9', rows=['v1.4.9']), revision('v1.4.10', rows=['v1.4.9', 'v1.4.10'])
+        self.assertEqual(build.check_revision(['GLOSSARY.md'], base, new), [])
+
+    def test_paths_outside_the_rule_need_no_bump(self):
+        self.assertEqual(build.check_revision(EXEMPT, BASE, BASE), [])
+
+    def test_lookalike_paths_are_not_governed(self):
+        self.assertEqual(build.check_revision(['docs/toolkit-extra/a.md', 'GLOSSARY.md.bak', 'docs/other.md'],
+                                              BASE, BASE), [])
+
+    def test_root_commit_and_merge_commit_are_not_checked(self):
+        self.assertEqual(build.check_revision(['GLOSSARY.md'], None, BASE, parents=0), [])
+        self.assertEqual(build.check_revision(['GLOSSARY.md'], BASE, BASE, parents=2), [])
+
+    def test_unreadable_version_is_a_problem(self):
+        new = {**BASE, build.SPEC: '# 規格\n'}
+        self.assertEqual([p.rule for p in build.check_revision(['GLOSSARY.md'], BASE, new)], ['header-missing'])
+
+    def test_readme_version_rule_lists_exactly_the_governed_paths(self):
+        text = Path(build.REPO, build.README).read_text(encoding='utf-8')
+        sentence = next(line for line in text.splitlines() if line.startswith('- 改動 `docs/toolkit/`'))
+        listed = set(re.findall(r'`([^`]+)`', sentence.split('時，')[0])) - {'tools/'}
+        self.assertEqual(listed, set(build.VERSIONED_PATHS))
+
+
+    def test_a_bump_alone_passes(self):
+        """Only the version headers and the log row change: the revision that bumps is itself accepted."""
+        bumped_files = [build.SPEC, build.DESIGN, build.REVIEW, build.SCOPE]
+        self.assertEqual(build.check_revision(bumped_files, BASE, BUMPED), [])
+        self.assertEqual([p.rule for p in build.check_revision(bumped_files, BASE, BASE)], ['revision-version'])
+
+
+@unittest.skipUnless(shutil.which('git'), 'git is not installed')
+class RevisionGitLayer(unittest.TestCase):
+    """The --check-staged and --check-commits modes over throwaway repositories, through main()."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.repo = Path(self.dir.name)
+        self.git('init', '-q', '-b', 'main')
+        self.git('config', 'user.email', 'a@b')
+        self.git('config', 'user.name', 't')
+
+    def git(self, *args):
+        return subprocess.run(['git', '-C', str(self.repo), *args], check=True, capture_output=True, text=True).stdout.strip()
+
+    def write(self, snap, **extra):
+        for path, text in {**snap, **extra}.items():
+            f = self.repo / path
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text(text, encoding='utf-8', newline='')
+
+    def commit(self, message, snap=None, **extra):
+        self.write(snap or {}, **extra)
+        self.git('add', '-A')
+        self.git('commit', '-q', '-m', message)
+        return self.git('rev-parse', 'HEAD')
+
+    def run_main(self, *argv):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code = build.main(list(argv), repo=self.repo)
+        return code, err.getvalue()
+
+    def test_staged_in_a_repository_without_commits_is_not_checked(self):
+        self.write(BASE, **{'GLOSSARY.md': 'a'})
+        self.git('add', '-A')
+        self.assertEqual(self.run_main('--check-staged'), (0, ''))
+
+    def test_staged_while_a_merge_is_in_progress_is_not_checked(self):
+        self.commit('base', BASE, **{'GLOSSARY.md': 'a'})
+        self.git('checkout', '-q', '-b', 'side')
+        self.commit('side', **{'other.txt': 'x'})
+        self.git('checkout', '-q', 'main')
+        self.commit('main', **{'more.txt': 'y'})
+        subprocess.run(['git', '-C', str(self.repo), 'merge', '--no-commit', '--no-ff', 'side'], check=True, capture_output=True)
+        self.write({}, **{'GLOSSARY.md': 'merged change'})
+        self.git('add', '-A')
+        self.assertEqual(self.run_main('--check-staged'), (0, ''))
+
+    def test_staged_change_without_a_bump_still_fails(self):
+        self.commit('base', BASE, **{'GLOSSARY.md': 'a'})
+        self.write({}, **{'GLOSSARY.md': 'b'})
+        self.git('add', '-A')
+        code, err = self.run_main('--check-staged')
+        self.assertEqual(code, 2)
+        self.assertIn('[revision-version]', err)
+
+    def test_base_that_is_not_an_ancestor_of_head_falls_back_to_the_merge_base(self):
+        """A force push: the old tip is a real commit, but no longer in HEAD's history."""
+        root = self.commit('base', BASE, **{'GLOSSARY.md': 'a'})
+        old_tip = self.commit('old work', **{'GLOSSARY.md': 'old'})
+        self.git('reset', '-q', '--hard', root)
+        self.commit('forgot to bump', **{'GLOSSARY.md': 'new'})
+        code, err = self.run_main('--check-commits', old_tip, '--fallback', root)
+        self.assertEqual(code, 2)
+        self.assertIn('[revision-version]', err)
+
+    def test_commits_each_missing_a_bump_are_all_named(self):
+        root = self.commit('base', BASE, **{'GLOSSARY.md': 'a'})
+        first = self.commit('one', **{'GLOSSARY.md': 'b'})
+        second = self.commit('two', **{'GLOSSARY.md': 'c'})
+        code, err = self.run_main('--check-commits', root)
+        self.assertEqual(code, 2)
+        self.assertIn(first[:10], err)
+        self.assertIn(second[:10], err)
 
 
 class DiskAdapter(unittest.TestCase):

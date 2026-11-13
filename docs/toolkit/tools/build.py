@@ -15,6 +15,13 @@ Usage (from anywhere):
       # set the shared version and revision date (default: today in Taiwan time)
       # in every document header and the spec §0.4 sentence, then rewrite outputs
 
+  python3 -I docs/toolkit/tools/build.py --check-staged
+      # pre-commit: the staged changes against HEAD must bump the version if they touch
+      # a VERSIONED_PATHS path (README 版本規則)
+  python3 -I docs/toolkit/tools/build.py --check-commits BASE [--fallback REF]
+      # CI: every non-merge commit in BASE..HEAD, each against its first parent; when BASE
+      # is empty, all zeros or unknown, the merge base of HEAD and REF is used instead
+
 Exit codes: 0 ok; 1 outputs stale (--check only); 2 validation problems.
 Nothing is written while any problem is reported.
 
@@ -25,6 +32,8 @@ no files itself. ``bump(snapshot, version, date)`` is the same over a snapshot,
 for a new revision: it returns the header and §0.4 edits plus the regenerated
 outputs, or the problems that stop the bump. ``load_snapshot`` (disk) and the tests (in memory) build
 snapshots; ``main`` turns the result into output, writes and an exit code.
+``check_revision(changed, base, new, parents)`` is the third entry point: the version rule for
+one commit, over paths and two snapshots; only ``main``'s thin git layer reads git.
 
 Problems are reported per stage: if requirement blocks or groups.json cannot be
 parsed, only those problems are reported; otherwise every remaining check runs
@@ -51,6 +60,7 @@ import datetime
 import json
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -63,6 +73,9 @@ REVIEW = 'docs/toolkit/review-log.md'
 README = 'docs/toolkit/README.md'
 CONFIG = 'docs/toolkit/tools/groups.json'
 VERSIONED = (SPEC, DESIGN, REVIEW)  # v0.1-scope.md takes its version from spec.md
+# README 版本規則: changing any of these (a trailing '/' means everything under it) needs a new shared version.
+VERSIONED_PATHS = ('docs/toolkit/', 'GLOSSARY.md', 'docs/adr/', 'CODING_STANDARDS.md',
+                   'AGENTS.md', 'docs/agents/', '.claude/agents/')
 
 LEVELS = ('須', '不得', '宜', '可')
 V01 = ('必做', '可延後', '不適用')
@@ -459,6 +472,45 @@ def bump(snapshot, version, date):
     return Result([], {p: t for p, t in updates.items() if snapshot.get(p) != t}, after.counts)
 
 
+def _version_tuple(v):
+    return tuple(int(n) for n in VERSION.fullmatch(v).groups())
+
+
+def _has_log_row(review_log, version):
+    """Whether chapter 4 of the review log has a table row for version."""
+    m = re.search(r'^## 4\. .*?(?=^## |\Z)', review_log, re.M | re.S)
+    return bool(m) and re.search(r'^\| ' + re.escape(version) + r' \|', m.group(0), re.M) is not None
+
+
+def check_revision(changed, base, new, parents=1):
+    """Check one revision (a commit): changing a VERSIONED_PATHS path needs a new shared version.
+
+    changed: repo-relative POSIX paths the revision touched. base, new: snapshots with at least
+    SPEC and REVIEW, before and after (base is None for a root commit). parents: how many parents
+    the revision has; only a revision with exactly one is checked. Returns a list of Problem.
+    A bump counts when the spec header version is newer than base's AND review-log chapter 4 has
+    a row for it. Reads no files and runs no git.
+    """
+    if parents != 1 or base is None:
+        return []
+    governed = sorted(p for p in changed if any(p == g or (g.endswith('/') and p.startswith(g)) for g in VERSIONED_PATHS))
+    if not governed:
+        return []
+    try:
+        before = header_value(base[SPEC], '版本', VERSION.pattern, SPEC)
+        after = header_value(new[SPEC], '版本', VERSION.pattern, SPEC)
+    except Invalid as e:
+        return [e.problem]
+    hint = 'run: python3 -I docs/toolkit/tools/build.py --bump v<new version>, and add its row to review-log.md chapter 4'
+    if _version_tuple(after) <= _version_tuple(before):
+        state = 'unchanged' if after == before else f'moved back from {before}'
+        return [Problem('revision-version', '',
+                        f'changed {", ".join(governed)} but the version is {state} at {after}; {hint}')]
+    if not _has_log_row(new.get(REVIEW, ''), after):
+        return [Problem('revision-log', REVIEW, f'version is {after} but chapter 4 has no row for it; {hint}')]
+    return []
+
+
 def taiwan_today():
     """Today's date in Taiwan time (UTC+8, no daylight saving), the zone the headers use."""
     return datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).date().isoformat()
@@ -489,6 +541,57 @@ def format_problem(p):
     return f'error: {where}{p.message} [{p.rule}]'
 
 
+def _git(repo, *args):
+    """Run git in repo and return its stdout; Invalid('git') when it fails."""
+    run = subprocess.run(['git', '-C', str(repo), *args], capture_output=True)
+    if run.returncode != 0:
+        raise Invalid('git', '', f'git {" ".join(args)} failed: {run.stderr.decode("utf-8", "replace").strip()}')
+    return run.stdout.decode('utf-8')
+
+
+def _revision_snapshot(repo, spec_prefix):
+    """SPEC and REVIEW as git has them; spec_prefix is a revision, or '' for the index."""
+    return {f: _git(repo, 'show', f'{spec_prefix}:{f}') for f in (SPEC, REVIEW)}
+
+
+def _check_git_revision(repo, old, new, new_label, parents):
+    """check_revision for the change from commit old to new (new == '' means the index)."""
+    changed = [p for p in _git(repo, 'diff', '--name-only', '-z', '--no-renames',
+                               *(['--cached', old] if new == '' else [old, new])).split('\0') if p]
+    problems = check_revision(changed, _revision_snapshot(repo, old), _revision_snapshot(repo, new), parents)
+    return [p._replace(message=f'{new_label}: {p.message}') for p in problems]
+
+
+def check_staged(repo):
+    """Problems of the staged changes against HEAD; none for a first commit or a commit that concludes a merge."""
+    def has(ref):
+        return subprocess.run(['git', '-C', str(repo), 'rev-parse', '-q', '--verify', ref],
+                              capture_output=True).returncode == 0
+    if not has('HEAD') or has('MERGE_HEAD'):
+        return []
+    return _check_git_revision(repo, 'HEAD', '', 'staged changes', 1)
+
+
+def check_commits(repo, base, fallback):
+    """Problems of every commit in base..HEAD; Invalid('revision-base') when no base can be decided."""
+    def known(rev):
+        return bool(rev) and not set(rev) <= {'0'} and subprocess.run(
+            ['git', '-C', str(repo), 'cat-file', '-e', f'{rev}^{{commit}}'], capture_output=True).returncode == 0
+    if not known(base):
+        if not fallback:
+            raise Invalid('revision-base', '', 'no usable base commit and no --fallback; cannot decide what to check')
+        try:
+            base = _git(repo, 'merge-base', 'HEAD', fallback).strip()
+        except Invalid:
+            raise Invalid('revision-base', '', f'no usable base commit, and no merge base of HEAD and {fallback}') from None
+    problems = []
+    for commit in _git(repo, 'rev-list', '--reverse', f'{base}..HEAD').split():
+        parents = _git(repo, 'rev-list', '--parents', '-n', '1', commit).split()[1:]
+        if len(parents) == 1:
+            problems += _check_git_revision(repo, parents[0], commit, commit[:10], 1)
+    return problems
+
+
 def _option(argv, name):
     """The value after name in argv, None if name is absent, '' if it has no value."""
     if name not in argv:
@@ -498,6 +601,15 @@ def _option(argv, name):
 
 
 def main(argv, repo=REPO):
+    if '--check-staged' in argv or '--check-commits' in argv:
+        try:
+            problems = (check_staged(repo) if '--check-staged' in argv
+                        else check_commits(repo, _option(argv, '--check-commits'), _option(argv, '--fallback')))
+        except Invalid as e:
+            problems = [e.problem]
+        for p in problems:
+            print(format_problem(p), file=sys.stderr)
+        return 2 if problems else 0
     check = '--check' in argv
     version = _option(argv, '--bump')
     if version is not None:

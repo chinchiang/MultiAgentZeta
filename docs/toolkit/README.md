@@ -63,9 +63,14 @@ v1.3.6 以前的單一文件 `docs/research/vibe-coding-multiagent-testing-toolk
 - 換行：文件、工具、ADR、研究筆記與設定檔都是 LF。repo 根目錄的 `.gitattributes`（`* text=auto eol=lf`）讓 Git 在 checkout 時也保持 LF。
 - 產生結果：驗收群組表、附錄 A 與 `v0.1-scope.md` 與條文一致。
 
-兩道防線都執行這個指令：
+`--check` 之外另有版本規則的檢查（`check_revision`）：一個提交若改動上方「版本規則」列的路徑，就必須升版，也就是共用版本號比上一代新，**而且** `review-log.md` 第 4 章有新版本的那一列；只改版本與日期的升版提交本身也通過。沒有上一代的根提交與合併提交不檢查，沒有其他例外，改一個錯字也要升版。失敗時結束碼為 2，列出提交、被改動的路徑與未變的版本，並提示 `build.py --bump` 與補修訂紀錄。路徑清單只寫在 `build.py` 的 `VERSIONED_PATHS`，測試確認它與上方版本規則那一句一致。兩種模式：
 
-- **提交前 hook**：`.githooks/pre-commit`。每個複本執行一次 `git config core.hooksPath .githooks` 後啟用。hook 檢查的是工作目錄，不是暫存區：只暫存部分修改時，檢查通過不代表提交的內容通過。
-- **CI**：`.github/workflows/docs-check.yml`，在每次 push 與 PR 執行，並先跑工具本身的測試。直接推 `main` 時 CI 是事後警報；事前攔截靠 hook。
+- `build.py --check-staged`：暫存區對 `HEAD`，給提交前 hook 用。
+- `build.py --check-commits BASE [--fallback REF]`：`BASE..HEAD` 內每個非合併提交，各與它的第一個上一代比較，給 CI 用；逐一檢查是因為連續兩個提交各自漏升版時，整段的總差異看不出來。`BASE` 是空的、全零或找不到時改用 `HEAD` 與 `REF` 的共同祖先；仍決定不了基準就失敗，不會靜默通過。
+
+兩道防線都執行 `--check` 與上述版本規則的檢查：
+
+- **提交前 hook**：`.githooks/pre-commit`。每個複本執行一次 `git config core.hooksPath .githooks` 後啟用。`--check` 檢查的是工作目錄，不是暫存區：只暫存部分修改時，檢查通過不代表提交的內容通過；版本規則的檢查讀的是暫存區。
+- **CI**：`.github/workflows/docs-check.yml`，在每次 push 與 PR 執行（取完整歷史），並先跑工具本身的測試。直接推 `main` 時 CI 是事後警報；事前攔截靠 hook。
 
 工具本身的測試在 `tools/test_build.py`，用 `python3 -I -m unittest discover -s docs/toolkit/tools` 執行；修改 `build.py` 時依 `CODING_STANDARDS.md` 第 14 條補測試。

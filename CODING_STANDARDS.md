@@ -73,7 +73,7 @@ diff 新增或修改的每個例外處理、提早返回與預設值分支，結
 
 ## 14. 檢查規則一正一反
 
-`docs/toolkit/tools/build.py` 新增或修改的每條檢查規則，在 `tools/test_build.py` 都有一個通過的案例與一個觸發該規則的案例，測試透過 `check_docs` 入口進行；`bump` 的每條拒絕規則同樣一正一反，透過 `bump` 入口進行。
+`docs/toolkit/tools/build.py` 新增或修改的每條檢查規則，在 `tools/test_build.py` 都有一個通過的案例與一個觸發該規則的案例，測試透過 `check_docs` 入口進行；`bump` 的每條拒絕規則同樣一正一反，透過 `bump` 入口進行；版本規則的檢查（改動版本規則列的路徑必須升版）也一正一反，透過 `check_revision` 入口進行。
 
 # 第三部分：程式與規格
 
