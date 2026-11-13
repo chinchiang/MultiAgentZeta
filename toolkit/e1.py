@@ -21,10 +21,10 @@ import secrets
 import shutil
 import subprocess
 import tomllib
-import urllib.error
-import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from toolkit import transport
 
 RECIPE_FILE = 'build-recipe.json'
 SUPPORT_MATRIX = Path(__file__).with_name('support-matrix.json')
@@ -188,18 +188,11 @@ def _tail(text, lines=40):
 
 
 def _http(method, url, headers=None, body=None, timeout=15):
-    """Return (status, parsed JSON or text)."""
-    data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method, headers=dict(headers or {}))
-    if data is not None:
-        req.add_header('Content-Type', 'application/json')
+    """Return (status, parsed JSON or text); (0, the reason) when there is no reply."""
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            status, raw = r.status, r.read().decode()
-    except urllib.error.HTTPError as e:
-        with e:
-            status, raw = e.code, e.read().decode()
-    except (urllib.error.URLError, OSError) as e:
+        status, raw = transport.http(method, url, headers, body, timeout)
+        raw = raw.decode()
+    except (transport.RequestTimeout, transport.RequestFailed) as e:
         return 0, str(e)
     try:
         return status, json.loads(raw) if raw else None
@@ -209,8 +202,9 @@ def _http(method, url, headers=None, body=None, timeout=15):
 
 def _psql(env, sql):
     """Run SQL as the provisioning identity (postgres, inside the db container)."""
-    r = _run(['docker', 'exec', '-i', f'supabase_db_{env.project_id}', 'psql', '-U', 'postgres', '-d', 'postgres',
-              '-At', '-v', 'ON_ERROR_STOP=1'], timeout=60, stdin=sql)
+    r = transport.docker_exec(f'supabase_db_{env.project_id}',
+                              ['psql', '-U', 'postgres', '-d', 'postgres', '-At', '-v', 'ON_ERROR_STOP=1'],
+                              stdin=sql, timeout=60)
     if r.returncode:
         raise RuntimeError(_tail(r.stderr or r.stdout))
     return r.stdout

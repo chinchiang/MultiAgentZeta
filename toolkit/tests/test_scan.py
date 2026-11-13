@@ -16,7 +16,7 @@ import threading
 import unittest
 from pathlib import Path
 
-from toolkit import e1, report, scan
+from toolkit import e1, environment, report, scan
 from toolkit.tests.test_e1 import SAMPLES, needs_env
 
 # S1: the owner's own spec, given in the ScanManifest without any confirmation (〈定義：確認清單〉). It is the
@@ -619,17 +619,17 @@ class BrokenReplies(unittest.TestCase):
     def request_to(self, url):
         env = e1.Environment(project_dir=Path('.'), project_id='maz-no-stack', recipe={}, cli='', api_url=url,
                              api_keys={'anon-jwt': 'test-anon-key'})
-        return scan._request(env, 'anonymous', 'GET', '/rest/v1/documents', timeout=5)
+        return environment.Operations(env).request('anonymous', 'GET', '/rest/v1/documents', timeout=5)
 
     def test_error_reply_cut_off_mid_body_is_a_failed_request(self):
         url = one_reply_server(b'HTTP/1.1 403 Forbidden\r\nContent-Length: 100\r\n\r\npartial')
-        with self.assertRaises(scan.RequestFailed):
+        with self.assertRaises(environment.RequestFailed):
             self.request_to(url)
 
     def test_reply_that_is_not_utf8_is_a_failed_request(self):
         body = b'\xff\xfe\xfd'
         url = one_reply_server(b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 3\r\n\r\n' + body)
-        with self.assertRaises(scan.RequestFailed):
+        with self.assertRaises(environment.RequestFailed):
             self.request_to(url)
 
 
@@ -640,9 +640,9 @@ class MissingApiKeys(unittest.TestCase):
     def test_request_without_its_key_is_not_sent(self):
         # Nothing listens at this URL: a request that went out would fail as refused (RequestFailed).
         env = e1.Environment(project_dir=Path('.'), project_id='maz-no-stack', recipe={}, cli='',
-                             api_url=scan._closed_local_url(), api_keys={'anon-jwt': 'test-anon-key'})
-        with self.assertRaises(scan.ApiKeyUnavailable) as raised:
-            scan._request(env, 'anonymous', 'GET', '/rest/v1/documents', api_key='publishable', timeout=5)
+                             api_url=environment.closed_local_url(), api_keys={'anon-jwt': 'test-anon-key'})
+        with self.assertRaises(environment.ApiKeyUnavailable) as raised:
+            environment.Operations(env).request('anonymous', 'GET', '/rest/v1/documents', api_key='publishable', timeout=5)
         self.assertIn('publishable', str(raised.exception))
 
 
@@ -652,7 +652,7 @@ class SchemaCodes(unittest.TestCase):
     defs = report.SCHEMA['$defs']
 
     def test_fault_codes_match_the_schema(self):
-        self.assertEqual(set(scan.FAULTS), set(self.defs['execution_record']['properties']['fault']['enum']))
+        self.assertEqual(set(environment.FAULTS), set(self.defs['execution_record']['properties']['fault']['enum']))
 
     def test_api_key_formats_match_the_schema(self):
         self.assertEqual(set(scan.API_KEY_FORMATS), set(self.defs['evidence']['properties']['api_key_format']['enum']))

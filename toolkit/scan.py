@@ -5,19 +5,15 @@ BuildRecipe, run the manifest's fixed tests, judge them with the observer,
 and produce the versioned JSON report plus the Markdown generated from it.
 """
 import hashlib
-import http.client
 import json
 import re
 import secrets
-import socket
 import string
-import urllib.error
-import urllib.request
 from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from toolkit import authorization, confirmation, control, e1, item_rule, observer, policy, report, review
+from toolkit import authorization, confirmation, control, e1, environment, item_rule, observer, policy, report, review
 
 SOURCE_ID = 'toolkit.scan'
 FINGERPRINT_VERSION = 'fp-authz-v1'
@@ -114,20 +110,6 @@ class _RunState:
 API_KEY_FORMATS = ('anon-jwt', 'publishable')
 
 
-class RequestTimeout(Exception):
-    """A request exceeded the test's time limit: an execution error, never a pass (〈定義：測試結果〉)."""
-
-
-class RequestFailed(Exception):
-    """A request got no HTTP response (connection refused or reset, a broken reply): an execution
-    error for its case, never a pass, and never the end of the run (〈定義：測試結果〉, TK-RUN-001)."""
-
-
-class ApiKeyUnavailable(Exception):
-    """The environment does not provide an API key format the case needs: the case is blocked, and no
-    request goes out with an empty key (TK-DYN-004, TK-IDN-003; 〈定義：測試結果〉 受阻)."""
-
-
 def _api_key_for(test, identity):
     """The API key format a request of this case uses for the identity: the test's format for the actor
     (its requests and its identity check), anon-jwt for any other identity, such as the owner's control
@@ -135,50 +117,12 @@ def _api_key_for(test, identity):
     return test.get('api_key', 'anon-jwt') if identity == test['actor_ref'] else 'anon-jwt'
 
 
-def _check_api_keys(env, test, denial):
+def _check_api_keys(ops, test, denial):
     """Raise ApiKeyUnavailable, before the case sends anything, if the environment lacks an API key format
     one of the case's requests uses: the actor's, and for a denial case also the owner's (TK-DYN-004,
     TK-IDN-003)."""
     identities = [test['actor_ref']] + ([test['owner_ref']] if denial else [])
-    missing = sorted({_api_key_for(test, i) for i in identities} - {f for f, k in env.api_keys.items() if k})
-    if missing:
-        raise ApiKeyUnavailable(f'the environment provides no API key of format {", ".join(map(repr, missing))}')
-
-
-def _request(env, identity, method, path, body=None, api_key='anon-jwt', prefer='return=representation',
-             timeout=15):
-    """An actor request through the data API, as the given identity. Returns (status, parsed body)."""
-    if not env.api_keys.get(api_key):
-        raise ApiKeyUnavailable(f'the environment provides no API key of format {api_key!r}')
-    headers = {'apikey': env.api_keys[api_key], 'Prefer': prefer}
-    if identity in env.tokens:
-        headers['Authorization'] = 'Bearer ' + env.tokens[identity]['access_token']
-    data = json.dumps(body).encode() if body is not None else None
-    if data is not None:
-        headers['Content-Type'] = 'application/json'
-    req = urllib.request.Request(env.api_url + path, data=data, method=method, headers=headers)
-    try:
-        # Reading an error reply's body can fail too, so it sits inside the same handling.
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
-                status, raw = r.status, r.read()
-        except urllib.error.HTTPError as e:
-            with e:
-                status, raw = e.code, e.read()
-    except (TimeoutError, socket.timeout) as e:
-        raise RequestTimeout(f'{method} {path} exceeded {timeout} s') from e
-    except urllib.error.URLError as e:
-        if isinstance(e.reason, (TimeoutError, socket.timeout)):
-            raise RequestTimeout(f'{method} {path} exceeded {timeout} s') from e
-        raise RequestFailed(f'{method} {path}: {e.reason}') from e
-    except (OSError, http.client.HTTPException) as e:  # e.g. the connection was reset mid-reply
-        raise RequestFailed(f'{method} {path}: {e!r}') from e
-    try:
-        return status, json.loads(raw) if raw else None
-    except json.JSONDecodeError:
-        return status, None
-    except UnicodeDecodeError as e:  # bytes json cannot even decode: no readable reply
-        raise RequestFailed(f'{method} {path}: response body is not text ({e.reason})') from e
+    ops.require_api_keys({_api_key_for(test, i) for i in identities})
 
 
 # The four checks of a denial case (TK-DYN-001).
@@ -263,59 +207,7 @@ def _timeout(test):
     return (test.get('limits') or {}).get('timeout_seconds', 15)
 
 
-# Faults a self-validation test may inject (TK-VAL-001 無法判定案例). Recorded on the ExecutionRecord.
-FAULTS = ('session-revoked', 'observer-unavailable', 'observer-timeout', 'api-unreachable', 'api-key-missing')
-
-
-def _closed_local_url():
-    """A loopback URL on a port nothing listens on: connections to it are refused (api-unreachable)."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(('127.0.0.1', 0))
-        port = s.getsockname()[1]
-    return f'http://127.0.0.1:{port}'
-
-
-def _inject(env, test):
-    """Apply the test's fault, if any. Returns a function that undoes what can be undone."""
-    fault = test.get('fault')
-    if fault == 'session-revoked':
-        _request(env, test['actor_ref'], 'POST', '/auth/v1/logout?scope=global', timeout=_timeout(test))
-        return lambda: None  # the actor stays logged out for the rest of the run
-    if fault == 'observer-unavailable':
-        saved = env.observer['password']
-        env.observer['password'] = 'wrong-' + secrets.token_hex(8)
-
-        def restore():
-            env.observer['password'] = saved
-        return restore
-    if fault == 'observer-timeout':  # a query time limit no read can meet (TK-IDN-009)
-        env.observer['timeout_seconds'] = 0.000001
-
-        def no_limit_override():
-            env.observer.pop('timeout_seconds', None)
-        return no_limit_override
-    if fault == 'api-unreachable':  # every data API request of this case is refused, the owner's control included
-        saved_url, env.api_url = env.api_url, _closed_local_url()
-
-        def reconnect():
-            env.api_url = saved_url
-        return reconnect
-    if fault == 'api-key-missing':  # the environment lacks an API key format (TK-DYN-004); default: the test's own
-        fmt = test.get('fault_api_key') or test.get('api_key', 'anon-jwt')
-        saved_key = env.api_keys.pop(fmt, None)
-
-        def restore_key():
-            if saved_key is not None:
-                env.api_keys[fmt] = saved_key
-        return restore_key
-    return lambda: None
-
-
-def _identity_email(env, name):
-    return next((i.get('email') for i in env.recipe['auth']['identities'] if i['name'] == name), None)
-
-
-def _denial_case(env, test, evidence):
+def _denial_case(ops, test, evidence):
     """Run one denial case. Appends evidence; returns (result, checks).
 
     Leaks are judged only from the actor channel; state changes and side effects
@@ -329,7 +221,7 @@ def _denial_case(env, test, evidence):
 
     def actor(identity, method, path, body=None, prefer='return=representation'):
         key = _api_key_for(test, identity)
-        status, data = _request(env, identity, method, path, body, key, prefer, _timeout(test))
+        status, data = ops.request(identity, method, path, body, key, prefer, _timeout(test))
         rows = data if isinstance(data, list) else None
         evidence.append({'channel': 'actor', 'identity_ref': identity, 'api_key_format': key,
                          'request': {'method': method, 'path': path, 'prefer': prefer},
@@ -337,8 +229,8 @@ def _denial_case(env, test, evidence):
         return status, rows, data
 
     def observe(point):
-        state = observer.document_row_state(env, marker)
-        evidence.append({'channel': 'observer', 'identity_ref': env.observer['role'], 'point': point,
+        state = ops.observe(marker)
+        evidence.append({'channel': 'observer', 'identity_ref': ops.observer_role, 'point': point,
                          'observation': state})
         return state
 
@@ -353,9 +245,9 @@ def _denial_case(env, test, evidence):
 
     # 2. The actor's identity is valid, and it is the identity the test expects.
     status, _, user = actor(test['actor_ref'], 'GET', '/auth/v1/user')
-    expected_email = _identity_email(env, test['actor_ref'])
+    expected_email = ops.identity_email(test['actor_ref'])
     if expected_email is None:  # an anonymous identity: the request must carry no user session
-        checks['identity'] = status in (401, 403) and test['actor_ref'] not in env.tokens
+        checks['identity'] = status in (401, 403) and not ops.has_session(test['actor_ref'])
     else:
         checks['identity'] = status == 200 and isinstance(user, dict) and user.get('email') == expected_email
     if not checks['identity']:
@@ -386,13 +278,13 @@ ALLOWED_TEMPLATES = {'public-read-v1': {'method': 'GET', 'table': 'announcements
                      'shared-read-v1': {'method': 'GET', 'table': 'documents'}}
 
 
-def _allowed_case(env, test, evidence):
+def _allowed_case(ops, test, evidence):
     """An allowed-case template: public-read-v1 (e.g. USING (true) on public data, TK-DYN-004) or
     shared-read-v1 (a document shared with the actor's tenant, TK-DYN-003). Returns (result, checks)."""
     template = ALLOWED_TEMPLATES[test['template_id']]
     marker, key = test['resource_ref'], test.get('api_key', 'anon-jwt')
     path = f'/rest/v1/{template["table"]}?title=eq.{marker}&select=title'
-    status, data = _request(env, test['actor_ref'], template['method'], path, api_key=key, timeout=_timeout(test))
+    status, data = ops.request(test['actor_ref'], template['method'], path, api_key=key, timeout=_timeout(test))
     rows = data if isinstance(data, list) else None
     evidence.append({'channel': 'actor', 'identity_ref': test['actor_ref'], 'api_key_format': key,
                      'request': {'method': template['method'], 'path': path},
@@ -403,7 +295,7 @@ def _allowed_case(env, test, evidence):
 
 def _authorization_matrix(prepared):
     """Identities and how their credentials travel, as confirmed in the BuildRecipe (TK-IDN-003)."""
-    transport = prepared.env.recipe['auth']['token_transport']
+    transport = prepared.env.token_transport
     return [{'identity': name, 'transport': transport if ident['login'] == 'ok' else 'none',
              'transport_source': 'BuildRecipe auth.token_transport', 'path': ident['path']}
             for name, ident in prepared.profile['identities'].items()]
@@ -606,8 +498,8 @@ def _plan_problem(test):
     for name in ['resource_ref'] + _typed_params(template, 'marker'):
         if not isinstance(test.get(name), str) or not IDENTIFIER.match(test[name]):
             return f'{name} must be a resource marker identifier (A-Z, 0-9, -)'
-    if test.get('fault') is not None and test['fault'] not in FAULTS:
-        return f'fault must be one of {list(FAULTS)}'
+    if test.get('fault') is not None and test['fault'] not in environment.FAULTS:
+        return f'fault must be one of {list(environment.FAULTS)}'
     timeout = (test.get('limits') or {}).get('timeout_seconds', 15)
     if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or timeout <= 0:
         return 'limits.timeout_seconds must be a positive number'
@@ -799,7 +691,7 @@ def _preflight(state, now):
     return None
 
 
-def run(manifest):
+def run(manifest, prepare=environment.prepare):
     """Run the manifest's tests against its project and return the report and its Markdown.
 
     A run that cannot start (source digest mismatch, BuildRecipe step blocked) is
@@ -812,10 +704,11 @@ def run(manifest):
     if problem:
         return _blocked(state, problem, stage='preflight')
     project = manifest['target']['project']
-    prepared = e1.prepare(project)
+    prepared = prepare(project)
     if isinstance(prepared, e1.Blocked):
         return _blocked(state, f'environment blocked at BuildRecipe step {prepared.step}: '
                                f'{prepared.reason}', stage='dynamic_execution')
+    ops = prepared.env  # the operations on the stack (toolkit.environment), not its handles
     executions, findings = [], []
     stopped = None  # reason the remaining tests cannot run
     try:
@@ -829,20 +722,21 @@ def run(manifest):
             undo = None
             try:
                 # Inside the case's handling: a failed injection is that case's error, not the run's (TK-RUN-001).
-                undo = _inject(prepared.env, test)
-                _check_api_keys(prepared.env, test, denial)
+                undo = ops.inject(test.get('fault'), test['actor_ref'],
+                                           test.get('fault_api_key') or test.get('api_key', 'anon-jwt'), _timeout(test))
+                _check_api_keys(ops, test, denial)
                 if denial:
-                    result, checks = _denial_case(prepared.env, test, evidence)
+                    result, checks = _denial_case(ops, test, evidence)
                 else:
-                    result, checks = _allowed_case(prepared.env, test, evidence)
+                    result, checks = _allowed_case(ops, test, evidence)
                 error = None
             except observer.ObservationFailed as e:
                 result, checks, error = 'blocked', None, f'observation failed: {e}'
-            except RequestTimeout as e:
+            except environment.RequestTimeout as e:
                 result, checks, error = 'error', None, f'timeout: {e}'
-            except RequestFailed as e:
+            except environment.RequestFailed as e:
                 result, checks, error = 'error', None, f'request failed: {e}'
-            except ApiKeyUnavailable as e:
+            except environment.ApiKeyUnavailable as e:
                 result, checks, error = 'blocked', None, f'API key unavailable: {e}'
             finally:
                 if undo:
@@ -865,11 +759,11 @@ def run(manifest):
                                                   status=item_rule.finding_cap(state.listed.item(test)),
                                                   evidence_type='dynamic', execution_record_ids=[ex['id']]))
             if denial and DENIAL_TEMPLATES[test['template_id']]['writes']:
-                reset = e1.reset(prepared.env)
-                if isinstance(reset, e1.Blocked):
+                reset = ops.reset()
+                if reset:
                     stopped = f'environment reset failed after {test["test_id"]}: {reset.reason}'
     finally:
-        e1.destroy(prepared.env)
+        ops.destroy()
     definite = all(e['result'] in ('passed', 'failed') for e in executions)
     dynamic = ({'status': 'failed', 'reason': f'stopped, environment isolated: {stopped}'} if stopped
                else {'status': 'completed'})
