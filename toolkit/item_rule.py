@@ -1,10 +1,11 @@
 """The rule a confirmation item imposes on a test and on a finding (〈定義：確認清單〉).
 
 One home for the rules that a run and report.validate() both apply, so they cannot disagree
-(TK-REQ-003, TK-REQ-016, TK-DYN-003). Every function takes an item in the report's shape, a
-requirements[] entry: status, source, out_of_scope, the rule that judges the item's tests, and
-confirmation.allowed_tests of a 合法例外. confirmation.requirement() turns a confirmation-list item
-into this shape. Codes follow toolkit/schemas; their Chinese labels live in report.py (CODING_STANDARDS §10).
+(TK-REQ-003, TK-REQ-016, TK-DYN-003). Its rules take an item in the report's shape, a requirements[]
+entry: status, source, out_of_scope, the rule that judges the item's tests, and confirmation.allowed_tests
+of a 合法例外. is_exception, base_rule and requirement read an item of the confirmation list, with its
+review, and requirement() turns it into the report's shape; so confirmation and the report never have to
+know each other's shape. Codes follow toolkit/schemas; their Chinese labels live in report.py (CODING_STANDARDS §10).
 """
 from toolkit import policy
 
@@ -23,7 +24,7 @@ def _allowed_tests(item):
 
 def lists_allowed_tests(item):
     """Whether the report shows item as a 合法例外: modified, judged by deny, and listing the tests it
-    allows (〈定義：確認清單〉 修改, TK-DYN-003). The report-shape counterpart of confirmation.is_exception,
+    allows (〈定義：確認清單〉 修改, TK-DYN-003). The report-shape counterpart of is_exception,
     which reads the list's modified_rule; the report keeps only the rule that judges the item's other
     tests, which is the original deny for an exception, so the rewritten allow is not visible here. A
     report of a run lists allowed_tests for no other item."""
@@ -57,3 +58,35 @@ def finding_cap(item):
     """The highest finding status (問題狀態) a failed test on item may give: only an accepted or
     modified item gives 已確認; an S2 clause nobody accepted yet gives at most 證據待補 (TK-REQ-003)."""
     return 'confirmed' if item.get('status') in REVIEWED else 'evidence_pending'
+
+
+# An item of the confirmation list (toolkit/schemas/confirmation-list-v1.json), with its review.
+
+
+def is_exception(item):
+    """A 合法例外: a modification that permits what the item's rule denies (〈定義：確認清單〉 修改, TK-DYN-003)."""
+    return (item['status'] == MODIFIED and item['rule'] == policy.DENY
+            and item['review'].get('modified_rule') == policy.ALLOW)
+
+
+def base_rule(item):
+    """The allow/deny rule of the tests on item that no 合法例外 allows (〈定義：確認清單〉 修改): a 合法例外
+    keeps the item's rule; another modification's rewritten rule replaces the original."""
+    if item['status'] == MODIFIED and item['review'].get('modified_rule') and not is_exception(item):
+        return item['review']['modified_rule']
+    return item['rule']
+
+
+def requirement(item):
+    """A confirmation-list item as the report shows it (a requirements[] entry): the rule that judges its
+    tests other than the allowed cases of a 合法例外, who confirmed it and its version; a 合法例外 also
+    shows the tests it allows and its expiry, so report.validate() judges each test by the same rule as
+    the run (TK-DYN-003)."""
+    review = item['review']
+    shown = {'by': review['by'], 'at': review['at'], 'version': item['version']}
+    if is_exception(item) and review['allowed_tests']:
+        shown['allowed_tests'] = review['allowed_tests']
+        if review['expiry'] is not None:  # an exception lacking it is blocked; the report shows what is there
+            shown['expiry'] = review['expiry']
+    return {'id': item['item_id'], 'source': item['source'], 'statement': item['statement'], 'rule': base_rule(item),
+            'status': item['status'], 'out_of_scope': item['out_of_scope'], 'confirmation': shown}

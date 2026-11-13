@@ -884,7 +884,7 @@ def _handover_note(listed):
 def _requirements(manifest, listed):
     """The confirmation items the planned tests rest on, as the report shows them."""
     used = {i['item_id']: i for t in manifest['tests'] if (i := listed.item(t))}  # each item once, in plan order
-    return [confirmation.requirement(i) for i in used.values()]
+    return [item_rule.requirement(i) for i in used.values()]
 
 
 def _blocked(state, reason, stage='preflight'):

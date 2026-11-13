@@ -132,7 +132,7 @@ RESET_EXPIRED = 'expired'  # reset_reason of a version made because a 合法例�
 def _has_expired(item, now):
     """〈定義：確認清單〉 到期: a 合法例外 in scope whose expiry is not later than now. An item out of scope keeps
     its review state and version (〈定義：確認清單〉 更新); back in scope, its expiry is judged again."""
-    expiry = expiry_time(item['review']) if is_exception(item) and not item['out_of_scope'] else None
+    expiry = expiry_time(item['review']) if item_rule.is_exception(item) and not item['out_of_scope'] else None
     return expiry is not None and expiry <= now
 
 
@@ -187,35 +187,6 @@ def summary(doc):
             'single_approval': [i['item_id'] for i in in_scope if i['status'] in SINGLE_APPROVAL]}
 
 
-def is_exception(item):
-    """A 合法例外: a modification that permits what the item's rule denies (〈定義：確認清單〉 修改, TK-DYN-003)."""
-    return (item['status'] == item_rule.MODIFIED and item['rule'] == policy.DENY
-            and item['review'].get('modified_rule') == policy.ALLOW)
-
-
-def base_rule(item):
-    """The allow/deny rule of the tests on item that no 合法例外 allows (〈定義：確認清單〉 修改): a 合法例外
-    keeps the item's rule; another modification's rewritten rule replaces the original."""
-    if item['status'] == item_rule.MODIFIED and item['review'].get('modified_rule') and not is_exception(item):
-        return item['review']['modified_rule']
-    return item['rule']
-
-
-def requirement(item):
-    """The item as the report shows it (a requirements[] entry), for item_rule: the rule that judges its
-    tests other than the allowed cases of a 合法例外, who confirmed it and its version; a 合法例外 also
-    shows the tests it allows and its expiry, so report.validate() judges each test by the same rule as
-    the run (TK-DYN-003)."""
-    review = item['review']
-    shown = {'by': review['by'], 'at': review['at'], 'version': item['version']}
-    if is_exception(item) and review['allowed_tests']:
-        shown['allowed_tests'] = review['allowed_tests']
-        if review['expiry'] is not None:  # an exception lacking it is blocked; the report shows what is there
-            shown['expiry'] = review['expiry']
-    return {'id': item['item_id'], 'source': item['source'], 'statement': item['statement'], 'rule': base_rule(item),
-            'status': item['status'], 'out_of_scope': item['out_of_scope'], 'confirmation': shown}
-
-
 def expiry_time(review):
     """The expiry of a 合法例外 as an aware datetime, or None when it is not an ISO 8601 UTC time or no
     such time; then the exception lacks its expiry (〈定義：確認清單〉 到期)."""
@@ -238,11 +209,11 @@ def test_problem(item, test_id, case_kind, items, plan):
     problem = review_problem(item, items)  # before the rule: a modification lacking its rule has no rule to match
     if problem:
         return problem
-    rule = item_rule.rule_for(requirement(item), test_id, case_kind)
+    rule = item_rule.rule_for(item_rule.requirement(item), test_id, case_kind)
     if item_rule.RULE_FOR_CASE[case_kind] != rule:
         return (f'confirmation item {rid!r} has rule {rule!r} for test {test_id!r} but the test is a {case_kind} '
                 f'case: the case kind does not match the rule (TK-REQ-016); the test is not run')
-    if case_kind == item_rule.ALLOWED and is_exception(item):
+    if case_kind == item_rule.ALLOWED and item_rule.is_exception(item):
         problems = [p for t in item['review']['allowed_tests'] if (p := _allowed_test_problem(rid, t, plan))]
         if problems:
             return f'confirmation item {rid!r} is a 合法例外 but {"; ".join(problems)} (TK-DYN-003); the test is not run'
@@ -257,7 +228,7 @@ def review_problem(item, items):
     """
     review, rid, status = item['review'], item['item_id'], item['status']
     missing = [name for name in REQUIRED_REVIEW[status] if not review.get(name)]
-    exception = is_exception(item)
+    exception = item_rule.is_exception(item)
     if exception:
         missing += [name for name in ('allowed_tests', 'expiry') if not review.get(name)]
     if missing:
