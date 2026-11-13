@@ -7,7 +7,7 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
-from toolkit import confirmation, policy, report
+from toolkit import confirmation, item_rule, policy, report
 
 S1_PUBLIC = {'id': 'S1-ANNOUNCEMENTS-PUBLIC-READ', 'statement': 'Anyone, signed in or not, may read announcements.',
              'resources': ['announcements'], 'rule': 'allow'}
@@ -431,28 +431,6 @@ class ReviewProblem(Reviewed):
                                                                  'allowed_tests': [], 'expiry': None})))
 
 
-class RuleFor(Reviewed):
-    """〈定義：確認清單〉 修改: a 合法例外 allows only its allowed tests; another modification's rule replaces the original."""
-
-    def test_a_legitimate_exception_allows_only_the_allowed_cases_it_lists(self):
-        item = self.item('modified', **EXCEPTION)
-        self.assertEqual(confirmation.rule_for(item, SHARED_READ, 'allowed'), 'allow')
-        self.assertEqual(confirmation.rule_for(item, 'OTHER-ALLOWED', 'allowed'), 'deny')
-        self.assertEqual(confirmation.rule_for(item, 'READ-other-tenant', 'denial'), 'deny')
-        self.assertEqual(confirmation.base_rule(item), 'deny')
-        # A denial case it lists is still judged by deny.
-        listed = self.item('modified', **{**EXCEPTION, 'allowed_tests': [SHARED_READ, 'READ-other-tenant']})
-        self.assertEqual(confirmation.rule_for(listed, 'READ-other-tenant', 'denial'), 'deny')
-
-    def test_another_modification_rewrites_the_rule_of_every_test(self):
-        public = dict(self.items[S1_PUBLIC['id']], status='modified')
-        public['review'] = dict(public['review'], modified_rule='deny')
-        self.assertEqual(confirmation.rule_for(public, 'PUBLIC-READ-other-tenant', 'allowed'), 'deny')
-        self.assertEqual(confirmation.base_rule(public), 'deny')
-        # A leftover modified_rule does not count unless the item is modified.
-        self.assertEqual(confirmation.rule_for(self.item('accepted', modified_rule='allow'), SHARED_READ, 'allowed'), 'deny')
-
-
 class TestProblem(Reviewed):
     """Whether a test may run on the item it rests on (〈定義：確認清單〉, TK-REQ-003, TK-REQ-016)."""
 
@@ -513,27 +491,12 @@ class TestProblem(Reviewed):
         self.assertIn('lacks modified_rule', self.check(unfinished, SHARED_READ, 'allowed'))
 
 
-class FindingCap(unittest.TestCase):
-    """The highest finding status a failed test may give, by the item it rests on (TK-REQ-003)."""
-
-    def test_only_a_reviewed_item_can_confirm_a_finding(self):
-        doc = accept(confirmation.generate(policy.load_template(), plain('documents'), []), 'S2-OWNER-ONLY@documents')
-        items = {i['item_id']: i for i in doc['items']}
-        owner = items['S2-OWNER-ONLY@documents']
-        modified = dict(owner, status='modified', review=dict(owner['review'], reason='r', basis='b', modified_rule='deny'))
-        self.assertEqual(confirmation.finding_cap(owner), 'confirmed')
-        self.assertEqual(confirmation.finding_cap(modified), 'confirmed')
-        self.assertEqual(confirmation.finding_cap(items['S2-TENANT-ISOLATION@documents']), 'evidence_pending')
-        # Only accepted or modified items confirm; anything else is capped, whatever the order of the checks.
-        self.assertEqual(confirmation.finding_cap(dict(owner, source='S1', status='pending')), 'evidence_pending')
-
-
 class EnumsAgreeWithSchemas(unittest.TestCase):
     """Review states, allow/deny rules, high-impact categories and case kinds are each defined once in the code; both schemas
     list the same values, so neither side can change alone (〈定義：確認清單〉, TK-REQ-016)."""
 
     def test_review_states(self):
-        states = list(report.REVIEW_STATES)
+        states = list(item_rule.REVIEW_STATES)
         self.assertEqual(states, ['pending', 'accepted', 'modified', 'not_applicable'])  # 〈定義：確認清單〉 table order
         self.assertEqual(confirmation.SCHEMA['$defs']['status']['enum'], states)
         self.assertEqual(report.SCHEMA['properties']['requirements']['items']['properties']['status']['enum'], states)
@@ -545,7 +508,7 @@ class EnumsAgreeWithSchemas(unittest.TestCase):
         rules = list(policy.RULES)
         self.assertEqual(confirmation.SCHEMA['$defs']['rule']['enum'], rules)
         self.assertEqual(report.SCHEMA['properties']['requirements']['items']['properties']['rule']['enum'], rules)
-        self.assertEqual(sorted(report.RULE_FOR_CASE.values()), sorted(rules))
+        self.assertEqual(sorted(item_rule.RULE_FOR_CASE.values()), sorted(rules))
 
     def test_impact_categories(self):
         self.assertEqual(confirmation.SCHEMA['$defs']['impact']['items']['enum'], list(policy.IMPACT_CATEGORIES))
@@ -555,10 +518,10 @@ class EnumsAgreeWithSchemas(unittest.TestCase):
                          confirmation.RESET_EXPIRED)
 
     def test_case_kinds(self):
-        kinds = list(report.CASE_KINDS)
+        kinds = list(item_rule.CASE_KINDS)
         self.assertEqual(kinds, ['denial', 'allowed'])
         self.assertEqual(report.SCHEMA['$defs']['execution_record']['properties']['case_kind']['enum'], kinds)
-        self.assertEqual(list(report.RULE_FOR_CASE), kinds)
+        self.assertEqual(list(item_rule.RULE_FOR_CASE), kinds)
 
 
 if __name__ == '__main__':

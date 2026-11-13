@@ -11,9 +11,9 @@ from pathlib import Path
 
 import jsonschema
 
-from toolkit import control, policy, report
+from toolkit import control, item_rule, policy, report
 
-PENDING = report.PENDING
+PENDING = item_rule.PENDING
 REVIEW_FIELDS = ('by', 'at', 'reason', 'basis', 'modified_rule', 'allowed_tests', 'expiry')
 
 
@@ -145,9 +145,9 @@ SCHEMA_FILE = Path(__file__).with_name('schemas') / 'confirmation-list-v1.json'
 with open(SCHEMA_FILE, encoding='utf-8') as _f:
     SCHEMA = json.load(_f)
 # 〈定義：確認清單〉: the fields each review state needs, besides who and when.
-REQUIRED_REVIEW = {report.PENDING: (), report.ACCEPTED: ('by', 'at'),
-                   report.MODIFIED: ('by', 'at', 'reason', 'basis', 'modified_rule'),
-                   report.NOT_APPLICABLE: ('by', 'at', 'reason', 'basis')}
+REQUIRED_REVIEW = {item_rule.PENDING: (), item_rule.ACCEPTED: ('by', 'at'),
+                   item_rule.MODIFIED: ('by', 'at', 'reason', 'basis', 'modified_rule'),
+                   item_rule.NOT_APPLICABLE: ('by', 'at', 'reason', 'basis')}
 
 
 def s2_item_id(clause_id, resource):
@@ -169,8 +169,8 @@ def validate(doc):
             for where, v in versions if v['source'] == 'S2' and v['item_id'] != s2_item_id(v['clause_id'], v['resource'])]
 
 
-STATUSES = report.REVIEW_STATES
-SINGLE_APPROVAL = (report.MODIFIED, report.NOT_APPLICABLE)  # they relax or rewrite S2; no second approver yet (TK-REQ-014)
+STATUSES = item_rule.REVIEW_STATES
+SINGLE_APPROVAL = (item_rule.MODIFIED, item_rule.NOT_APPLICABLE)  # they relax or rewrite S2; no second approver yet (TK-REQ-014)
 
 
 def summary(doc):
@@ -189,23 +189,31 @@ def summary(doc):
 
 def is_exception(item):
     """A 合法例外: a modification that permits what the item's rule denies (〈定義：確認清單〉 修改, TK-DYN-003)."""
-    return (item['status'] == report.MODIFIED and item['rule'] == policy.DENY
+    return (item['status'] == item_rule.MODIFIED and item['rule'] == policy.DENY
             and item['review'].get('modified_rule') == policy.ALLOW)
 
 
 def base_rule(item):
     """The allow/deny rule of the tests on item that no 合法例外 allows (〈定義：確認清單〉 修改): a 合法例外
     keeps the item's rule; another modification's rewritten rule replaces the original."""
-    if item['status'] == report.MODIFIED and item['review'].get('modified_rule') and not is_exception(item):
+    if item['status'] == item_rule.MODIFIED and item['review'].get('modified_rule') and not is_exception(item):
         return item['review']['modified_rule']
     return item['rule']
 
 
-def rule_for(item, test_id, case_kind):
-    """The allow/deny rule test_id, a test of case_kind, is judged by (〈定義：確認清單〉 修改): a 合法例外
-    allows only the allowed cases its allowed_tests lists; every other test keeps base_rule."""
-    allowed_tests = item['review']['allowed_tests'] if is_exception(item) else []
-    return report.rule_for(base_rule(item), allowed_tests, test_id, case_kind)
+def requirement(item):
+    """The item as the report shows it (a requirements[] entry), for item_rule: the rule that judges its
+    tests other than the allowed cases of a 合法例外, who confirmed it and its version; a 合法例外 also
+    shows the tests it allows and its expiry, so report.validate() judges each test by the same rule as
+    the run (TK-DYN-003)."""
+    review = item['review']
+    shown = {'by': review['by'], 'at': review['at'], 'version': item['version']}
+    if is_exception(item) and review['allowed_tests']:
+        shown['allowed_tests'] = review['allowed_tests']
+        if review['expiry'] is not None:  # an exception lacking it is blocked; the report shows what is there
+            shown['expiry'] = review['expiry']
+    return {'id': item['item_id'], 'source': item['source'], 'statement': item['statement'], 'rule': base_rule(item),
+            'status': item['status'], 'out_of_scope': item['out_of_scope'], 'confirmation': shown}
 
 
 def expiry_time(review):
@@ -217,31 +225,28 @@ def expiry_time(review):
 def test_problem(item, test_id, case_kind, items, plan):
     """Why test_id, a test of case_kind ('denial' or 'allowed'), cannot run on item, or None.
 
-    The item must be testable (report.untestable) and its review complete (review_problem); then
+    The item must be testable (item_rule.untestable) and its review complete (review_problem); then
     the case kind must match the rule the test is judged by (rule_for), so an access is allowed only
     by the item, never by picking an allowed-case template (TK-REQ-016). An allowed case on a 合法例外
     also needs each test the exception lists to be an allowed case on it in the plan (TK-DYN-003);
     a denial case is judged by deny whatever the exception lists, so that does not block it.
     """
     rid = item['item_id']
-    reason = report.untestable(item)
+    reason = item_rule.untestable(item, report.REVIEW_LABELS)
     if reason:
         return f'confirmation item {rid!r} {reason}; the test is not run'
     problem = review_problem(item, items)  # before the rule: a modification lacking its rule has no rule to match
     if problem:
         return problem
-    rule = rule_for(item, test_id, case_kind)
-    if report.RULE_FOR_CASE[case_kind] != rule:
+    rule = item_rule.rule_for(requirement(item), test_id, case_kind)
+    if item_rule.RULE_FOR_CASE[case_kind] != rule:
         return (f'confirmation item {rid!r} has rule {rule!r} for test {test_id!r} but the test is a {case_kind} '
                 f'case: the case kind does not match the rule (TK-REQ-016); the test is not run')
-    if case_kind == report.ALLOWED and is_exception(item):
+    if case_kind == item_rule.ALLOWED and is_exception(item):
         problems = [p for t in item['review']['allowed_tests'] if (p := _allowed_test_problem(rid, t, plan))]
         if problems:
             return f'confirmation item {rid!r} is a 合法例外 but {"; ".join(problems)} (TK-DYN-003); the test is not run'
     return None
-
-
-finding_cap = report.finding_cap  # one rule for the run and for report.validate() (TK-REQ-003)
 
 
 def review_problem(item, items):
@@ -273,7 +278,7 @@ def _basis_problem(basis, items):
     if entry is not None and entry['source'] == 'S1':
         if entry['out_of_scope']:
             return f'its basis, S1 entry {basis!r}, is out of scope'
-        if entry['status'] not in report.REVIEWED:
+        if entry['status'] not in item_rule.REVIEWED:
             return (f'its basis, S1 entry {basis!r}, is {entry["status"]} ({report.REVIEW_LABELS[entry["status"]]}), '
                     f'neither accepted nor modified')
         return None
@@ -288,7 +293,7 @@ def _allowed_test_problem(rid, test_id, plan):
         return f'allowed test {test_id!r} is not in the test plan'
     if planned['requirement_id'] != rid:
         return f'allowed test {test_id!r} rests on {planned["requirement_id"]!r}, not on this item'
-    if planned['case_kind'] != report.ALLOWED:
+    if planned['case_kind'] != item_rule.ALLOWED:
         return f'allowed test {test_id!r} is not an allowed case'
     return None
 

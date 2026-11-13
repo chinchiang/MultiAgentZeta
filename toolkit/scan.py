@@ -17,7 +17,7 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from toolkit import authorization, confirmation, control, e1, observer, policy, report, review
+from toolkit import authorization, confirmation, control, e1, item_rule, observer, policy, report, review
 
 SOURCE_ID = 'toolkit.scan'
 FINGERPRINT_VERSION = 'fp-authz-v1'
@@ -496,7 +496,7 @@ def test_operation(test):
 def _case_kind(test):
     """The case kind of a test's template, or None for a template on no allow-list (blocked by _plan_problem)."""
     template = test.get('template_id')
-    return report.DENIAL if template in DENIAL_TEMPLATES else report.ALLOWED if template in ALLOWED_TEMPLATES else None
+    return item_rule.DENIAL if template in DENIAL_TEMPLATES else item_rule.ALLOWED if template in ALLOWED_TEMPLATES else None
 
 
 def _plan(manifest):
@@ -799,7 +799,7 @@ def run(manifest):
             if not precheck.runnable or stopped:
                 executions.append(_execution(state, test, started, *precheck.outcome(stopped)))
                 continue
-            denial = _case_kind(test) == report.DENIAL
+            denial = _case_kind(test) == item_rule.DENIAL
             undo = None
             try:
                 # Inside the case's handling: a failed injection is that case's error, not the run's (TK-RUN-001).
@@ -836,7 +836,7 @@ def run(manifest):
                                                   requirement_id=test['requirement_id'],
                                                   requirement_version=_item_version(state.listed, test),
                                                   root_cause='object-ownership-not-enforced',
-                                                  status=confirmation.finding_cap(state.listed.item(test)),
+                                                  status=item_rule.finding_cap(state.listed.item(test)),
                                                   evidence_type='dynamic', execution_record_ids=[ex['id']]))
             if denial and DENIAL_TEMPLATES[test['template_id']]['writes']:
                 reset = e1.reset(prepared.env)
@@ -884,21 +884,7 @@ def _handover_note(listed):
 def _requirements(manifest, listed):
     """The confirmation items the planned tests rest on, as the report shows them."""
     used = {i['item_id']: i for t in manifest['tests'] if (i := listed.item(t))}  # each item once, in plan order
-    return [{'id': i['item_id'], 'source': i['source'], 'statement': i['statement'], 'rule': confirmation.base_rule(i),
-             'status': i['status'], 'out_of_scope': i['out_of_scope'], 'confirmation': _confirmation(i)}
-            for i in used.values()]
-
-
-def _confirmation(item):
-    """Who confirmed the item and its version; for a 合法例外 also the tests it allows and its expiry, so
-    report.validate() judges each test by the same rule as the run (TK-DYN-003)."""
-    review = item['review']
-    shown = {'by': review['by'], 'at': review['at'], 'version': item['version']}
-    if confirmation.is_exception(item) and review['allowed_tests']:
-        shown['allowed_tests'] = review['allowed_tests']
-        if review['expiry'] is not None:  # an exception lacking it is blocked; the report shows what is there
-            shown['expiry'] = review['expiry']
-    return shown
+    return [confirmation.requirement(i) for i in used.values()]
 
 
 def _blocked(state, reason, stage='preflight'):
