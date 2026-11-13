@@ -843,6 +843,38 @@ def preflight_manifest(d):
     return m
 
 
+class PreflightOrder(unittest.TestCase):
+    """Preflight stops at the first problem it meets (TK-RUN-001): a ScanManifest with two problems is blocked
+    for the one found first, in the order of the checks. Only an empty project is needed, so no Docker."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()  # one project for every run, so the reasons name the same paths
+        self.addCleanup(self.tmp.cleanup)
+
+    def reason(self, *problems):
+        m = preflight_manifest(self.tmp.name)
+        missing = {'path': str(CONTROL / 'missing.json'), 'digest': 'sha256:' + '0' * 64}  # in the control zone
+        for problem in problems:
+            {'input': lambda: m['scope'].pop('endpoints'),
+             'override': lambda: m.update(policy_template={}),
+             'digest': lambda: m['target'].update(source_digest='sha256:' + '0' * 64),
+             'authorization': lambda: m.update(authorization=missing),
+             'list': lambda: m.update(confirmation_list=missing),
+             'review': lambda: m.update(review_record=missing)}[problem]()
+        rep = scan.run(m).report
+        self.assertEqual(rep['status'], 'blocked')
+        return rep['status_reason']
+
+    def test_the_first_problem_found_is_the_reason(self):
+        order = ('input', 'override', 'digest', 'authorization', 'list', 'review')
+        reasons = {name: self.reason(name) for name in order}
+        self.assertEqual(len(set(reasons.values())), len(order))  # each problem has a reason of its own
+        for i, earlier in enumerate(order):
+            for later in order[i + 1:]:
+                with self.subTest(earlier=earlier, later=later):
+                    self.assertEqual(self.reason(later, earlier), reasons[earlier])
+
+
 class UnknownRequirement(unittest.TestCase):
     """需求不明: a test whose requirement is missing or unconfirmed is not run and never passes (TK-REQ-005)."""
 

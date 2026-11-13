@@ -431,54 +431,70 @@ def _typed_params(template, kind):
     return [name for name, k in params.items() if k == kind]
 
 
-def _identity_problem(test, identities):
-    """測試身分: an identity the BuildRecipe does not provide is an unsupported matrix cell."""
-    if identities is None:  # no readable recipe: the BuildRecipe step will block the run
-        return None
-    for ref in (test.get('actor_ref'), test.get('owner_ref')):
-        if ref and ref not in identities:
-            return f'identity {ref!r} is not in the BuildRecipe: unsupported cell of the authorization matrix'
-    return None
+@dataclass(frozen=True)
+class _TestChecks:
+    """The checks of each test before the environment starts, and what they rest on, taken once from the run:
+    the confirmation items and the plan, the operations the run and its 〈定義：測試授權紀錄〉 allow, and what
+    the BuildRecipe provides: the test identities and whether it can restore what a write case changes. With
+    no readable recipe, identities is None and nothing is judged by it: the BuildRecipe step blocks the run."""
+    tests: list
+    items: dict
+    plan: dict
+    identities: set | None
+    restorable: bool
+    allowed_operations: list
+    granted: dict
+    now: datetime
 
+    @classmethod
+    def of(cls, state, recipe, now):
+        manifest = state.manifest
+        return cls(tests=manifest['tests'], items=state.listed.items, plan=_plan(manifest),
+                   identities={i['name'] for i in recipe['auth']['identities']} if recipe else None,
+                   restorable=not (recipe and recipe['snapshot_reset'].get('reset_scope') == 'none'),
+                   allowed_operations=manifest['scope']['allowed_operations'], granted=state.granted.doc, now=now)
 
-def _test_problem(test, items, plan, identities, restorable, authorize):
-    """The _Precheck of a test. authorize(test) gives (approval_id, reason) of 〈定義：測試授權紀錄〉."""
-    reason = _plan_problem(test) or _item_problem(test, items, plan)
-    if reason:
-        return _Precheck('blocked', reason)
-    approval, reason = authorize(test)
-    if reason:
-        return _Precheck('blocked', reason)
-    if not restorable and DENIAL_TEMPLATES.get(test['template_id'], {}).get('writes'):
-        # An extra approval never lets a test that cannot be restored run (〈定義：測試授權紀錄〉).
-        return _Precheck('blocked', 'the BuildRecipe declares no reset (snapshot_reset.reset_scope "none"): '
-                                    'a write case cannot be restored safely and is not run (復原方式)', approval)
-    reason = _identity_problem(test, identities)
-    return _Precheck('unsupported', reason, approval) if reason else _Precheck(approval_id=approval)
+    def precheck(self, test):
+        """The _Precheck of a test."""
+        reason = _plan_problem(test) or _item_problem(test, self.items, self.plan)
+        if reason:
+            return _Precheck('blocked', reason)
+        approval, reason = self._authorize(test)
+        if reason:
+            return _Precheck('blocked', reason)
+        if not self.restorable and DENIAL_TEMPLATES.get(test['template_id'], {}).get('writes'):
+            # An extra approval never lets a test that cannot be restored run (〈定義：測試授權紀錄〉).
+            return _Precheck('blocked', 'the BuildRecipe declares no reset (snapshot_reset.reset_scope "none"): '
+                                        'a write case cannot be restored safely and is not run (復原方式)', approval)
+        reason = self._identity_problem(test)
+        return _Precheck('unsupported', reason, approval) if reason else _Precheck(approval_id=approval)
 
-
-def _authorizer(manifest, granted, now):
-    """authorize(test) for _test_problem (〈定義：測試授權紀錄〉): the test's method must be in the scope of the
-    run, which no approval widens; then its resource × method must be in the authorization or covered
-    by an extra approval (TK-ENV-001)."""
-    allowed = manifest['scope']['allowed_operations']
-
-    def authorize(test):
+    def _authorize(self, test):
+        """(approval_id, reason) of 〈定義：測試授權紀錄〉: the test's method must be in the scope of the run,
+        which no approval widens; then its resource × method must be in the authorization or covered by an
+        extra approval (TK-ENV-001)."""
         resource, method = test_operation(test)
-        if method not in allowed:
+        if method not in self.allowed_operations:
             return None, (f'{method} is not in scope.allowed_operations (受測範圍): the test is outside the scope of '
                           f'this run, which no approval widens; the test is not run')
-        return authorization.operation_problem(granted.doc, resource, method, now)
-    return authorize
+        return authorization.operation_problem(self.granted, resource, method, self.now)
 
+    def _identity_problem(self, test):
+        """測試身分: an identity the BuildRecipe does not provide is an unsupported matrix cell."""
+        if self.identities is None:  # no readable recipe: the BuildRecipe step will block the run
+            return None
+        for ref in (test.get('actor_ref'), test.get('owner_ref')):
+            if ref and ref not in self.identities:
+                return f'identity {ref!r} is not in the BuildRecipe: unsupported cell of the authorization matrix'
+        return None
 
-def _identity_gaps(manifest, identities):
-    """Coverage gaps for identities the recipe cannot provide."""
-    if identities is None:
-        return []
-    names = sorted({ref for t in manifest['tests'] for ref in (t.get('actor_ref'), t.get('owner_ref'))
-                    if ref and ref not in identities})
-    return [{'scope': f'identity:{n}', 'reason': 'no such identity in the BuildRecipe (測試身分)'} for n in names]
+    def identity_gaps(self):
+        """Coverage gaps for identities the recipe cannot provide."""
+        if self.identities is None:
+            return []
+        names = sorted({ref for t in self.tests for ref in (t.get('actor_ref'), t.get('owner_ref'))
+                        if ref and ref not in self.identities})
+        return [{'scope': f'identity:{n}', 'reason': 'no such identity in the BuildRecipe (測試身分)'} for n in names]
 
 
 DENIAL_RESOURCE = 'documents'  # the table every denial-case template works on (RESOURCE_ROWS, CONTROL_ROWS, DOCUMENTS)
@@ -740,6 +756,49 @@ def _template_override_problems(manifest):
             f'or replace it' for name in TEMPLATE_OVERRIDES if name in manifest]
 
 
+def _preflight(state, now):
+    """Everything a run checks before it starts the environment, in this order (the first problem found is the
+    reason, TK-RUN-001): the required inputs (TK-SCP-002), the S2 template and S1 entries (TK-REQ-008), the
+    source digest, then the records of the control zone (authorization, confirmation list, review record), what
+    the BuildRecipe provides, and each test. Returns why the run is blocked, or None; the records it read and the
+    checks of each test are then in state."""
+    manifest = state.manifest
+    missing = _input_problems(manifest)
+    if missing:
+        return 'required inputs missing; nothing was started: ' + '; '.join(missing)
+    overrides = _template_override_problems(manifest) + _s1_problems(manifest)
+    if overrides:
+        return 'nothing was started: ' + '; '.join(overrides)
+    project = manifest['target']['project']
+    pinned, actual = manifest['target']['source_digest'], e1.source_digest(project)
+    if pinned != actual:
+        return (f'source_digest of the ScanManifest ({pinned}) does not match '
+                f'the project ({actual}); nothing was started')
+    granted, problem = _load_authorization(manifest, now)
+    if problem:
+        return f'nothing was started: {problem}'
+    # A record is stored only once it is read: one that could not be read stays empty in the blocked report.
+    state.granted = granted
+    listed, problem = _load_confirmation_list(manifest, now)
+    if problem:
+        return f'nothing was started: {problem}'
+    state.listed = listed
+    reviewed, problem = _load_review_record(manifest)
+    if problem:
+        return f'nothing was started: {problem}'
+    state.reviewed = reviewed
+    recipe, _ = e1.load_recipe(project)  # without one, e1.prepare blocks the run at the BuildRecipe step
+    problem = recipe and authorization.target_problem(state.granted.doc, recipe['sample'], e1.MODE)
+    if problem:
+        return f'nothing was started: test authorization does not cover this run: {problem}'
+    checks = _TestChecks.of(state, recipe, now)
+    state.prechecks = {t['test_id']: checks.precheck(t) for t in manifest['tests']}
+    state.gaps = checks.identity_gaps()
+    if not any(p.runnable for p in state.prechecks.values()):
+        return 'no test in the ScanManifest can run; nothing was started'
+    return None
+
+
 def run(manifest):
     """Run the manifest's tests against its project and return the report and its Markdown.
 
@@ -749,43 +808,10 @@ def run(manifest):
     run_start = datetime.now(timezone.utc)
     run_id = f'run-{run_start:%Y%m%d%H%M%S}-{secrets.token_hex(3)}'
     state = _RunState(manifest, _Records(run_id, _commit(manifest)))
-    missing = _input_problems(manifest)
-    if missing:
-        return _blocked(state, 'required inputs missing; nothing was started: ' + '; '.join(missing),
-                        stage='preflight')
-    overrides = _template_override_problems(manifest) + _s1_problems(manifest)
-    if overrides:
-        return _blocked(state, 'nothing was started: ' + '; '.join(overrides), stage='preflight')
+    problem = _preflight(state, run_start)
+    if problem:
+        return _blocked(state, problem, stage='preflight')
     project = manifest['target']['project']
-    pinned, actual = manifest['target']['source_digest'], e1.source_digest(project)
-    if pinned != actual:
-        return _blocked(state, f'source_digest of the ScanManifest ({pinned}) does not match '
-                               f'the project ({actual}); nothing was started', stage='preflight')
-    granted, problem = _load_authorization(manifest, run_start)
-    if problem:
-        return _blocked(state, f'nothing was started: {problem}', stage='preflight')
-    state.granted = granted
-    listed, problem = _load_confirmation_list(manifest, run_start)
-    if problem:
-        return _blocked(state, f'nothing was started: {problem}', stage='preflight')
-    state.listed = listed
-    reviewed, problem = _load_review_record(manifest)
-    if problem:
-        return _blocked(state, f'nothing was started: {problem}', stage='preflight')
-    state.reviewed = reviewed
-    recipe, _ = e1.load_recipe(project)  # without one, e1.prepare blocks the run at the BuildRecipe step
-    problem = recipe and authorization.target_problem(state.granted.doc, recipe['sample'], e1.MODE)
-    if problem:
-        return _blocked(state, f'nothing was started: test authorization does not cover this '
-                               f'run: {problem}', stage='preflight')
-    identities = {i['name'] for i in recipe['auth']['identities']} if recipe else None
-    restorable = not (recipe and recipe['snapshot_reset'].get('reset_scope') == 'none')
-    plan, authorize = _plan(manifest), _authorizer(manifest, state.granted, run_start)
-    state.prechecks = {t['test_id']: _test_problem(t, state.listed.items, plan, identities, restorable, authorize)
-                       for t in manifest['tests']}
-    state.gaps = _identity_gaps(manifest, identities)
-    if not any(p.runnable for p in state.prechecks.values()):
-        return _blocked(state, 'no test in the ScanManifest can run; nothing was started', stage='preflight')
     prepared = e1.prepare(project)
     if isinstance(prepared, e1.Blocked):
         return _blocked(state, f'environment blocked at BuildRecipe step {prepared.step}: '
