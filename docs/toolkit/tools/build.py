@@ -541,43 +541,51 @@ def format_problem(p):
     return f'error: {where}{p.message} [{p.rule}]'
 
 
+def _run_git(repo, *args):
+    return subprocess.run(['git', '-C', str(repo), *args], capture_output=True)
+
+
 def _git(repo, *args):
     """Run git in repo and return its stdout; Invalid('git') when it fails."""
-    run = subprocess.run(['git', '-C', str(repo), *args], capture_output=True)
+    run = _run_git(repo, *args)
     if run.returncode != 0:
         raise Invalid('git', '', f'git {" ".join(args)} failed: {run.stderr.decode("utf-8", "replace").strip()}')
     return run.stdout.decode('utf-8')
 
 
-def _revision_snapshot(repo, spec_prefix):
-    """SPEC and REVIEW as git has them; spec_prefix is a revision, or '' for the index."""
-    return {f: _git(repo, 'show', f'{spec_prefix}:{f}') for f in (SPEC, REVIEW)}
+def _git_succeeds(repo, *args):
+    return _run_git(repo, *args).returncode == 0
 
 
-def _check_git_revision(repo, old, new, new_label, parents):
-    """check_revision for the change from commit old to new (new == '' means the index)."""
-    changed = [p for p in _git(repo, 'diff', '--name-only', '-z', '--no-renames',
-                               *(['--cached', old] if new == '' else [old, new])).split('\0') if p]
-    problems = check_revision(changed, _revision_snapshot(repo, old), _revision_snapshot(repo, new), parents)
-    return [p._replace(message=f'{new_label}: {p.message}') for p in problems]
+# One change to check: from commit `old` to commit `new` (None means the index), reported under `label`.
+Change = collections.namedtuple('Change', 'old new label')
+
+
+def _revision_snapshot(repo, rev):
+    """SPEC and REVIEW as git has them at commit rev, or in the index when rev is None."""
+    return {f: _git(repo, 'show', f'{rev or ""}:{f}') for f in (SPEC, REVIEW)}
+
+
+def _check_change(repo, change):
+    """check_revision for one Change, which always has exactly one parent."""
+    range_args = ['--cached', change.old] if change.new is None else [change.old, change.new]
+    changed = [p for p in _git(repo, 'diff', '--name-only', '-z', '--no-renames', *range_args).split('\0') if p]
+    problems = check_revision(changed, _revision_snapshot(repo, change.old), _revision_snapshot(repo, change.new))
+    return [p._replace(message=f'{change.label}: {p.message}') for p in problems]
 
 
 def check_staged(repo):
     """Problems of the staged changes against HEAD; none for a first commit or a commit that concludes a merge."""
-    def has(ref):
-        return subprocess.run(['git', '-C', str(repo), 'rev-parse', '-q', '--verify', ref],
-                              capture_output=True).returncode == 0
+    has = lambda ref: _git_succeeds(repo, 'rev-parse', '-q', '--verify', ref)
     if not has('HEAD') or has('MERGE_HEAD'):
         return []
-    return _check_git_revision(repo, 'HEAD', '', 'staged changes', 1)
+    return _check_change(repo, Change('HEAD', None, 'staged changes'))
 
 
 def check_commits(repo, base, fallback):
     """Problems of every commit in base..HEAD; Invalid('revision-base') when no base can be decided."""
-    def known(rev):
-        return bool(rev) and not set(rev) <= {'0'} and subprocess.run(
-            ['git', '-C', str(repo), 'cat-file', '-e', f'{rev}^{{commit}}'], capture_output=True).returncode == 0
-    if not known(base):
+    known = bool(base) and not set(base) <= {'0'} and _git_succeeds(repo, 'cat-file', '-e', f'{base}^{{commit}}')
+    if not known:
         if not fallback:
             raise Invalid('revision-base', '', 'no usable base commit and no --fallback; cannot decide what to check')
         try:
@@ -588,7 +596,7 @@ def check_commits(repo, base, fallback):
     for commit in _git(repo, 'rev-list', '--reverse', f'{base}..HEAD').split():
         parents = _git(repo, 'rev-list', '--parents', '-n', '1', commit).split()[1:]
         if len(parents) == 1:
-            problems += _check_git_revision(repo, parents[0], commit, commit[:10], 1)
+            problems += _check_change(repo, Change(parents[0], commit, commit[:10]))
     return problems
 
 
