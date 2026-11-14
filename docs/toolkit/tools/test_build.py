@@ -375,6 +375,131 @@ class Bump(unittest.TestCase):
             self.assertIn('v9.9.10', Path(d, build.DESIGN).read_text(encoding='utf-8'))
 
 
+LOG = ('\n## 4. 修訂紀錄\n\n| 版本 | 日期 | 內容 |\n| --- | --- | --- |\n| v9.9.8 | 2026-01-01 | 初版。 |\n'
+       '| v9.9.9 | 2026-01-02 | 改了乙。 |\n\n## 5. 其他\n\n| v9.9.10 | 這一列不是修訂紀錄 |\n')
+
+
+def with_log(snap, log=LOG):
+    return {**snap, build.REVIEW: snap[build.REVIEW] + log}
+
+
+def write_snapshot(directory, snap):
+    for path, text in snap.items():
+        Path(directory, path).parent.mkdir(parents=True, exist_ok=True)
+        Path(directory, path).write_text(text, encoding='utf-8', newline='')
+
+
+def run_cli(*argv):
+    """build.main over argv, as (exit code, stdout, stderr).
+
+    The default repository is an empty throwaway directory, never the real one: a command whose --repo is
+    ignored (or missing) then finds nothing to read and nothing worth writing, instead of changing this repo.
+    """
+    out, err = io.StringIO(), io.StringIO()
+    with tempfile.TemporaryDirectory() as empty, contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        code = build.main(list(argv), repo=Path(empty))
+    return code, out.getvalue(), err.getvalue()
+
+
+class BumpNote(unittest.TestCase):
+    """bump(..., note=): the revision-log row for the new version, written together with the version."""
+
+    def setUp(self):
+        self.snap = with_log(regenerated(make()))
+
+    def bumped(self, note='改了甲。', snap=None, version='v9.9.10'):
+        return build.bump(self.snap if snap is None else snap, version, '2026-02-03', note=note)
+
+    def test_the_row_is_appended_to_the_end_of_chapter_4(self):
+        result = self.bumped()
+        self.assertEqual(result.problems, [])
+        log = result.updates[build.REVIEW]
+        self.assertIn('| v9.9.9 | 2026-01-02 | 改了乙。 |\n| v9.9.10 | 2026-02-03 | 改了甲。 |\n\n## 5. 其他', log)
+        self.assertEqual(log.count('| v9.9.10 | 2026-02-03 |'), 1)
+        self.assertIn('| v9.9.10 | 這一列不是修訂紀錄 |', log)
+
+    def test_the_bump_with_a_note_satisfies_the_version_rule(self):
+        result = self.bumped()
+        new = {**self.snap, **result.updates}
+        self.assertEqual(build.check_revision(['GLOSSARY.md'], self.snap, new), [])
+        self.assertEqual(build.check_docs(new).problems, [])
+
+    def test_without_a_note_no_row_is_written(self):
+        result = self.bumped(note=None)
+        self.assertEqual(result.problems, [])
+        self.assertNotIn('| v9.9.10 | 2026-02-03 |', result.updates[build.REVIEW])
+        self.assertEqual([p.rule for p in build.check_revision(['GLOSSARY.md'], self.snap, {**self.snap, **result.updates})],
+                         ['revision-log'])
+
+    def test_a_pipe_in_the_note_does_not_break_the_table(self):
+        row = [line for line in self.bumped(note='a|b').updates[build.REVIEW].splitlines() if line.startswith('| v9.9.10 | 2026')]
+        self.assertEqual(row, ['| v9.9.10 | 2026-02-03 | a\\|b |'])
+
+    def test_a_note_must_be_one_non_empty_line(self):
+        for note in ('', '   ', '第一行\n第二行'):
+            with self.subTest(note=note):
+                result = self.bumped(note=note)
+                self.assertEqual({p.rule for p in result.problems}, {'bump-note'})
+                self.assertEqual(result.updates, {})
+
+    def test_chapter_4_must_exist_and_have_rows(self):
+        for log in ('', '\n## 4. 修訂紀錄\n\n（尚無）\n\n## 5. 其他\n'):
+            with self.subTest(log=log):
+                result = self.bumped(snap=with_log(regenerated(make()), log))
+                self.assertEqual({(p.rule, p.file) for p in result.problems}, {('bump-note', build.REVIEW)})
+                self.assertEqual(result.updates, {})
+
+    def test_a_version_that_already_has_a_row_is_refused(self):
+        snap = with_log(regenerated(make()), LOG.replace('| v9.9.9 |', '| v9.9.10 |'))
+        result = self.bumped(snap=snap)
+        self.assertEqual({p.rule for p in result.problems}, {'bump-note'})
+        self.assertEqual(result.updates, {})
+
+    def test_command_line_writes_the_row(self):
+        with tempfile.TemporaryDirectory() as d:
+            write_snapshot(d, self.snap)
+            code, out, err = run_cli('--bump', 'v9.9.10', '--date', '2026-02-03', '--note', '改了甲。', '--repo', d)
+            self.assertEqual((code, err), (0, ''))
+            self.assertIn('| v9.9.10 | 2026-02-03 | 改了甲。 |', Path(d, build.REVIEW).read_text(encoding='utf-8'))
+
+    def test_command_line_refuses_a_note_without_a_bump_or_without_a_value(self):
+        with tempfile.TemporaryDirectory() as d:
+            write_snapshot(d, self.snap)
+            for argv in (['--note', 'x', '--repo', d], ['--bump', 'v9.9.10', '--note', '--repo', d]):
+                with self.subTest(argv=argv):
+                    code, out, err = run_cli(*argv)
+                    self.assertEqual(code, 2)
+                    self.assertIn('[bump-note]', err)
+            self.assertNotIn('v9.9.10', Path(d, build.SPEC).read_text(encoding='utf-8'))
+
+
+class RepoOption(unittest.TestCase):
+    """--repo PATH: which repository the command line works on, instead of the one the script lives in."""
+
+    def test_check_works_on_the_given_repository(self):
+        broken = regenerated(make())
+        broken[build.DESIGN] = broken[build.DESIGN].replace('v9.9.9', 'v9.9.8')
+        with tempfile.TemporaryDirectory() as d:
+            write_snapshot(d, broken)
+            code, out, err = run_cli('--check', '--repo', d)
+        self.assertEqual(code, 2)
+        self.assertIn('[version-mismatch]', err)
+
+    def test_a_clean_given_repository_passes(self):
+        with tempfile.TemporaryDirectory() as d:
+            write_snapshot(d, regenerated(make()))
+            code, out, err = run_cli('--check', '--repo', d)
+        self.assertEqual((code, err), (0, ''))
+        self.assertIn('3 requirements', out)
+
+    def test_the_option_needs_a_directory_that_exists(self):
+        for argv in (['--check', '--repo'], ['--check', '--repo', '/nonexistent/maz']):
+            with self.subTest(argv=argv):
+                code, out, err = run_cli(*argv)
+                self.assertEqual(code, 2)
+                self.assertIn('[repo-option]', err)
+
+
 class LineEndings(unittest.TestCase):
     def test_cr_in_doc_set(self):
         snap = make(AGENTS_md='a\r\nb\n')
@@ -529,6 +654,14 @@ class RevisionGitLayer(unittest.TestCase):
         self.write({}, **{'GLOSSARY.md': 'merged change'})
         self.git('add', '-A')
         self.assertEqual(self.run_main('--check-staged'), (0, ''))
+
+    def test_check_staged_works_on_the_repository_given_with_repo(self):
+        self.commit('base', BASE, **{'GLOSSARY.md': 'a'})
+        self.write({}, **{'GLOSSARY.md': 'b'})
+        self.git('add', '-A')
+        code, out, err = run_cli('--check-staged', '--repo', str(self.repo))
+        self.assertEqual(code, 2)
+        self.assertIn('[revision-version]', err)
 
     def test_staged_change_without_a_bump_still_fails(self):
         self.commit('base', BASE, **{'GLOSSARY.md': 'a'})

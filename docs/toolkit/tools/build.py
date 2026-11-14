@@ -11,9 +11,11 @@ Generated outputs:
 Usage (from anywhere):
   python3 -I docs/toolkit/tools/build.py          # validate and rewrite outputs
   python3 -I docs/toolkit/tools/build.py --check  # validate; exit 1 if outputs are stale
-  python3 -I docs/toolkit/tools/build.py --bump v1.4.14 [--date 2026-11-02]
+  python3 -I docs/toolkit/tools/build.py --bump v1.4.14 [--date 2026-11-02] [--note "what changed"]
       # set the shared version and revision date (default: today in Taiwan time)
-      # in every document header and the spec §0.4 sentence, then rewrite outputs
+      # in every document header and the spec §0.4 sentence, then rewrite outputs;
+      # --note also appends the row for the new version to review-log.md chapter 4
+      # (the version rule needs that row; without --note you add it yourself)
 
   python3 -I docs/toolkit/tools/build.py --check-staged
       # pre-commit: the staged changes against HEAD must bump the version if they touch
@@ -21,6 +23,9 @@ Usage (from anywhere):
   python3 -I docs/toolkit/tools/build.py --check-commits BASE [--fallback REF]
       # CI: every non-merge commit in BASE..HEAD, each against its first parent; when BASE
       # is empty, all zeros or unknown, the merge base of HEAD and REF is used instead
+
+Every mode works on the repository that contains this script; --repo PATH names another
+one (a clone, a throwaway repository) for any mode.
 
 Exit codes: 0 ok; 1 outputs stale (--check only); 2 validation problems.
 Nothing is written while any problem is reported.
@@ -430,13 +435,26 @@ def _replace_header(text, label, pattern, value, file):
     return header.sub(lambda m: m.group(1) + value, text, count=1)
 
 
-def bump(snapshot, version, date):
+def _add_log_row(review_log, version, date, note):
+    """review_log with the row for version appended after the last row of chapter 4; Invalid('bump-note') if it cannot."""
+    chapter = re.search(r'^## 4\. .*?(?=^## |\Z)', review_log, re.M | re.S)
+    rows = list(re.finditer(r'^\| v\d.*$', chapter.group(0), re.M)) if chapter else []
+    if not rows:
+        raise Invalid('bump-note', REVIEW, 'chapter 4 of the review log has no revision rows to append to')
+    if _has_log_row(review_log, version):
+        raise Invalid('bump-note', REVIEW, f'chapter 4 already has a row for {version}')
+    at = chapter.start() + rows[-1].end()
+    return review_log[:at] + f'\n| {version} | {date} | {note.replace("|", chr(92) + "|")} |' + review_log[at:]
+
+
+def bump(snapshot, version, date, note=None):
     """Set the shared version and revision date for a new revision (README 每輪修訂的檢查清單, step 1).
 
     Edits the 版本 and 修訂日期 headers of spec, design notes and review log, and the
     §0.4 version sentence; v0.1-scope.md follows when the outputs are regenerated.
     Returns Result like check_docs, with updates holding every file to write. The
     snapshot must pass check_docs first, and version must be newer than the current one.
+    With note (one non-empty line), the row for version is also appended to review-log.md chapter 4.
     """
     problems = []
     if not VERSION.fullmatch(version):
@@ -447,6 +465,8 @@ def bump(snapshot, version, date):
             raise ValueError
     except ValueError:
         problems.append(Problem('bump-date', '', f'date must be a real YYYY-MM-DD date; got {date!r}'))
+    if note is not None and (not note.strip() or '\n' in note or '\r' in note):
+        problems.append(Problem('bump-note', '', 'note must be one non-empty line'))
     if problems:
         return Result(problems, {}, None)
     before = check_docs(snapshot)
@@ -461,6 +481,8 @@ def bump(snapshot, version, date):
         for f in VERSIONED:
             text = _replace_header(snapshot[f], '版本', VERSION.pattern, version, f)
             edited[f] = _replace_header(text, '修訂日期', DATE.pattern, date, f)
+        if note is not None:
+            edited[REVIEW] = _add_log_row(edited[REVIEW], version, date, note)
     except Invalid as e:
         return Result([e.problem], {}, None)
     edited[SPEC] = VERSION_SENTENCE.sub(
@@ -611,10 +633,20 @@ def _option(argv, name):
     if name not in argv:
         return None
     i = argv.index(name) + 1
-    return argv[i] if i < len(argv) else ''
+    return argv[i] if i < len(argv) and not argv[i].startswith('--') else ''
+
+
+def _fail(rule, message):
+    print(format_problem(Problem(rule, '', message)), file=sys.stderr)
+    return 2
 
 
 def main(argv, repo=REPO):
+    given = _option(argv, '--repo')
+    if given is not None:
+        if not given or not Path(given).is_dir():
+            return _fail('repo-option', f'--repo needs an existing directory; got {given!r}')
+        repo = Path(given)
     if '--check-staged' in argv or '--check-commits' in argv:
         try:
             problems = (check_staged(repo) if '--check-staged' in argv
@@ -632,7 +664,10 @@ def main(argv, repo=REPO):
                   file=sys.stderr)
             return 2
         date = _option(argv, '--date')
-        result = bump(load_snapshot(repo), version, taiwan_today() if date is None else date)
+        result = bump(load_snapshot(repo), version, taiwan_today() if date is None else date,
+                      note=_option(argv, '--note'))
+    elif '--note' in argv:
+        return _fail('bump-note', '--note belongs to --bump')
     else:
         result = check_docs(load_snapshot(repo))
     if result.problems:
@@ -651,6 +686,8 @@ def main(argv, repo=REPO):
     for path, text in result.updates.items():
         with open(Path(repo) / path, 'w', encoding='utf-8', newline='\n') as f:
             f.write(text)
+    if version is not None and _option(argv, '--note') is None:
+        print(f'note: add the row for {version} to review-log.md chapter 4 (or bump with --note)', file=sys.stderr)
     print(f'ok: {summary}; updated: {", ".join(stale) or "nothing"}')
     return 0
 
