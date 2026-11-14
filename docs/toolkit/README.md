@@ -70,7 +70,7 @@ v1.3.6 以前的單一文件 `docs/research/vibe-coding-multiagent-testing-toolk
 
 兩道防線都執行 `--check` 與上述版本規則的檢查：
 
-- **提交前 hook**：`.githooks/pre-commit`。每個複本執行一次 `git config core.hooksPath .githooks` 後啟用。`--check` 檢查的是工作目錄，不是暫存區：只暫存部分修改時，檢查通過不代表提交的內容通過；版本規則的檢查讀的是暫存區。
+- **提交前 hook**：`.githooks/pre-commit`。每個複本執行一次 `git config core.hooksPath .githooks` 後啟用。還沒啟用時，`--check` 會在標準錯誤多印一行 `warning: core.hooksPath is not .githooks; …`（結束碼與標準輸出不變；持續整合與不是 git 複本的目錄不印），提醒這個複本的提交前檢查沒有在跑；工具不會替你啟用，那是複本的設定。`--check` 檢查的是工作目錄，不是暫存區：只暫存部分修改時，檢查通過不代表提交的內容通過；版本規則的檢查讀的是暫存區。
 - **CI**：`.github/workflows/docs-check.yml`，在每次 push 與 PR 執行（取完整歷史），並先跑工具本身的測試。直接推 `main` 時 CI 是事後警報；事前攔截靠 hook。
 
 工具本身的測試在 `tools/test_build.py`，用 `python3 -I -m unittest discover -s docs/toolkit/tools` 執行；修改 `build.py` 時依 `CODING_STANDARDS.md` 第 14 條補測試。

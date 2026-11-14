@@ -533,6 +533,17 @@ def check_revision(changed, base, new, parents=1):
     return []
 
 
+HOOKS_DIR = '.githooks'
+
+
+def hooks_warning(configured):
+    """The warning line for a core.hooksPath setting (None when unset), or None when it is the repository's hooks."""
+    if configured is not None and configured.rstrip('/') == HOOKS_DIR:
+        return None
+    return (f'warning: core.hooksPath is not {HOOKS_DIR}; the pre-commit check does not run in this clone '
+            f'(enable it once: git config core.hooksPath {HOOKS_DIR})')
+
+
 def taiwan_today():
     """Today's date in Taiwan time (UTC+8, no daylight saving), the zone the headers use."""
     return datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).date().isoformat()
@@ -573,6 +584,16 @@ def _git(repo, *args):
     if run.returncode != 0:
         raise Invalid('git', '', f'git {" ".join(args)} failed: {run.stderr.decode("utf-8", "replace").strip()}')
     return run.stdout.decode('utf-8')
+
+
+def hooks_warning_for(repo):
+    """hooks_warning for the clone at repo; None outside a git clone, on GitHub Actions or when git cannot say."""
+    if os.environ.get('GITHUB_ACTIONS') or not (Path(repo) / '.git').exists():
+        return None
+    run = _run_git(repo, 'config', '--get', 'core.hooksPath')
+    if run.returncode not in (0, 1):  # 1 means the setting is absent
+        return None
+    return hooks_warning(run.stdout.decode('utf-8').strip() if run.returncode == 0 else None)
 
 
 def _git_succeeds(repo, *args):
@@ -670,6 +691,8 @@ def main(argv, repo=REPO):
         return _fail('bump-note', '--note belongs to --bump')
     else:
         result = check_docs(load_snapshot(repo))
+    if check and (warning := hooks_warning_for(repo)):
+        print(warning, file=sys.stderr)
     if result.problems:
         for p in result.problems:
             print(format_problem(p), file=sys.stderr)

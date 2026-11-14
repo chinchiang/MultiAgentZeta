@@ -6,12 +6,14 @@ Run (from anywhere):
 import contextlib
 import io
 import json
+import os
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -498,6 +500,75 @@ class RepoOption(unittest.TestCase):
                 code, out, err = run_cli(*argv)
                 self.assertEqual(code, 2)
                 self.assertIn('[repo-option]', err)
+
+
+HOOKS_WARNING = ('warning: core.hooksPath is not .githooks; the pre-commit check does not run in this clone '
+                 '(enable it once: git config core.hooksPath .githooks)')
+
+
+class HooksWarning(unittest.TestCase):
+    """hooks_warning(configured): the line --check prints when the pre-commit hook is not switched on."""
+
+    def test_the_repository_hooks_directory_needs_no_warning(self):
+        for configured in ('.githooks', '.githooks/'):
+            with self.subTest(configured=configured):
+                self.assertIsNone(build.hooks_warning(configured))
+
+    def test_anything_else_is_warned_about(self):
+        for configured in (None, '', '.githooks2', '/tmp/other', 'hooks', '.git/hooks'):
+            with self.subTest(configured=configured):
+                self.assertEqual(build.hooks_warning(configured), HOOKS_WARNING)
+
+
+@unittest.skipUnless(shutil.which('git'), 'git is not installed')
+class HooksWarningOnTheCommandLine(unittest.TestCase):
+    """--check over a throwaway git repository (--repo), with the environment under the test's control."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        write_snapshot(self.dir.name, regenerated(make()))
+        subprocess.run(['git', '-C', self.dir.name, 'init', '-q'], check=True)
+        env = unittest.mock.patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop('GITHUB_ACTIONS', None)
+
+    def hooks_path(self, value):
+        subprocess.run(['git', '-C', self.dir.name, 'config', 'core.hooksPath', value], check=True)
+
+    def test_an_unset_hooks_path_warns_on_standard_error_only(self):
+        code, out, err = run_cli('--check', '--repo', self.dir.name)
+        self.assertEqual(code, 0)
+        self.assertIn('ok: 3 requirements', out)
+        self.assertNotIn('warning', out)
+        self.assertEqual(err, HOOKS_WARNING + '\n')
+
+    def test_the_warning_does_not_change_the_exit_code_of_a_failing_check(self):
+        Path(self.dir.name, build.DESIGN).write_text('> **版本**：v9.9.8\n', encoding='utf-8')
+        code, out, err = run_cli('--check', '--repo', self.dir.name)
+        self.assertEqual(code, 2)
+        self.assertIn(HOOKS_WARNING, err)
+        self.assertIn('[', err.replace(HOOKS_WARNING, ''))
+
+    def test_the_repository_hooks_directory_gives_no_warning(self):
+        self.hooks_path('.githooks')
+        self.assertEqual(run_cli('--check', '--repo', self.dir.name)[2], '')
+
+    def test_a_github_actions_run_gives_no_warning(self):
+        os.environ['GITHUB_ACTIONS'] = 'true'
+        self.assertEqual(run_cli('--check', '--repo', self.dir.name)[2], '')
+
+    def test_a_directory_that_is_not_a_git_clone_gives_no_warning(self):
+        with tempfile.TemporaryDirectory() as plain:
+            write_snapshot(plain, regenerated(make()))
+            code, out, err = run_cli('--check', '--repo', plain)
+        self.assertEqual((code, err), (0, ''))
+
+    def test_other_modes_do_not_warn(self):
+        for argv in (['--bump', 'v9.9.10', '--date', '2026-02-03', '--note', 'x'], []):
+            with self.subTest(argv=argv):
+                self.assertNotIn('warning', run_cli(*argv, '--repo', self.dir.name)[2])
 
 
 class LineEndings(unittest.TestCase):
