@@ -5,3 +5,6 @@ docs/research/*.pdf
 **/supabase/.temp/
 **/supabase/.branches/
 .venv/
+# Agent skills installed by the skills tool: a vendored copy and its lock file, not this project's sources
+.agents/
+skills-lock.json
