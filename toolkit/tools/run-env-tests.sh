@@ -4,5 +4,11 @@
 #   toolkit/tools/run-env-tests.sh NAME [-p PATTERN] [-k NAME_FILTER ...]   # log: scratch/logs/NAME.log
 #   toolkit/tools/run-env-tests.sh --status NAME
 #
+# Runs with the repository's .venv/bin/python when it is runnable (it holds the packages of
+# toolkit/requirements.lock; no need to activate it, and it wins over any other active environment),
+# otherwise with python3 from PATH.
 # Details (detaching, the lock, leftover Docker resources, the log format): toolkit/tools/env_tests.py.
-exec python3 -I "$(dirname "$0")/env_tests.py" "$@"
+here=$(cd "$(dirname "$0")" && pwd)
+py="$here/../../.venv/bin/python"
+[ -x "$py" ] || py=python3
+exec "$py" -I "$here/env_tests.py" "$@"

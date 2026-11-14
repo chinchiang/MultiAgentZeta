@@ -1,6 +1,7 @@
 """toolkit/tools/env_tests.py, the environment test runner behind run-env-tests.sh: reading its log,
 counting the planned tests, the lock that lets one run at a time, and spotting other test runs."""
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -126,6 +127,65 @@ class OtherTestRuns(unittest.TestCase):
         self.assertEqual(env_tests.other_test_runs(self.PS, exclude={102}), [
             '101 /usr/bin/python3 -I -m unittest discover -v -s toolkit/tests -t .'])
         self.assertEqual(env_tests.other_test_runs('  104 python3 -m pytest tests\n', exclude=set()), [])
+
+
+@unittest.skipUnless(shutil.which('sh'), 'sh is not installed')
+class RunScriptPicksTheInterpreter(unittest.TestCase):
+    """run-env-tests.sh in a throwaway copy of the layout, with fake interpreters that only say who they are."""
+
+    SCRIPT = Path(__file__).resolve().parents[1] / 'tools' / 'run-env-tests.sh'
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.root = Path(self.dir.name).resolve() / 'repo'
+        tools = self.root / 'toolkit' / 'tools'
+        tools.mkdir(parents=True)
+        shutil.copy(self.SCRIPT, tools / 'run-env-tests.sh')
+        (tools / 'env_tests.py').write_text('', encoding='utf-8')
+        self.path_bin = Path(self.dir.name).resolve() / 'bin'
+        self.path_bin.mkdir()
+        self.fake(self.path_bin / 'python3', 'path-python3')
+
+    def fake(self, path, name, mode=0o755):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f'#!/bin/sh\necho "{name} $*"\n', encoding='utf-8')
+        path.chmod(mode)
+
+    def run_script(self, *args, cwd=None, env=None):
+        environ = {'PATH': f'{self.path_bin}:/usr/bin:/bin', **(env or {})}
+        run = subprocess.run(['sh', str(self.root / 'toolkit' / 'tools' / 'run-env-tests.sh'), *args],
+                             cwd=cwd or self.root, env=environ, capture_output=True, text=True)
+        return run.returncode, run.stdout.strip()
+
+    def test_the_repository_venv_is_used_when_it_exists_and_arguments_pass_through(self):
+        self.fake(self.root / '.venv' / 'bin' / 'python', 'venv-python')
+        code, out = self.run_script('demo', '-p', 'test_x.py', '-k', 'a b')
+        self.assertEqual((code, out), (0, f'venv-python -I {self.root}/toolkit/tools/env_tests.py demo -p test_x.py -k a b'))
+
+    def test_without_a_venv_python3_on_the_path_is_used(self):
+        code, out = self.run_script('--status', 'demo')
+        self.assertEqual((code, out), (0, f'path-python3 -I {self.root}/toolkit/tools/env_tests.py --status demo'))
+
+    def test_a_venv_python_that_cannot_run_falls_back_to_python3(self):
+        self.fake(self.root / '.venv' / 'bin' / 'python', 'venv-python', mode=0o644)
+        self.assertEqual(self.run_script('demo')[1].split()[0], 'path-python3')
+        (self.root / '.venv' / 'bin' / 'python').unlink()
+        (self.root / '.venv' / 'bin' / 'python').symlink_to(self.root / 'nowhere')
+        self.assertEqual(self.run_script('demo')[1].split()[0], 'path-python3')
+
+    def test_the_repository_venv_wins_over_another_active_environment(self):
+        self.fake(self.root / '.venv' / 'bin' / 'python', 'venv-python')
+        other = Path(self.dir.name).resolve() / 'other-venv'
+        self.fake(other / 'bin' / 'python3', 'other-python3')
+        code, out = self.run_script('demo', env={'VIRTUAL_ENV': str(other), 'PATH': f'{other}/bin:{self.path_bin}:/usr/bin:/bin'})
+        self.assertEqual(out.split()[0], 'venv-python')
+
+    def test_it_finds_the_venv_from_any_working_directory(self):
+        self.fake(self.root / '.venv' / 'bin' / 'python', 'venv-python')
+        elsewhere = Path(self.dir.name).resolve() / 'elsewhere'
+        elsewhere.mkdir()
+        self.assertEqual(self.run_script('demo', cwd=elsewhere)[1].split()[0], 'venv-python')
 
 
 if __name__ == '__main__':

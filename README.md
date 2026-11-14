@@ -37,10 +37,9 @@ python3 -m venv .venv
 .venv/bin/python -I -m unittest discover -s toolkit/tests -t . -p test_scan.py
 ```
 
-環境測試會啟動真的 Supabase 堆疊，跑一輪約半小時。用專用腳本讓它脫離目前的工作階段執行。腳本用 `PATH` 上的 `python3`，不會自己找 `.venv`，所以先啟用它：
+環境測試會啟動真的 Supabase 堆疊，跑一輪約半小時。用專用腳本讓它脫離目前的工作階段執行；腳本自己使用 `.venv`，不必先啟用：
 
 ```sh
-. .venv/bin/activate
 export MAZ_SUPABASE_BIN="$(toolkit/tools/fetch-supabase-cli.sh)"   # 取得並驗證固定版本的 Supabase CLI
 toolkit/tools/run-env-tests.sh NAME                                # 啟動；記錄在 scratch/logs/NAME.log
 toolkit/tools/run-env-tests.sh --status NAME                       # 查進度與失敗
