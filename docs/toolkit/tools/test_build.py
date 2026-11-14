@@ -548,6 +548,34 @@ class RevisionGitLayer(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn('[revision-version]', err)
 
+    def test_unusable_base_on_the_fallback_branch_itself_still_checks_the_head_commit(self):
+        """A first push or an unfetchable force-push tip, made on the default branch: base..HEAD would be empty."""
+        self.commit('base', BASE, **{'GLOSSARY.md': 'a'})
+        head = self.commit('forgot to bump', **{'GLOSSARY.md': 'b'})
+        for base in ('0' * 40, 'f' * 40, ''):
+            with self.subTest(base=base):
+                code, err = self.run_main('--check-commits', base, '--fallback', 'main')
+                self.assertEqual(code, 2)
+                self.assertIn(head[:10], err)
+                self.assertIn('[revision-version]', err)
+
+    def test_unusable_base_on_the_fallback_branch_passes_when_the_head_commit_is_fine(self):
+        self.commit('base', BASE, **{'GLOSSARY.md': 'a'})
+        self.commit('bump', BUMPED, **{'GLOSSARY.md': 'b'})
+        self.assertEqual(self.run_main('--check-commits', '0' * 40, '--fallback', 'main'), (0, ''))
+
+    def test_unusable_base_with_a_root_or_merge_head_checks_nothing(self):
+        self.write(BASE, **{'GLOSSARY.md': 'a'})
+        self.git('add', '-A')
+        self.git('commit', '-q', '-m', 'root, no bump needed')
+        self.assertEqual(self.run_main('--check-commits', '0' * 40, '--fallback', 'main'), (0, ''))
+        self.git('checkout', '-q', '-b', 'side')
+        self.commit('side', **{'GLOSSARY.md': 'side'})
+        self.git('checkout', '-q', 'main')
+        self.commit('main', **{'GLOSSARY.md': 'main'})
+        self.git('merge', '-q', '--no-ff', '-X', 'ours', '-m', 'merge', 'side')
+        self.assertEqual(self.run_main('--check-commits', '0' * 40, '--fallback', 'main'), (0, ''))
+
     def test_commits_each_missing_a_bump_are_all_named(self):
         root = self.commit('base', BASE, **{'GLOSSARY.md': 'a'})
         first = self.commit('one', **{'GLOSSARY.md': 'b'})

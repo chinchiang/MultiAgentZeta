@@ -583,7 +583,9 @@ def check_staged(repo):
 
 
 def check_commits(repo, base, fallback):
-    """Problems of every commit in base..HEAD; Invalid('revision-base') when no base can be decided."""
+    """Problems of every commit in base..HEAD; Invalid('revision-base') when no base can be decided.
+
+    When the base is unusable and the fallback leaves an empty range, only HEAD is checked."""
     known = bool(base) and not set(base) <= {'0'} and _git_succeeds(repo, 'cat-file', '-e', f'{base}^{{commit}}')
     if not known:
         if not fallback:
@@ -592,8 +594,12 @@ def check_commits(repo, base, fallback):
             base = _git(repo, 'merge-base', 'HEAD', fallback).strip()
         except Invalid:
             raise Invalid('revision-base', '', f'no usable base commit, and no merge base of HEAD and {fallback}') from None
+    commits = _git(repo, 'rev-list', '--reverse', f'{base}..HEAD').split()
+    if not known and not commits:
+        # The fallback is HEAD itself (the default branch was pushed): the range says nothing, so check HEAD alone.
+        commits = [_git(repo, 'rev-parse', 'HEAD').strip()]
     problems = []
-    for commit in _git(repo, 'rev-list', '--reverse', f'{base}..HEAD').split():
+    for commit in commits:
         parents = _git(repo, 'rev-list', '--parents', '-n', '1', commit).split()[1:]
         if len(parents) == 1:
             problems += _check_change(repo, Change(parents[0], commit, commit[:10]))

@@ -1,6 +1,6 @@
 # 多代理 AI 輔助程式開發測試工具包：審查處置紀錄
 
-> **版本**：v1.4.28（四份文件共用版本號）
+> **版本**：v1.4.29（四份文件共用版本號）
 > **修訂日期**：2026-11-14（臺灣時間）
 > **文件狀態**：架構設計草案，非已實作或已驗證的聲明。
 > **資訊分級**：機密／僅供英業達內部使用；未取得正式文件編號或發布核准
@@ -94,6 +94,7 @@
 | v1.4.26 | 2026-11-14 | 補升 2026-11-13 對 `docs/agents/issue-tracker.md` 的兩次修改（`d61dab5`、`29a9389`）；當時沒有升版，也沒有修訂紀錄，違反本目錄 README 的版本規則，提交前檢查與持續整合都沒有擋下，因為 `build.py --check` 只檢查四份文件的版本彼此一致，不檢查「改了版本規則列的路徑就必須升版」。內容依 `gh` 2.62.0 的實測更正：這版沒有 `gh issue create --parent`、`gh issue edit --add-sub-issue`、`--blocked-by`、`--add-blocked-by` 旗標，也沒有 `gh issue view --json blockedBy` 欄位。建立子議題改用 REST 的 `sub_issues` 端點，新增與移除阻擋關係改用 `dependencies/blocked_by` 端點，兩者都取對方議題的資料庫 `id`，不是議題編號；計算未結案的阻擋者改讀 `dependencies/blocked_by` 的清單並篩選 `state`，不用議題上的 `issue_dependencies_summary`，因為它的數字會落後（新增後立即讀為 0，移除後立即讀為 1）。只有 `docs/agents/issue-tracker.md` 有內容變更，其餘三份文件只改檔頭版本號與修訂日期；規格條文與〈定義〉都沒有變。 |
 | v1.4.27 | 2026-11-14 | 依 #62（v0.1-59）為「版本規則」加上自動檢查：改動版本規則列的路徑（`docs/toolkit/`、`GLOSSARY.md`、`docs/adr/`、`CODING_STANDARDS.md`、`AGENTS.md`、`docs/agents/`、`.claude/agents/`）的提交，必須讓共用版本號變新，且本章有新版本的那一列。`build.py` 新增第三個入口 `check_revision`（純函式，不讀檔、不呼叫 git）與兩個命令列模式：`--check-staged` 給提交前 hook（暫存區對 `HEAD`），`--check-commits BASE [--fallback REF]` 給 CI（範圍內每個非合併提交各與第一個上一代比較，找不到基準時失敗，不靜默通過）；路徑清單只寫在 `VERSIONED_PATHS`，測試確認它與本目錄 README 版本規則那一句一致。`.githooks/pre-commit` 與 `docs-check.yml` 都呼叫它，CI 改取完整歷史。`docs/toolkit/README.md`「自動檢查」補上新檢查；`CODING_STANDARDS.md` 第 14 條加上 `check_revision` 入口。規格條文與〈定義〉都沒有變；`docs/toolkit/README.md`、`CODING_STANDARDS.md` 與 `tools/` 有內容變更，其餘三份文件只改檔頭版本號與修訂日期。 |
 | v1.4.28 | 2026-11-14 | 整理 #62 審查提出的 `build.py` git 薄層氣味，行為不變：以 `Change(old, new, label)` 取代一起傳遞的 `(old, new, new_label)`，用 `new=None` 表示暫存區，不再用空字串；`_check_change` 不再傳固定為 1 的 `parents`；`known()` 與 `check_staged` 內自己呼叫的 `subprocess.run` 改走共用的 `_run_git` 與 `_git_succeeds`。`test_build.py` 的測試改為自己 `import re`，不再借用 `build.re`。只有 `tools/` 有內容變更，四份文件只改檔頭版本號與修訂日期；規格條文與〈定義〉都沒有變。 |
+| v1.4.29 | 2026-11-14 | 依 #64（v0.1-61）補上 #62 留下的缺口：`build.py --check-commits` 的基準不可用（全零、找不到、空字串）而退回 `--fallback` 後，若範圍仍為空（推送的就是預設分支本身），不再靜默通過，改為只檢查 `HEAD` 這一個提交；`HEAD` 是根提交或合併提交時照舊不檢查，範圍非空時行為不變。已知限制：強制推送一次帶入多個新提交又找不到舊基準時，只有 `HEAD` 被檢查。`docs/toolkit/README.md`「自動檢查」補上這一句。`tools/` 與本目錄 README 有內容變更，其餘三份文件只改檔頭版本號與修訂日期；規格條文與〈定義〉都沒有變。 |
 
 ## 5. 已取消的宣稱
 
