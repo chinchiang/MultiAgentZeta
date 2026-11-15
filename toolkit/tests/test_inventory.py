@@ -122,5 +122,95 @@ class UnresolvedContentMakesTheInventoryIncomplete(unittest.TestCase):
         self.assertEqual([i['ref'] for i in result['items'] if i['scope'] == 'rls-table'], ['public.a'])
 
 
+class WhatATestCovers(unittest.TestCase):
+    """inventory.covers(inventory, resources, command): the inventoried items a test of those resources and
+    that command exercises: each resource as public.<name>, and the policies on it for that command or for all."""
+
+    VULNERABLE = inventory.inventory(sample_files('vulnerable'))
+
+    def covers(self, resources, command, inv=None):
+        return inventory.covers(inv or self.VULNERABLE, resources, command)
+
+    def test_an_update_covers_the_table_and_its_update_policy_only(self):
+        self.assertEqual(self.covers(['documents'], 'update'),
+                         ['public.documents', 'public.documents: tenant members update documents'])
+
+    def test_each_command_covers_the_policies_for_that_command(self):
+        self.assertEqual(self.covers(['documents'], 'select'),
+                         ['public.documents', 'public.documents: members read documents shared with their tenant',
+                          'public.documents: tenant members read documents'])
+        self.assertEqual(self.covers(['documents'], 'insert'),
+                         ['public.documents', 'public.documents: tenant members create documents'])
+        self.assertEqual(self.covers(['documents'], 'delete'),
+                         ['public.documents', 'public.documents: tenant members delete documents'])
+
+    def test_a_policy_for_all_commands_is_covered_by_every_command(self):
+        inv = inventory.inventory({M: 'create table public.t (id int);\n'
+                                      'create policy everything on public.t using (true);\n'
+                                      'create policy explicit on public.t for all using (true);\n'
+                                      'create policy reads on public.t for select using (true);\n'})
+        for command in ('select', 'insert', 'update', 'delete'):
+            expected = ['public.t', 'public.t: everything', 'public.t: explicit']
+            expected += ['public.t: reads'] if command == 'select' else []
+            with self.subTest(command=command):
+                self.assertEqual(self.covers(['t'], command, inv), expected)
+
+    def test_several_resources_each_bring_their_own_table_and_policies_without_repeats(self):
+        self.assertEqual(self.covers(['announcements', 'tenants', 'announcements'], 'select'),
+                         ['public.announcements', 'public.announcements: anyone reads announcements',
+                          'public.tenants', 'public.tenants: members read their tenants'])
+
+    def test_a_resource_with_a_schema_is_used_as_written(self):
+        inv = inventory.inventory({M: 'create table private.docs (id int);\n'
+                                      'create policy p on private.docs for select using (true);\n'})
+        self.assertEqual(self.covers(['private.docs'], 'select', inv), ['private.docs', 'private.docs: p'])
+
+    def test_what_is_not_inventoried_is_not_covered(self):
+        self.assertEqual(self.covers(['no_such_table'], 'select'), [])
+        without_module = inventory.inventory(sample_files('vulnerable'), modules=())
+        self.assertEqual(self.covers(['documents'], 'select', without_module), [])
+
+
+GAP = {'scope': 'identity:tenant_admin', 'reason': 'no such identity in the BuildRecipe (測試身分)'}
+
+
+class ScopesTheRunAddsAsUnsupported(unittest.TestCase):
+    """A run can know scope it cannot test (an identity the BuildRecipe lacks): it joins the unsupported scopes."""
+
+    def test_an_added_scope_is_unsupported_and_listed_after_the_fixed_ones(self):
+        result = inventory.inventory(sample_files('vulnerable'), extra_unsupported=[GAP])
+        self.assertEqual([i['scope'] for i in result['unsupported_items']], ALWAYS_UNSUPPORTED + ['identity:tenant_admin'])
+        self.assertEqual(result['items'][-1], {**GAP, 'state': 'unsupported'})
+        self.assertEqual(result['completeness'], 'complete')  # an identity gap is not unresolved content
+
+    def test_the_added_scope_is_kept_without_the_module_too(self):
+        result = inventory.inventory(sample_files('vulnerable'), modules=(), extra_unsupported=[GAP])
+        self.assertEqual([i['scope'] for i in result['unsupported_items']],
+                         ['rls-tables-and-policies'] + ALWAYS_UNSUPPORTED + ['identity:tenant_admin'])
+
+    def test_what_the_caller_passed_is_not_changed(self):
+        passed = [dict(GAP)]
+        inventory.inventory(sample_files('vulnerable'), extra_unsupported=passed)
+        self.assertEqual(passed, [GAP])
+
+
+class AProjectThatWasNotRead(unittest.TestCase):
+    """A run blocked before the source was verified does not read the project: nothing is inventoried and the
+    inventory is unknown, not empty and complete."""
+
+    REASON = 'preflight blocked; the project files were not read'
+
+    def test_it_has_no_facts_and_says_why_it_is_unknown(self):
+        result = inventory.not_read(self.REASON)
+        self.assertEqual((result['facts'], result['completeness'], result['loaded']), ([], 'unknown', ['supabase-rls']))
+        self.assertEqual(result['unresolved'], [{'file': '(project)', 'line': 0, 'reason': self.REASON}])
+        self.assertEqual([i['scope'] for i in result['items']], ALWAYS_UNSUPPORTED)
+        self.assertEqual({i['state'] for i in result['items']}, {'unsupported'})
+
+    def test_it_keeps_the_scopes_the_run_added(self):
+        result = inventory.not_read(self.REASON, extra_unsupported=[GAP])
+        self.assertEqual(result['items'][-1], {**GAP, 'state': 'unsupported'})
+
+
 if __name__ == '__main__':
     unittest.main()

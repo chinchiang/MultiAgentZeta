@@ -7,6 +7,7 @@ the numbers of the coverage record out. Nothing blocked, failed to run or unsupp
 from toolkit import extract
 
 EXECUTED = ('passed', 'failed')
+RESULTS = EXECUTED + ('blocked', 'error', 'untested', 'cancelled', 'unsupported')  # 〈定義：測試結果〉 and 取消
 EXCLUSION_FIELDS = ('reason', 'confirmed_by', 'version')  # TK-EVD-009: all three, besides the item itself
 
 
@@ -46,6 +47,9 @@ def coverage(inventory, cases, exclusions=()):
     not_facts = [p for f in inventory['facts'] for p in extract.codefact_problems(f)]
     if not_facts:  # TK-DAT-007: only extraction makes a CodeFact; anything else is refused, not counted
         raise ValueError('the inventory holds something that is not a CodeFact: ' + '; '.join(not_facts))
+    unknown = [c for c in cases if c['result'] not in RESULTS]
+    if unknown:  # TK-EVD-008: a result no count knows would be dropped silently
+        raise ValueError('; '.join(f"case {c['id']!r} has the unknown result {c['result']!r}" for c in unknown))
     loaded = set(inventory['loaded'])
     accepted, refused = _exclusions(inventory['items'], exclusions)
     left_out = {e['ref'] for e in accepted}
@@ -55,7 +59,7 @@ def coverage(inventory, cases, exclusions=()):
     unjudged = [c for c in cases if c['module'] not in loaded]
     executed = [c for c in judged if c['result'] in EXECUTED]
     valid = [c for c in executed if c['valid']]
-    unsupported = len(unsupported_scopes) + len(unjudged)
+    unsupported = len(unsupported_scopes) + len(unjudged) + sum(c['result'] == 'unsupported' for c in judged)
     denominator = len(cases) + len(unsupported_scopes)
     return {
         'denominator': denominator,

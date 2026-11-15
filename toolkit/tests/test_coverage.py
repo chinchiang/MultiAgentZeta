@@ -237,5 +237,34 @@ class OnlyCodeFactsReachTheCounts(unittest.TestCase):
         self.assertEqual(coverage.coverage(INVENTORY, RUN)['denominator'], 9)
 
 
+class ACaseThatHasNoVerifiedTestMethod(unittest.TestCase):
+    """A scheduled test whose result is 'unsupported' (the definition's 不支援) stays in the denominator and is
+    counted as unsupported, never as a judgement."""
+
+    def test_it_counts_as_unsupported_and_in_the_denominator(self):
+        c = coverage.coverage(INVENTORY, [case('c1', 'passed'), case('c2', 'unsupported')])
+        self.assertEqual((c['denominator'], c['unsupported'], c['executed'], c['valid_judgements']), (7, 6, 1, 1))
+        self.assertAlmostEqual(c['effective_judgement_rate'], 1 / 7)
+
+    def test_it_is_not_counted_twice_when_its_module_is_not_loaded_either(self):
+        without = inventory.inventory(sample_files('vulnerable'), modules=())
+        c = coverage.coverage(without, [case('c1', 'unsupported')])
+        self.assertEqual((c['denominator'], c['unsupported']), (1 + 6, 1 + 6))
+
+
+class NothingIsDroppedSilently(unittest.TestCase):
+    """TK-EVD-008: a result the definition does not know cannot be left out of every count."""
+
+    def test_an_unknown_result_is_refused_and_named(self):
+        with self.assertRaises(ValueError) as raised:
+            coverage.coverage(INVENTORY, [case('c1', 'passed'), case('c9', 'skipped')])
+        self.assertIn("case 'c9' has the unknown result 'skipped'", str(raised.exception))
+
+    def test_every_result_the_definition_lists_is_accepted(self):
+        for result in ('passed', 'failed', 'blocked', 'error', 'untested', 'cancelled', 'unsupported'):
+            with self.subTest(result=result):
+                self.assertEqual(coverage.coverage(INVENTORY, [case('c1', result)])['denominator'], 6)
+
+
 if __name__ == '__main__':
     unittest.main()
