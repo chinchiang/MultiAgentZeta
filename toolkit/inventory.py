@@ -56,5 +56,5 @@ def inventory(files, modules=DEFAULT_MODULES):
                    + [dict(u) for m in MODULES for u in MODULES[m]['limitations']] + [dict(u) for u in UNCOVERED])
     items += [{**u, 'state': 'unsupported'} for u in unsupported]
     complete = not found['unresolved'] and all(m in modules for m in MODULES)
-    return {'rule': extract.RULE, 'facts': found['facts'], 'unresolved': found['unresolved'], 'items': items,
+    return {'rule': extract.RULE, 'loaded': [m for m in MODULES if m in modules], 'facts': found['facts'], 'unresolved': found['unresolved'], 'items': items,
             'unsupported_items': unsupported, 'completeness': 'complete' if complete else 'unknown'}

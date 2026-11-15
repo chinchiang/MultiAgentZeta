@@ -30,6 +30,10 @@ class WithTheModuleLoaded(unittest.TestCase):
                 self.assertEqual(len(result['items']), 5 + policies + 5)  # the denominator the inventory gives
                 self.assertEqual(result['completeness'], 'complete')
 
+    def test_the_result_says_which_modules_were_loaded(self):
+        self.assertEqual(inventory.inventory(sample_files('vulnerable'))['loaded'], ['supabase-rls'])
+        self.assertEqual(inventory.inventory(sample_files('vulnerable'), modules=())['loaded'], [])
+
     def test_an_item_names_what_it_is(self):
         result = inventory.inventory(sample_files('vulnerable'), modules=('supabase-rls',))
         refs = {(i['scope'], i['ref']) for i in result['items'] if i['state'] == 'inventoried'}
