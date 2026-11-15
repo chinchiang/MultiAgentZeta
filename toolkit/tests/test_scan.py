@@ -560,7 +560,8 @@ class UnsupportedScopes(unittest.TestCase):
     """TK-DYN-004 scope not covered yet stays in the report and in the denominator (AG-07)."""
 
     # The access paths of TK-DYN-004 that no v0.1 template covers yet.
-    EXPECTED_SCOPES = {'rls-functions', 'rls-views', 'rls-column-privileges'}
+    # (and the two Next.js surfaces no v0.1 module resolves: 〈定義：框架模組〉)
+    EXPECTED_SCOPES = {'rls-functions', 'rls-views', 'rls-column-privileges', 'nextjs-routes', 'nextjs-server-actions'}
 
     def test_unsupported_rls_scopes_are_listed_and_counted(self):
         m = manifest('vulnerable')
@@ -914,7 +915,7 @@ class UnknownRequirement(unittest.TestCase):
                         self.assertIn('does not match the rule (TK-REQ-016)', e['error'])
                     else:
                         self.assertIn('BuildRecipe', e['error'])
-            self.assertEqual(rep['coverage']['denominator'], len(TESTS) + 1 + len(scan.UNSUPPORTED_SCOPES))
+            self.assertEqual(rep['coverage']['denominator'], len(TESTS) + 1 + 5)  # plus the five unsupported scopes
 
 
 class CaseKindMatchesItem(unittest.TestCase):
@@ -940,7 +941,7 @@ class CaseKindMatchesItem(unittest.TestCase):
             for test_id in ('READ-same-tenant', 'PUBLIC-READ-other-tenant'):
                 self.assertEqual(errors[test_id][0], 'blocked')
                 self.assertIn('BuildRecipe', errors[test_id][1])
-            self.assertEqual(rep['coverage']['denominator'], 4 + len(scan.UNSUPPORTED_SCOPES))
+            self.assertEqual(rep['coverage']['denominator'], 4 + 5)  # plus the five unsupported scopes
 
 
 class ConfirmationListInScan(unittest.TestCase):
@@ -1545,6 +1546,11 @@ class UnsupportedIdentity(unittest.TestCase):
             self.assertIn('tenant_admin', e['error'])
         gaps = {u['scope'] for u in rep['coverage']['unsupported_items']}
         self.assertIn('identity:tenant_admin', gaps)
+        # The gap is an unsupported scope of the inventory, so it is in the denominator (TK-EVD-008): the five
+        # fixed scopes and the gap, besides the planned tests, all of which are unsupported.
+        cov = rep['coverage']
+        self.assertEqual((cov['denominator'], cov['unsupported']), (len(TESTS) + 6, len(TESTS) + 6))
+        self.assertEqual((cov['valid_judgements'], cov['effective_judgement_rate']), (0, 0))
 
     def test_the_gap_stays_when_the_environment_is_blocked(self):
         import tempfile

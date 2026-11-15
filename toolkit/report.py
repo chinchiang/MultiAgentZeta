@@ -55,7 +55,70 @@ def _cross_record_problems(doc):
         if not any(results.get(x) == 'failed' for x in ids):
             problems.append(f'findings/{i}: a confirmed finding needs a failed execution record; '
                             f'execution_record_ids {ids} do not include one')
-    return problems + _requirement_problems(doc) + _approval_problems(doc) + _review_problems(doc)
+    return problems + _requirement_problems(doc) + _approval_problems(doc) + _review_problems(doc) + _coverage_problems(doc)
+
+
+COVERAGE_CLASSES = ('executed', 'blocked', 'errors', 'untested', 'cancelled', 'unsupported')
+
+
+def _count(cov, name):
+    value = cov.get(name)
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _coverage_problems(doc):
+    """The numbers of the coverage record that the schema cannot tie together (〈定義：覆蓋面向〉, TK-EVD-008,
+    TK-EVD-009): the classes add up to the denominator, which is the execution records plus the unsupported
+    scopes; a rate is what its numbers give, and over a zero denominator it is none, never full coverage."""
+    cov = doc.get('coverage') if isinstance(doc, dict) else None
+    if not isinstance(cov, dict):
+        return []
+    problems = []
+    den, executed, valid = _count(cov, 'denominator'), _count(cov, 'executed'), _count(cov, 'valid_judgements')
+    classes = [_count(cov, c) for c in COVERAGE_CLASSES]
+    records, items, excluded = _list(doc, 'execution_records'), cov.get('unsupported_items'), cov.get('excluded')
+    if executed is not None and valid is not None and valid > executed:
+        problems.append(f'coverage: valid_judgements {valid} is more than executed {executed}')
+    if den is not None and None not in classes and sum(classes) != den:
+        problems.append(f'coverage: {", ".join(COVERAGE_CLASSES)} add up to {sum(classes)}, not the denominator {den}')
+    if den is not None and isinstance(items, list) and isinstance(excluded, list):
+        expected = len(records) + len(items)  # an exclusion can only take items out
+        if (not excluded and den != expected) or den > expected:
+            problems.append(f'coverage: denominator {den} is not the {len(records)} execution records plus the '
+                            f'{len(items)} unsupported scopes ({"at most " if excluded else ""}{expected})')
+    states = cov.get('states') if isinstance(cov.get('states'), dict) else {}
+    unsupported = _count(cov, 'unsupported')
+    wanted = {  # what each rate is, when it can be told: None means the report does not say
+        'effective_judgement_rate': valid / den if den and valid is not None else None,
+        'tool_support_rate': (den - unsupported) / den if den and unsupported is not None else None,
+        'required_test_completion_rate': (executed / len(records) if records and executed is not None and excluded == []
+                                          else None)}
+    # A rate with nothing to divide by has no number, and says why (TK-EVD-009): not applicable when something was
+    # excluded, insufficient data when not. The completion rate has no cases to divide by when no record exists
+    # and nothing was excluded.
+    has_excluded = isinstance(excluded, list) and bool(excluded)
+    zero = {name: den == 0 for name in wanted}
+    zero['required_test_completion_rate'] = den == 0 or (excluded == [] and not records)
+    for name, number in wanted.items():
+        rate, state = cov.get(name), states.get(name)
+        if zero[name]:
+            if rate is not None:
+                problems.append(f'coverage: {name} {rate!r} is over a zero denominator and must be none, never full coverage '
+                                f'(TK-EVD-009)')
+            expected = 'not_applicable' if has_excluded else 'insufficient_data'
+            if state is not None and state != expected:
+                problems.append(f'coverage: {name} is {state!r} over a zero denominator; it is {expected!r} when '
+                                f'{"something was" if has_excluded else "nothing was"} excluded (TK-EVD-009)')
+        elif state == 'measured' and rate is None:
+            problems.append(f'coverage: {name} is measured but has no number')
+        elif state in ('not_applicable', 'insufficient_data') and rate is not None:
+            problems.append(f'coverage: {name} is {state} but has the number {rate!r}')
+        elif isinstance(rate, (int, float)) and number is not None and abs(rate - number) > 1e-9:
+            problems.append(f'coverage: {name} {rate!r} is not {number!r}, what its numbers give')
+    inv = cov.get('inventory') if isinstance(cov.get('inventory'), dict) else {}
+    if cov.get('claim') == 'whole_scope' and inv.get('completeness') != 'complete':
+        problems.append(f"coverage: claim 'whole_scope' needs a complete inventory, but it is {inv.get('completeness')!r} (TK-EVD-009)")
+    return problems
 
 
 def _review_problems(doc):
@@ -276,6 +339,37 @@ def _review_section(doc):
     return lines
 
 
+# 〈定義：覆蓋面向〉 in Chinese: the completeness of the inventory, what the report claims to cover, the rates and what
+# a rate with no number is called (TK-EVD-009).
+COMPLETENESS_LABELS = {'complete': '完整', 'unknown': '未知'}
+CLAIM_LABELS = {'whole_scope': '整個範圍', 'known_scope_only': '只涵蓋已知範圍'}
+RATE_LABELS = {'effective_judgement_rate': '有效判定率', 'tool_support_rate': '工具支援率',
+               'required_test_completion_rate': '必要測試完成率'}
+RATE_STATE_LABELS = {'not_applicable': '不適用', 'insufficient_data': '資料不足'}
+
+
+def _coverage_lines(c):
+    """The 覆蓋 section: counts, rates (a rate with no number says why, never a percentage), the tables and
+    policies, and the unresolved, unsupported, excluded and refused-exclusion items one by one."""
+    inv, tp = c['inventory'], c['tables_and_policies']
+    rates = '；'.join(f"{RATE_LABELS[name]}：" + (f'{c[name] * 100:.1f}%' if c['states'][name] == 'measured'
+                                                else RATE_STATE_LABELS[c['states'][name]]) for name in RATE_LABELS)
+    lines = ['', '## 覆蓋', '', f'- 盤點來源：{c["inventory_source"]}',
+             f'- 盤點完整性：{COMPLETENESS_LABELS[inv["completeness"]]}；宣告範圍：{CLAIM_LABELS[c["claim"]]}；'
+             f'擷取規則 {inv["rule"]}、支援版本 {inv["supported_version"]}',
+             f'- 分母 {c["denominator"]}、已執行 {c["executed"]}、有效判定 {c["valid_judgements"]}、受阻 {c["blocked"]}、'
+             f'錯誤 {c["errors"]}、未測 {c["untested"]}、取消 {c["cancelled"]}、不支援 {c["unsupported"]}',
+             f'- {rates}',
+             f'- 資料表與政策：已盤點 {tp["inventoried"]}、已啟用 RLS {tp["rls_enabled"]}、尚無政策 {tp["without_policy"]}、'
+             f'未解析 {tp["unresolved"]}、已判定 {tp["judged"]}']
+    lines += [f'  - 未解析：`{u["file"]}{":" + str(u["line"]) if u["line"] else ""}`（{u["reason"]}）' for u in inv['unresolved']]
+    lines += [f'  - 不支援：`{u["scope"]}`（{u["reason"]}{"；需補充觀測" if u.get("needs_supplement") else ""}）'
+              for u in c['unsupported_items']]
+    lines += [f'  - 排除：`{e["ref"]}`（{e["reason"]}；確認者 {e["confirmed_by"]}、版本 {e["version"]}）' for e in c['excluded']]
+    lines += [f'  - 被拒絕的排除：`{r["ref"]}`（{r["problem"]}）' for r in c['rejected_exclusions']]
+    return lines
+
+
 def render_markdown(doc):
     """Markdown for human review, generated from a valid JSON report. Raises ValueError if invalid."""
     problems = validate(doc)
@@ -333,11 +427,6 @@ def render_markdown(doc):
 
     lines += _review_section(doc)
 
-    c = doc['coverage']
-    lines += ['', '## 覆蓋', '', f'- 盤點來源：{c.get("inventory_source", "")}',
-              f'- 分母 {c.get("denominator")}、已執行 {c.get("executed")}、有效判定 {c.get("valid_judgements")}、'
-              f'受阻 {c.get("blocked")}、未測 {c.get("untested")}、不支援 {c.get("unsupported")}']
-    for u in c.get('unsupported_items', []):
-        lines.append(f'  - 不支援：`{u["scope"]}`（{u["reason"]}）')
+    lines += _coverage_lines(doc['coverage'])
     lines.append('')
     return '\n'.join(lines)

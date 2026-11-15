@@ -13,7 +13,8 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from toolkit import authorization, confirmation, control, e1, environment, item_rule, observer, policy, report, review
+from toolkit import (authorization, confirmation, control, coverage, e1, environment, extract, inventory, item_rule,
+                     observer, policy, report, review)
 
 SOURCE_ID = 'toolkit.scan'
 FINGERPRINT_VERSION = 'fp-authz-v1'
@@ -835,31 +836,61 @@ def _stages(preflight, dynamic_execution):
             {'stage': 'judgement_report', 'status': 'completed'}]
 
 
-# TK-DYN-004 access paths that no v0.1 template covers yet. They stay in the report and
-# in the denominator as unsupported, instead of disappearing (AG-07).
-UNSUPPORTED_SCOPES = [
-    {'scope': 'rls-functions', 'reason': 'no template for functions (RPC, SECURITY DEFINER) yet; '
-                                         'includes writes whose response looks like a denial'},
-    {'scope': 'rls-views', 'reason': 'no template for views yet'},
-    {'scope': 'rls-column-privileges', 'reason': 'no template for column-level privileges or masking yet'},
-]
+# The SQL command a test's HTTP method exercises, for the inventory items it covers (inventory.covers).
+COMMAND_OF_METHOD = {'GET': 'select', 'POST': 'insert', 'PATCH': 'update', 'DELETE': 'delete'}
+MODULE = 'supabase-rls'  # every test template of this version is judged by this framework module (〈定義：框架模組〉)
+NOT_READ = 'preflight blocked; the project files were not read'
+NO_MIGRATIONS = 'the project has no supabase/migrations/*.sql files'
+
+
+def _inventory(state, stages):
+    """The inventory of the project under test (〈定義：擷取結果〉): read only once preflight verified the source,
+    and not called complete when there is nothing to read (TK-ARC-004). Identity gaps join the unsupported scopes."""
+    if stages[0]['status'] != 'completed':
+        return inventory.not_read(NOT_READ, extra_unsupported=state.gaps)
+    files = extract.read_migrations(state.manifest['target']['project'])
+    if not files:
+        return inventory.not_read(NO_MIGRATIONS, extra_unsupported=state.gaps)
+    return inventory.inventory(files, extra_unsupported=state.gaps)
+
+
+def _command(test):
+    """The SQL command a test exercises, or None when its template is not one of ours."""
+    template = DENIAL_TEMPLATES.get(test.get('template_id')) or ALLOWED_TEMPLATES.get(test.get('template_id'))
+    return COMMAND_OF_METHOD[template['method']] if template else None
+
+
+def _cases(state, executions, inv):
+    """The scheduled tests as coverage() takes them: each with its result and the inventory items it exercises.
+    A test rests on a confirmation item, which names its resource (S2) or resources (S1)."""
+    tests = {t['test_id']: t for t in state.manifest['tests']}
+    cases = []
+    for ex in executions:
+        test, item = tests[ex['test_id']], state.listed.item(tests[ex['test_id']])
+        resources = [item['resource']] if item and item.get('resource') else list((item or {}).get('resources', []))
+        command = _command(test)
+        # passed and failed are only given when the precondition and the control held (everything else is blocked)
+        cases.append({'id': ex['test_id'], 'result': ex['result'], 'valid': True, 'module': MODULE,
+                      'covers': inventory.covers(inv, resources, command) if command else []})
+    return cases
 
 
 def _finish(state, executions, findings, status, reason, stages, environment, matrix):
     manifest, records, listed = state.manifest, state.records, state.listed
-    counts = {k: sum(e['result'] == k for e in executions)
-              for k in ('passed', 'failed', 'blocked', 'untested', 'unsupported')}
-    coverage = records.new('coverage', inventory_source='fixed test plan in the ScanManifest (tracer bullet)',
-                           denominator=len(manifest['tests']) + len(UNSUPPORTED_SCOPES),
-                           executed=counts['passed'] + counts['failed'],
-                           valid_judgements=counts['passed'] + counts['failed'], blocked=counts['blocked'],
-                           untested=counts['untested'], unsupported=counts['unsupported'] + len(UNSUPPORTED_SCOPES),
-                           unsupported_items=[dict(u) for u in UNSUPPORTED_SCOPES] + [dict(g) for g in state.gaps])
+    inv = _inventory(state, stages)
+    numbers = coverage.coverage(inv, _cases(state, executions, inv))
+    read = not any(u['file'] == '(project)' for u in inv['unresolved'])
+    cov_record = records.new(
+        'coverage', inventory_source=(f"{inv['rule']} extraction of supabase/migrations/*.sql" if read
+                                      else inv['unresolved'][0]['reason']),
+        inventory={'rule': inv['rule'], 'supported_version': extract.SUPPORTED_VERSION, 'loaded': inv['loaded'],
+                   'completeness': inv['completeness'], 'unresolved': inv['unresolved']},
+        unsupported_items=[dict(u) for u in inv['unsupported_items']], **numbers)
     doc = {'schema_version': '1', 'run_id': records.run_id, 'id': f'report-{records.run_id}', 'created_at': _now(),
            'source_id': SOURCE_ID, 'commit': records.commit, 'status': status,
            'manifest': {'id': manifest['id'], 'digest': _digest(manifest)},
            'stages': stages, 'requirements': _requirements(manifest, listed), 'authorization_matrix': matrix,
-           'execution_records': executions, 'findings': findings, 'coverage': coverage,
+           'execution_records': executions, 'findings': findings, 'coverage': cov_record,
            'source_changes': []}  # TK-ENV-006: the source under test is the pinned one (source_digest); v0.1 changes none
     if reason:  # status_reason says why the run is not completed, and what the owner has to do about it
         doc['status_reason'] = reason + _handover_note(listed)

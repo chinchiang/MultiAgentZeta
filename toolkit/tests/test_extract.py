@@ -391,5 +391,41 @@ class EveryFactNamesTheVersionItSupports(unittest.TestCase):
                          ["supported_version 'postgresql-9' is not 'postgresql-17'"])
 
 
+class ReadingTheMigrationsOfAProject(unittest.TestCase):
+    """extract.read_migrations(project): the disk side of extraction, the files extract_facts takes."""
+
+    def project(self, files):
+        import tempfile
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        for path, data in files.items():
+            f = Path(d.name, path)
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_bytes(data if isinstance(data, bytes) else data.encode('utf-8'))
+        return Path(d.name)
+
+    def test_the_samples_are_read_as_the_tests_read_them(self):
+        for version in SAMPLE_VERSIONS:
+            with self.subTest(sample=version):
+                self.assertEqual(extract.read_migrations(SAMPLES / version), sample_files(version))
+
+    def test_only_sql_migrations_are_read_in_path_order_with_project_relative_paths(self):
+        project = self.project({'supabase/migrations/002.sql': 'b', 'supabase/migrations/001.sql': 'a',
+                                'supabase/migrations/notes.md': 'x', 'supabase/seed.sql': 'y',
+                                'supabase/migrations/sub/003.sql': 'z', 'app/page.tsx': 'w'})
+        self.assertEqual(list(extract.read_migrations(project)),
+                         ['supabase/migrations/001.sql', 'supabase/migrations/002.sql'])
+
+    def test_a_file_that_cannot_be_decoded_is_none_so_extraction_lists_it_as_unreadable(self):
+        files = extract.read_migrations(self.project({'supabase/migrations/001.sql': b'\xff\xfe\x00bad'}))
+        self.assertEqual(files, {'supabase/migrations/001.sql': None})
+        self.assertEqual(extract.extract_facts(files)['unresolved'],
+                         [{'file': 'supabase/migrations/001.sql', 'line': 0, 'reason': 'file could not be read'}])
+
+    def test_a_project_without_migrations_gives_nothing_and_a_missing_project_too(self):
+        self.assertEqual(extract.read_migrations(self.project({'README.md': 'x'})), {})
+        self.assertEqual(extract.read_migrations(Path('/nonexistent/maz-project')), {})
+
+
 if __name__ == '__main__':
     unittest.main()

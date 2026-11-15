@@ -274,7 +274,7 @@
     "created_at": "2026-11-01T10:00:05Z",
     "source_id": "toolkit.scan",
     "commit": "a89be51",
-    "inventory_source": "fixed test plan (tracer bullet)",
+    "inventory_source": "sql-rls-v1 extraction of supabase/migrations/*.sql",
     "denominator": 4,
     "executed": 1,
     "valid_judgements": 1,
@@ -286,7 +286,36 @@
         "scope": "rls-views",
         "reason": "no verified test method for views in this toolkit version"
       }
-    ]
+    ],
+    "inventory": {
+      "rule": "sql-rls-v1",
+      "supported_version": "postgresql-17",
+      "loaded": [
+        "supabase-rls"
+      ],
+      "completeness": "complete",
+      "unresolved": []
+    },
+    "errors": 0,
+    "cancelled": 0,
+    "effective_judgement_rate": 0.25,
+    "tool_support_rate": 0.75,
+    "required_test_completion_rate": 0.3333333333333333,
+    "states": {
+      "effective_judgement_rate": "measured",
+      "tool_support_rate": "measured",
+      "required_test_completion_rate": "measured"
+    },
+    "claim": "whole_scope",
+    "tables_and_policies": {
+      "inventoried": 14,
+      "rls_enabled": 5,
+      "without_policy": 0,
+      "unresolved": 0,
+      "judged": 3
+    },
+    "excluded": [],
+    "rejected_exclusions": []
   },
   "status_reason": "self-validation: 2 cases were undeterminable (session revoked, API key missing) and are blocked, not counted as passed"
 }

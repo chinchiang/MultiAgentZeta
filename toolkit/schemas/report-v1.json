@@ -397,13 +397,80 @@
       }
     },
     "coverage": {
+      "description": "〈定義：覆蓋面向〉 and 〈定義：擷取結果〉: the denominator is the scheduled cases plus the unsupported scopes; nothing blocked, errored, cancelled or unsupported leaves it (TK-EVD-008, AG-07). A rate is null over a zero denominator and then its state says why (TK-EVD-009).",
       "allOf": [{"$ref": "#/$defs/common"}],
+      "required": ["inventory_source", "inventory", "denominator", "executed", "valid_judgements", "blocked", "errors",
+                   "untested", "cancelled", "unsupported", "unsupported_items", "effective_judgement_rate",
+                   "tool_support_rate", "required_test_completion_rate", "states", "claim", "tables_and_policies",
+                   "excluded", "rejected_exclusions"],
+      "unevaluatedProperties": false,
       "properties": {
+        "inventory_source": {"$ref": "#/$defs/text"},
+        "inventory": {
+          "type": "object", "additionalProperties": false,
+          "required": ["rule", "supported_version", "loaded", "completeness", "unresolved"],
+          "properties": {
+            "rule": {"$ref": "#/$defs/text"},
+            "supported_version": {"$ref": "#/$defs/text"},
+            "loaded": {"type": "array", "items": {"$ref": "#/$defs/text"}},
+            "completeness": {"enum": ["complete", "unknown"]},
+            "unresolved": {
+              "description": "Content extraction could not resolve, or that was not read; never taken as absent (TK-ARC-004).",
+              "type": "array",
+              "items": {"type": "object", "additionalProperties": false, "required": ["file", "line", "reason"],
+                        "properties": {"file": {"$ref": "#/$defs/text"}, "line": {"type": "integer", "minimum": 0},
+                                       "reason": {"$ref": "#/$defs/text"}}}
+            }
+          }
+        },
+        "denominator": {"type": "integer", "minimum": 0},
+        "executed": {"type": "integer", "minimum": 0},
+        "valid_judgements": {"type": "integer", "minimum": 0},
+        "blocked": {"type": "integer", "minimum": 0},
+        "errors": {"type": "integer", "minimum": 0},
+        "untested": {"type": "integer", "minimum": 0},
+        "cancelled": {"type": "integer", "minimum": 0},
+        "unsupported": {"type": "integer", "minimum": 0},
         "unsupported_items": {
-          "description": "Scope without a verified test method; counted in unsupported and in the denominator, never dropped silently (TK-EVD-008, AG-07).",
+          "description": "Scope without a verified test method; counted in unsupported and in the denominator, never dropped silently (TK-EVD-008, AG-07). needs_supplement marks what needs supplementary observation (TK-ARC-004).",
           "type": "array",
-          "items": {"type": "object", "required": ["scope", "reason"],
-                    "properties": {"scope": {"$ref": "#/$defs/text"}, "reason": {"$ref": "#/$defs/text"}}}
+          "items": {"type": "object", "additionalProperties": false, "required": ["scope", "reason"],
+                    "properties": {"scope": {"$ref": "#/$defs/text"}, "reason": {"$ref": "#/$defs/text"},
+                                   "needs_supplement": {"type": "boolean"}}}
+        },
+        "effective_judgement_rate": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+        "tool_support_rate": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+        "required_test_completion_rate": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+        "states": {
+          "type": "object", "additionalProperties": false,
+          "required": ["effective_judgement_rate", "tool_support_rate", "required_test_completion_rate"],
+          "properties": {
+            "effective_judgement_rate": {"enum": ["measured", "not_applicable", "insufficient_data"]},
+            "tool_support_rate": {"enum": ["measured", "not_applicable", "insufficient_data"]},
+            "required_test_completion_rate": {"enum": ["measured", "not_applicable", "insufficient_data"]}
+          }
+        },
+        "claim": {"enum": ["whole_scope", "known_scope_only"]},
+        "tables_and_policies": {
+          "type": "object", "additionalProperties": false,
+          "required": ["inventoried", "rls_enabled", "without_policy", "unresolved", "judged"],
+          "properties": {
+            "inventoried": {"type": "integer", "minimum": 0}, "rls_enabled": {"type": "integer", "minimum": 0},
+            "without_policy": {"type": "integer", "minimum": 0}, "unresolved": {"type": "integer", "minimum": 0},
+            "judged": {"type": "integer", "minimum": 0}
+          }
+        },
+        "excluded": {
+          "description": "Items left out of the denominator: an item, a reason, a confirmer and a version, all four (TK-EVD-009).",
+          "type": "array",
+          "items": {"type": "object", "additionalProperties": false, "required": ["ref", "reason", "confirmed_by", "version"],
+                    "properties": {"ref": {"$ref": "#/$defs/text"}, "reason": {"$ref": "#/$defs/text"},
+                                   "confirmed_by": {"$ref": "#/$defs/text"}, "version": {"$ref": "#/$defs/text"}}}
+        },
+        "rejected_exclusions": {
+          "type": "array",
+          "items": {"type": "object", "additionalProperties": false, "required": ["ref", "problem"],
+                    "properties": {"ref": {"$ref": "#/$defs/text"}, "problem": {"$ref": "#/$defs/text"}}}
         }
       }
     }

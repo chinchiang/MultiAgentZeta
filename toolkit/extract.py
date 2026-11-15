@@ -4,6 +4,7 @@
 result, sorted by file and line. `files` maps a project-relative path to the file's text.
 """
 import re
+from pathlib import Path
 
 RULE = 'sql-rls-v1'  # the extraction rule and its version (〈定義：擷取結果〉)
 SUPPORTED_VERSION = 'postgresql-17'  # the PostgreSQL major version the rule is written for; the support matrix's database image
@@ -235,6 +236,19 @@ def codefact_problems(record):
     allowed = FACT_FIELDS[record['kind']] | COMMON_FIELDS
     problems += [f"field {k!r} is not part of an extracted {record['kind']} fact" for k in sorted(set(record) - allowed)]
     return problems
+
+
+def read_migrations(project):
+    """The SQL migrations of a project as extract_facts takes them: project-relative path -> text, in path order;
+    None for a file that cannot be read or decoded (extract_facts lists it as unresolved). A project without
+    supabase/migrations gives nothing."""
+    root, found = Path(project), {}
+    for path in sorted(root.glob('supabase/migrations/*.sql')):
+        try:
+            found[path.relative_to(root).as_posix()] = path.read_text(encoding='utf-8')
+        except (UnicodeDecodeError, OSError):
+            found[path.relative_to(root).as_posix()] = None
+    return found
 
 
 def extract_facts(files):

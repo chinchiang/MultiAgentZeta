@@ -677,6 +677,240 @@ class UnsupportedItems(unittest.TestCase):
                 self.assertTrue(any(field in p for p in problems), problems)
 
 
+COVERAGE_FIELDS = ('inventory_source', 'inventory', 'denominator', 'executed', 'valid_judgements', 'blocked', 'errors',
+                   'untested', 'cancelled', 'unsupported', 'unsupported_items', 'effective_judgement_rate',
+                   'tool_support_rate', 'required_test_completion_rate', 'states', 'claim', 'tables_and_policies',
+                   'excluded', 'rejected_exclusions')
+
+
+def fixture(name):
+    return json.loads((FIXTURES / f'{name}.json').read_text(encoding='utf-8'))
+
+
+class CoverageRecord(unittest.TestCase):
+    """〈定義：覆蓋面向〉, TK-EVD-008, TK-EVD-009: the numbers of the coverage record are typed, add up, and never
+    show full coverage over a zero denominator."""
+
+    def problems(self, doc):
+        return report.validate(doc)
+
+    def test_the_example_reports_carry_the_whole_record_and_are_valid(self):
+        for name in ('report-valid', 'report-partial-fault', 'report-blocked-no-commit'):
+            with self.subTest(report=name):
+                doc = fixture(name)
+                self.assertEqual(report.validate(doc), [])
+                self.assertEqual([f for f in COVERAGE_FIELDS if f not in doc['coverage']], [])
+
+    def test_a_field_the_schema_does_not_list_is_a_problem(self):
+        for where in (lambda c: c, lambda c: c['inventory'], lambda c: c['states'], lambda c: c['tables_and_policies'],
+                      lambda c: c['unsupported_items'][0]):
+            with self.subTest(where=where(valid_report()['coverage']).keys()):
+                doc = valid_report()
+                where(doc['coverage'])['raw_sql'] = 'x'
+                self.assertTrue(any('raw_sql' in p for p in self.problems(doc)), self.problems(doc))
+
+    def test_a_missing_field_is_a_problem(self):
+        for field in COVERAGE_FIELDS:
+            with self.subTest(removed=field):
+                doc = valid_report()
+                del doc['coverage'][field]
+                self.assertTrue(any(field in p for p in self.problems(doc)), self.problems(doc))
+
+    def test_wrong_types_and_values_are_problems(self):
+        for field, value in (('denominator', -1), ('executed', 1.5), ('effective_judgement_rate', 'high'),
+                             ('tool_support_rate', True), ('claim', 'everything'), ('inventory_source', ''),
+                             ('states', {'effective_judgement_rate': 'good', 'tool_support_rate': 'measured',
+                                         'required_test_completion_rate': 'measured'})):
+            with self.subTest(field=field, value=value):
+                doc = valid_report()
+                doc['coverage'][field] = value
+                self.assertNotEqual(self.problems(doc), [])
+
+    def test_inventory_and_table_counts_are_typed(self):
+        for path, value in ((('inventory', 'completeness'), 'done'), (('inventory', 'rule'), ''),
+                            (('inventory', 'unresolved'), 'none'), (('tables_and_policies', 'judged'), 1.5),
+                            (('tables_and_policies', 'inventoried'), -1)):
+            with self.subTest(path=path):
+                doc = valid_report()
+                doc['coverage'][path[0]][path[1]] = value
+                self.assertNotEqual(self.problems(doc), [])
+
+    def test_an_exclusion_needs_its_item_reason_confirmer_and_version(self):
+        good = {'ref': 'nextjs-routes', 'reason': 'no Next.js application', 'confirmed_by': 'owner', 'version': 'v1'}
+        doc = valid_report()
+        doc['coverage']['excluded'] = [good]
+        self.assertEqual(self.problems(doc), [])
+        for field in good:
+            for blank in (None, ''):
+                with self.subTest(field=field, blank=blank):
+                    doc = valid_report()
+                    doc['coverage']['excluded'] = [{**good, field: blank}]
+                    self.assertNotEqual(self.problems(doc), [])
+
+    def test_the_denominator_is_the_execution_records_plus_the_unsupported_scopes(self):
+        doc = valid_report()
+        doc['coverage']['denominator'] += 1
+        self.assertTrue(any('denominator' in p for p in self.problems(doc)), self.problems(doc))
+
+    def test_the_classes_add_up_to_the_denominator(self):
+        doc = valid_report()
+        doc['coverage']['blocked'] += 1
+        self.assertTrue(any('add up' in p for p in self.problems(doc)), self.problems(doc))
+
+    def test_valid_judgements_cannot_exceed_what_was_executed(self):
+        doc = valid_report()
+        doc['coverage']['valid_judgements'] = doc['coverage']['executed'] + 1
+        self.assertTrue(any('valid_judgements' in p for p in self.problems(doc)), self.problems(doc))
+
+    def test_the_effective_rate_is_valid_judgements_over_the_denominator(self):
+        doc = valid_report()
+        doc['coverage']['effective_judgement_rate'] = 0.9
+        self.assertTrue(any('effective_judgement_rate' in p for p in self.problems(doc)), self.problems(doc))
+
+    def test_a_measured_rate_has_a_number_and_an_unmeasured_one_has_none(self):
+        doc = valid_report()
+        doc['coverage']['states']['tool_support_rate'] = 'insufficient_data'
+        self.assertTrue(any('tool_support_rate' in p for p in self.problems(doc)), self.problems(doc))
+        doc = valid_report()
+        doc['coverage']['tool_support_rate'] = None
+        self.assertTrue(any('tool_support_rate' in p for p in self.problems(doc)), self.problems(doc))
+
+    def test_the_whole_scope_cannot_be_claimed_over_an_unknown_inventory(self):
+        doc = valid_report()
+        doc['coverage']['inventory']['completeness'] = 'unknown'
+        self.assertTrue(any('claim' in p for p in self.problems(doc)), self.problems(doc))
+
+    def zero_denominator(self, **changes):
+        doc = fixture('report-blocked-no-commit')
+        doc['execution_records'] = []
+        doc['coverage'].update(denominator=0, blocked=0, unsupported=0, unsupported_items=[],
+                               effective_judgement_rate=None, tool_support_rate=None,
+                               required_test_completion_rate=None,
+                               states={k: 'insufficient_data' for k in ('effective_judgement_rate', 'tool_support_rate',
+                                                                        'required_test_completion_rate')})
+        doc['coverage'].update(changes)
+        return doc
+
+    def test_a_zero_denominator_is_insufficient_data_never_full_coverage(self):
+        self.assertEqual(self.problems(self.zero_denominator()), [])
+        full = self.zero_denominator(effective_judgement_rate=1.0)
+        self.assertTrue(any('effective_judgement_rate' in p for p in self.problems(full)), self.problems(full))
+        measured = self.zero_denominator(states={k: 'measured' for k in ('effective_judgement_rate', 'tool_support_rate',
+                                                                          'required_test_completion_rate')})
+        self.assertTrue(any('measured' in p for p in self.problems(measured)), self.problems(measured))
+
+    RATES = ('effective_judgement_rate', 'tool_support_rate', 'required_test_completion_rate')
+
+    def test_over_a_zero_denominator_every_rate_is_none_and_none_is_measured(self):
+        for name in self.RATES:
+            with self.subTest(rate=name, what='a number'):
+                doc = self.zero_denominator(**{name: 1.0})
+                doc['coverage']['states'][name] = 'measured'
+                self.assertTrue(any(name in p for p in self.problems(doc)), self.problems(doc))
+            with self.subTest(rate=name, what='measured without a number'):
+                doc = self.zero_denominator()
+                doc['coverage']['states'][name] = 'measured'
+                self.assertTrue(any(name in p and 'measured' in p for p in self.problems(doc)), self.problems(doc))
+
+    def test_with_no_scheduled_case_the_completion_rate_is_none(self):
+        doc = fixture('report-blocked-no-commit')
+        doc['execution_records'] = []
+        doc['coverage'].update(denominator=3, blocked=0, unsupported=3, effective_judgement_rate=0.0, tool_support_rate=0.0,
+                               required_test_completion_rate=None,
+                               states={'effective_judgement_rate': 'measured', 'tool_support_rate': 'measured',
+                                       'required_test_completion_rate': 'insufficient_data'})
+        self.assertEqual(self.problems(doc), [])
+        doc['coverage']['required_test_completion_rate'] = 1.0
+        doc['coverage']['states']['required_test_completion_rate'] = 'measured'
+        self.assertTrue(any('required_test_completion_rate' in p for p in self.problems(doc)), self.problems(doc))
+
+    def test_a_zero_denominator_is_not_applicable_only_when_something_was_excluded(self):
+        excluded = [{'ref': 'nextjs-routes', 'reason': 'no Next.js application', 'confirmed_by': 'owner', 'version': 'v1'}]
+        for name in self.RATES:
+            with self.subTest(rate=name, what='not_applicable with nothing excluded'):
+                doc = self.zero_denominator()
+                doc['coverage']['states'][name] = 'not_applicable'
+                self.assertTrue(any(name in p and 'not_applicable' in p for p in self.problems(doc)), self.problems(doc))
+            with self.subTest(rate=name, what='insufficient_data although something was excluded'):
+                doc = self.zero_denominator(excluded=excluded)
+                self.assertTrue(any(name in p and 'insufficient_data' in p for p in self.problems(doc)), self.problems(doc))
+        every = self.zero_denominator(excluded=excluded)
+        for name in self.RATES:
+            every['coverage']['states'][name] = 'not_applicable'
+        self.assertEqual(self.problems(every), [])
+
+    def test_with_exclusions_the_denominator_may_be_smaller_than_the_records_say(self):
+        doc = valid_report()
+        doc['coverage']['excluded'] = [{'ref': 'rls-views', 'reason': 'no views', 'confirmed_by': 'owner', 'version': 'v1'}]
+        doc['coverage']['denominator'] -= 1
+        doc['coverage']['unsupported'] -= 1
+        doc['coverage']['effective_judgement_rate'] = doc['coverage']['valid_judgements'] / doc['coverage']['denominator']
+        doc['coverage']['tool_support_rate'] = 1.0
+        self.assertEqual(self.problems(doc), [])
+
+
+class RenderCoverage(unittest.TestCase):
+    """The 覆蓋 section of the Markdown report: the numbers, the rates, what is unresolved and what was left out,
+    with a zero denominator shown as missing data, never as full coverage (TK-EVD-009)."""
+
+    def section(self, doc):
+        md = report.render_markdown(doc)
+        return md[md.index('## 覆蓋'):]
+
+    def test_a_complete_run_shows_counts_rates_and_the_claim(self):
+        text = self.section(valid_report())
+        for line in ('- 盤點來源：sql-rls-v1 extraction of supabase/migrations/*.sql',
+                     '- 盤點完整性：完整；宣告範圍：整個範圍；擷取規則 sql-rls-v1、支援版本 postgresql-17',
+                     '- 分母 4、已執行 3、有效判定 3、受阻 0、錯誤 0、未測 0、取消 0、不支援 1',
+                     '- 有效判定率：75.0%；工具支援率：75.0%；必要測試完成率：100.0%',
+                     '- 資料表與政策：已盤點 14、已啟用 RLS 5、尚無政策 0、未解析 0、已判定 3'):
+            self.assertIn(line, text)
+
+    def test_an_unread_project_says_it_covers_only_what_is_known(self):
+        text = self.section(fixture('report-blocked-no-commit'))
+        self.assertIn('- 盤點完整性：未知；宣告範圍：只涵蓋已知範圍', text)
+        self.assertIn('  - 未解析：`(project)`（preflight blocked; the project files were not read）', text)
+        self.assertIn('- 有效判定率：0.0%；工具支援率：40.0%；必要測試完成率：0.0%', text)
+
+    def test_unresolved_content_names_its_file_and_line(self):
+        doc = valid_report()
+        doc['coverage']['inventory'].update(completeness='unknown', unresolved=[
+            {'file': 'supabase/migrations/001.sql', 'line': 7, 'reason': 'table name has no schema'}])
+        doc['coverage']['claim'] = 'known_scope_only'
+        self.assertIn('  - 未解析：`supabase/migrations/001.sql:7`（table name has no schema）', self.section(doc))
+
+    def test_a_zero_denominator_shows_missing_data_never_a_percentage(self):
+        doc = CoverageRecord.zero_denominator(CoverageRecord())
+        text = self.section(doc)
+        self.assertIn('- 有效判定率：資料不足；工具支援率：資料不足；必要測試完成率：資料不足', text)
+        self.assertNotIn('%', text)
+
+    def test_everything_excluded_with_a_reason_shows_not_applicable(self):
+        doc = CoverageRecord.zero_denominator(CoverageRecord())
+        doc['coverage']['excluded'] = [{'ref': 'nextjs-routes', 'reason': 'no Next.js application',
+                                        'confirmed_by': 'owner', 'version': 'v1'}]
+        for name in doc['coverage']['states']:
+            doc['coverage']['states'][name] = 'not_applicable'
+        self.assertIn('- 有效判定率：不適用；工具支援率：不適用；必要測試完成率：不適用', self.section(doc))
+
+    def test_what_needs_supplementary_observation_is_marked_and_the_rest_is_not(self):
+        doc = valid_report()
+        doc['coverage']['unsupported_items'] = [
+            {'scope': 'nextjs-routes', 'reason': 'framework module not loaded', 'needs_supplement': True}]
+        self.assertIn('  - 不支援：`nextjs-routes`（framework module not loaded；需補充觀測）', self.section(doc))
+        plain = valid_report()['coverage']['unsupported_items'][0]
+        self.assertIn(f'  - 不支援：`{plain["scope"]}`（{plain["reason"]}）', self.section(valid_report()))
+
+    def test_exclusions_and_refused_exclusions_are_listed(self):
+        doc = valid_report()
+        doc['coverage']['excluded'] = [{'ref': 'nextjs-routes', 'reason': 'no Next.js application',
+                                        'confirmed_by': 'owner', 'version': 'v1'}]
+        doc['coverage']['rejected_exclusions'] = [{'ref': 'rls-views', 'problem': 'missing reason'}]
+        text = self.section(doc)
+        self.assertIn('  - 排除：`nextjs-routes`（no Next.js application；確認者 owner、版本 v1）', text)
+        self.assertIn('  - 被拒絕的排除：`rls-views`（missing reason）', text)
+
+
 class UnlistedFields(unittest.TestCase):
     """CODING_STANDARDS.md rule 9: a field the schema does not list is a validation problem, not silently kept."""
 

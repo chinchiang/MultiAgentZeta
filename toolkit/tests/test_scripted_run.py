@@ -5,11 +5,14 @@ the observer's reading of psql output, the fault injection and the judgement all
 come from the spec (TK-DYN-002, TK-IDN-009, TK-DYN-004), not from the code. What a real policy answers is checked
 by the environment tests against a real Supabase stack.
 """
+import shutil
 import subprocess
 import unittest
+from pathlib import Path
 
 from toolkit import report, scan
 from toolkit.tests import scripted
+from toolkit.tests.test_e1 import SAMPLES
 from toolkit.tests.test_scan import manifest
 
 
@@ -170,6 +173,86 @@ class TheStacksLifecycle(unittest.TestCase):
         self.assertEqual(by_id['SECOND']['result'], 'blocked')
         self.assertIn('environment reset failed after FIRST', by_id['SECOND']['error'])
         self.assertEqual(lifecycle.calls, ['reset', 'destroy'])
+
+
+def passing_read(version='vulnerable'):
+    """A one-test plan on a sample, answered the way a correct policy answers: the other tenant's read is denied."""
+    m = manifest(version)
+    m['tests'] = [next(t for t in m['tests'] if t['test_id'] == 'READ-other-tenant')]
+    return m, scripted.World(attempt=(403, []))
+
+
+class TheCoverageComesFromTheInventory(unittest.TestCase):
+    """TK-ARC-004, TK-EVD-008, TK-EVD-009: the report's coverage is what extraction found in the sample and what
+    the tests judged, not a fixed plan. Expected numbers are counted from the sample's migrations by hand."""
+
+    def test_the_counts_follow_the_sample_it_was_run_against(self):
+        for version, items, rls, judged in (('vulnerable', 14, 5, 3), ('legit', 15, 5, 4)):
+            with self.subTest(sample=version):
+                m, world = passing_read(version)
+                rep, _, _ = run(m, world)
+                tp = rep['coverage']['tables_and_policies']
+                # the read of documents judges the table and its read policies (3 in vulnerable, 4 with the share rule)
+                self.assertEqual((tp['inventoried'], tp['rls_enabled'], tp['without_policy'], tp['unresolved'], tp['judged']),
+                                 (items, rls, 0, 0, judged))
+
+    def test_a_complete_inventory_claims_the_whole_scope_and_names_its_rule(self):
+        m, world = passing_read()
+        cov = run(m, world)[0]['coverage']
+        self.assertEqual(cov['inventory'], {'rule': 'sql-rls-v1', 'supported_version': 'postgresql-17',
+                                            'loaded': ['supabase-rls'], 'completeness': 'complete', 'unresolved': []})
+        self.assertEqual(cov['claim'], 'whole_scope')
+        self.assertIn('sql-rls-v1', cov['inventory_source'])
+
+    def test_the_rates_of_one_passed_case(self):
+        m, world = passing_read()
+        cov = run(m, world)[0]['coverage']
+        self.assertEqual((cov['denominator'], cov['executed'], cov['valid_judgements'], cov['unsupported']), (6, 1, 1, 5))
+        self.assertAlmostEqual(cov['effective_judgement_rate'], 1 / 6)
+        self.assertAlmostEqual(cov['tool_support_rate'], 1 / 6)
+        self.assertEqual(cov['required_test_completion_rate'], 1)
+        self.assertEqual((cov['excluded'], cov['rejected_exclusions']), ([], []))
+
+    def test_the_denominator_is_the_execution_records_plus_the_unsupported_scopes(self):
+        m, world = passing_read()
+        rep = run(m, world)[0]
+        self.assertEqual(rep['coverage']['denominator'], len(rep['execution_records']) + len(rep['coverage']['unsupported_items']))
+
+    def test_a_project_without_migration_files_is_not_called_complete(self):
+        import tempfile
+        from toolkit import e1
+        with tempfile.TemporaryDirectory() as d:
+            shutil.copytree(SAMPLES / 'vulnerable', d, dirs_exist_ok=True, ignore=shutil.ignore_patterns('migrations'))
+            m, world = passing_read()
+            m['target'] = {'project': d, 'source_digest': e1.source_digest(Path(d))}
+            cov = run(m, world)[0]['coverage']
+        self.assertEqual(cov['inventory']['completeness'], 'unknown')
+        self.assertEqual(cov['inventory']['unresolved'],
+                         [{'file': '(project)', 'line': 0, 'reason': 'the project has no supabase/migrations/*.sql files'}])
+        self.assertEqual((cov['claim'], cov['tables_and_policies']['inventoried']), ('known_scope_only', 0))
+
+    def test_a_run_blocked_before_the_source_is_verified_does_not_read_the_project(self):
+        m, _ = passing_read()
+        m['target']['source_digest'] = 'sha256:' + '0' * 64
+        cov = scan.run(m).report['coverage']
+        self.assertEqual(cov['inventory']['completeness'], 'unknown')
+        self.assertEqual([u['line'] for u in cov['inventory']['unresolved']], [0])
+        self.assertIn('not read', cov['inventory']['unresolved'][0]['reason'])
+        self.assertEqual((cov['claim'], cov['tables_and_policies']['inventoried'], cov['blocked']),
+                         ('known_scope_only', 0, 1))
+
+
+    def test_a_run_blocked_in_preflight_for_any_reason_does_not_read_the_project(self):
+        """The source digest matches here; the run is blocked later in preflight (a test names an identity the
+        authorization does not know), and the project is still not read: preflight blocked means not read."""
+        m, _ = passing_read()
+        m['tests'][0]['actor_ref'] = 'nobody'
+        rep = scan.run(m).report
+        self.assertEqual(rep['stages'][0]['status'], 'blocked')
+        cov = rep['coverage']
+        self.assertEqual((cov['inventory']['completeness'], cov['claim'], cov['tables_and_policies']['inventoried']),
+                         ('unknown', 'known_scope_only', 0))
+        self.assertEqual(cov['inventory']['unresolved'][0]['file'], '(project)')
 
 
 if __name__ == '__main__':
