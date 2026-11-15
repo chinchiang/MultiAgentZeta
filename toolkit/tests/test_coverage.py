@@ -182,5 +182,21 @@ class TablesAndPolicies(unittest.TestCase):
         self.assertEqual(coverage.coverage(inv, [])['tables_and_policies']['unresolved'], 2)
 
 
+class OnlyCodeFactsReachTheCounts(unittest.TestCase):
+    """TK-DAT-007: an inventory that carries something that is not a CodeFact is not counted, it is refused."""
+
+    def test_a_proposed_fact_with_a_model_field_is_refused(self):
+        proposed = {**INVENTORY, 'facts': INVENTORY['facts'] + [
+            {'kind': 'table', 'name': 'public.made_up', 'source': {'file': 'x.sql', 'line': 1}, 'method': 'model:claude',
+             'confidence': 0.9}]}
+        with self.assertRaises(ValueError) as raised:
+            coverage.coverage(proposed, RUN)
+        self.assertIn("method 'model:claude' is not a registered extraction rule", str(raised.exception))
+        self.assertIn("field 'confidence' is not part of an extracted table fact", str(raised.exception))
+
+    def test_the_inventory_of_the_samples_is_accepted(self):
+        self.assertEqual(coverage.coverage(INVENTORY, RUN)['denominator'], 9)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -167,6 +167,37 @@ def _read(statement):
     return None, None
 
 
+# What an extracted fact may carry, by kind: nothing else rides along (TK-DAT-007). A model's confidence or
+# rationale, or a reference to an execution or an observation, are not extracted and have no place here.
+FACT_FIELDS = {
+    'table': {'name'},
+    'rls': {'table', 'enabled'},
+    'policy': {'name', 'table', 'command', 'roles', 'using', 'with_check'},
+}
+REGISTERED_RULES = (RULE,)
+
+
+def codefact_problems(record):
+    """Why record is not a CodeFact (TK-DAT-007); empty when it is.
+
+    A CodeFact comes from a registered extraction rule, is of a kind the rule extracts, has only the fields of
+    that kind and a source location. What a model proposed or an observation showed fails these checks, so it
+    cannot be stored as a CodeFact; it belongs in ThreatIR or in an observation record.
+    """
+    if record.get('kind') not in FACT_FIELDS:
+        return [f"kind {record.get('kind')!r} is not extracted by {RULE}"]
+    problems = []
+    if record.get('method') not in REGISTERED_RULES:
+        problems.append(f"method {record.get('method')!r} is not a registered extraction rule")
+    source = record.get('source')
+    if not (isinstance(source, dict) and isinstance(source.get('file'), str) and source['file']
+            and isinstance(source.get('line'), int) and not isinstance(source.get('line'), bool)):
+        problems.append('source needs a file and an integer line')
+    allowed = FACT_FIELDS[record['kind']] | {'kind', 'source', 'method'}
+    problems += [f"field {k!r} is not part of an extracted {record['kind']} fact" for k in sorted(set(record) - allowed)]
+    return problems
+
+
 def extract_facts(files):
     """The facts and the unresolved content of every SQL migration in files.
 

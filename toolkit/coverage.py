@@ -4,6 +4,8 @@
 the numbers of the coverage record out. Nothing blocked, failed to run or unsupported leaves the denominator.
 """
 
+from toolkit import extract
+
 EXECUTED = ('passed', 'failed')
 EXCLUSION_FIELDS = ('reason', 'confirmed_by', 'version')  # TK-EVD-009: all three, besides the item itself
 
@@ -41,6 +43,9 @@ def coverage(inventory, cases, exclusions=()):
     scopes of the inventory; a case whose module is not loaded is counted as unsupported and never as a valid
     judgement, so removing a module cannot raise the rate (TK-SCP-006).
     """
+    not_facts = [p for f in inventory['facts'] for p in extract.codefact_problems(f)]
+    if not_facts:  # TK-DAT-007: only extraction makes a CodeFact; anything else is refused, not counted
+        raise ValueError('the inventory holds something that is not a CodeFact: ' + '; '.join(not_facts))
     loaded = set(inventory['loaded'])
     accepted, refused = _exclusions(inventory['items'], exclusions)
     left_out = {e['ref'] for e in accepted}

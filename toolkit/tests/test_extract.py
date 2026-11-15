@@ -216,5 +216,40 @@ class UnresolvedContentIsListedNotDropped(unittest.TestCase):
         self.assertEqual(result['unresolved'], [{'file': M, 'line': 0, 'reason': 'file could not be read'}])
 
 
+class OnlyExtractionMakesACodeFact(unittest.TestCase):
+    """TK-DAT-007: what a model proposed or an observation showed cannot be written as a CodeFact."""
+
+    POLICY = {'kind': 'policy', 'name': 'p', 'table': 'public.t', 'command': 'select', 'roles': ['anon'],
+              'using': 'true', 'with_check': None, 'source': {'file': M, 'line': 3}, 'method': 'sql-rls-v1'}
+
+    def test_every_fact_extracted_from_the_samples_is_a_code_fact(self):
+        for version in SAMPLE_VERSIONS:
+            with self.subTest(sample=version):
+                for fact in extract.extract_facts(sample_files(version))['facts']:
+                    self.assertEqual(extract.codefact_problems(fact), [], fact)
+
+    def test_a_method_that_is_not_a_registered_extraction_rule_is_refused(self):
+        for method in ('model:claude', 'inferred', 'observation', 'sql-rls-v2', None):
+            with self.subTest(method=method):
+                self.assertEqual(extract.codefact_problems({**self.POLICY, 'method': method}),
+                                 [f'method {method!r} is not a registered extraction rule'])
+
+    def test_a_field_that_only_a_model_or_an_observation_has_is_refused(self):
+        for field in ('confidence', 'rationale', 'model', 'observation_ref', 'execution_ref', 'inferred'):
+            with self.subTest(field=field):
+                self.assertEqual(extract.codefact_problems({**self.POLICY, field: 'x'}),
+                                 [f'field {field!r} is not part of an extracted policy fact'])
+
+    def test_a_kind_extraction_does_not_produce_is_refused(self):
+        self.assertEqual(extract.codefact_problems({**self.POLICY, 'kind': 'threat'}),
+                         ["kind 'threat' is not extracted by sql-rls-v1"])
+
+    def test_a_fact_without_a_source_location_is_refused(self):
+        for source in (None, {}, {'file': M}, {'file': '', 'line': 3}, {'file': M, 'line': 'three'}):
+            with self.subTest(source=source):
+                self.assertEqual(extract.codefact_problems({**self.POLICY, 'source': source}),
+                                 ['source needs a file and an integer line'])
+
+
 if __name__ == '__main__':
     unittest.main()
