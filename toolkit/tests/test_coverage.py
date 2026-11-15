@@ -42,7 +42,16 @@ class BlockedErrorAndUntestedCasesStayInTheDenominator(unittest.TestCase):
     def test_error_and_untested_cases_count_too(self):
         c = coverage.coverage(INVENTORY, [case('c1', 'passed'), case('c2', 'error'), case('c3', 'untested'),
                                           case('c4', 'cancelled')])
-        self.assertEqual((c['denominator'], c['valid_judgements'], c['errors'], c['untested']), (9, 1, 1, 2))
+        self.assertEqual((c['denominator'], c['valid_judgements'], c['errors'], c['untested'], c['cancelled']),
+                         (9, 1, 1, 1, 1))
+
+    def test_cancelled_cases_are_counted_apart_from_untested_ones_and_stay_in_the_denominator(self):
+        c = coverage.coverage(INVENTORY, [case('c1', 'cancelled'), case('c2', 'cancelled'), case('c3', 'untested')])
+        self.assertEqual((c['denominator'], c['cancelled'], c['untested'], c['executed']), (8, 2, 1, 0))
+
+    def test_cases_of_a_module_that_is_not_loaded_are_not_counted_as_cancelled(self):
+        without = inventory.inventory(sample_files('vulnerable'), modules=())
+        self.assertEqual(coverage.coverage(without, [case('c1', 'cancelled')])['cancelled'], 0)
 
     def test_an_executed_case_whose_precondition_or_control_failed_is_not_a_valid_judgement(self):
         c = coverage.coverage(INVENTORY, [case('c1', 'passed'), case('c2', 'passed', valid=False)])

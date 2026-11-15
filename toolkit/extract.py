@@ -6,6 +6,7 @@ result, sorted by file and line. `files` maps a project-relative path to the fil
 import re
 
 RULE = 'sql-rls-v1'  # the extraction rule and its version (〈定義：擷取結果〉)
+SUPPORTED_VERSION = 'postgresql-17'  # the PostgreSQL major version the rule is written for; the support matrix's database image
 MIGRATIONS = re.compile(r'(?:^|/)supabase/migrations/[^/]+\.sql$')
 
 _IDENT = r'(?:"(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*)'
@@ -163,6 +164,8 @@ _UNTRACKED = 'statement changes a table or policy that is not tracked'
 _ALTER_TABLE = re.compile(rf'alter\s+table\s+(?:if\s+exists\s+)?(?:only\s+)?({_IDENT}(?:\s*\.\s*{_IDENT})?)\s+(.*)$', re.I | re.S)
 _ENABLE_OR_DISABLE_RLS = re.compile(r'(enable|disable)\s+row\s+level\s+security$', re.I)
 _CHANGES_UNTRACKED = re.compile(r'(?:(?:no\s+)?force\s+row\s+level\s+security|rename\b)', re.I)
+_FUNCTION = re.compile(r'create\s+(?:or\s+replace\s+)?(?:function|procedure)\b', re.I)
+_MAY_CHANGE = re.compile(r'create\s+table|create\s+policy|row\s+level\s+security', re.I)
 _DROPS_OR_ALTERS = re.compile(r'(?:drop\s+(?:table|policy)\b|alter\s+policy\b)', re.I)
 
 
@@ -171,6 +174,9 @@ def _read(statement):
     touch tables, row level security or policies."""
     if re.match(r'do\b', statement, re.I):
         return None, 'do block runs SQL that is not read'
+    if _FUNCTION.match(statement):  # the body is not read; it matters only if it may change tables or policies
+        return None, ('function or procedure body may change tables or policies and is not read'
+                      if _MAY_CHANGE.search(statement) else None)
     if _DROPS_OR_ALTERS.match(statement):
         return None, _UNTRACKED
     m = _CREATE_TABLE.match(statement)
@@ -205,6 +211,7 @@ FACT_FIELDS = {
     'policy': {'name', 'table', 'command', 'roles', 'using', 'with_check'},
 }
 REGISTERED_RULES = (RULE,)
+COMMON_FIELDS = {'kind', 'source', 'method', 'supported_version'}
 
 
 def codefact_problems(record):
@@ -223,7 +230,9 @@ def codefact_problems(record):
     if not (isinstance(source, dict) and isinstance(source.get('file'), str) and source['file']
             and isinstance(source.get('line'), int) and not isinstance(source.get('line'), bool)):
         problems.append('source needs a file and an integer line')
-    allowed = FACT_FIELDS[record['kind']] | {'kind', 'source', 'method'}
+    if record.get('supported_version') != SUPPORTED_VERSION:
+        problems.append(f"supported_version {record.get('supported_version')!r} is not {SUPPORTED_VERSION!r}")
+    allowed = FACT_FIELDS[record['kind']] | COMMON_FIELDS
     problems += [f"field {k!r} is not part of an extracted {record['kind']} fact" for k in sorted(set(record) - allowed)]
     return problems
 
@@ -244,7 +253,8 @@ def extract_facts(files):
         for line, statement in statements:
             fact, reason = _read(statement)
             if fact:
-                facts.append({**fact, 'source': {'file': path, 'line': line}, 'method': RULE})
+                facts.append({**fact, 'source': {'file': path, 'line': line}, 'method': RULE,
+                              'supported_version': SUPPORTED_VERSION})
             elif reason:
                 unresolved.append({'file': path, 'line': line, 'reason': reason})
         if never_closed:

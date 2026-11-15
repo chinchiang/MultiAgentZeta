@@ -142,7 +142,7 @@ class WhatIsNotAStatement(unittest.TestCase):
                           "begin\nperform 1;\ncreate table public.hidden (id int);\nend\n$body$;\n"
                           "create table public.after_it (id int);\n")
         self.assertEqual(names(result, 'table'), ['public.after_it'])
-        self.assertEqual(result['unresolved'], [])
+        self.assertEqual([u['line'] for u in result['unresolved']], [1])  # it creates a table: listed, not read
 
     def test_case_and_quoting_follow_postgresql(self):
         result = facts_of('CREATE TABLE Public.Tenants (id int);\n'
@@ -220,7 +220,8 @@ class OnlyExtractionMakesACodeFact(unittest.TestCase):
     """TK-DAT-007: what a model proposed or an observation showed cannot be written as a CodeFact."""
 
     POLICY = {'kind': 'policy', 'name': 'p', 'table': 'public.t', 'command': 'select', 'roles': ['anon'],
-              'using': 'true', 'with_check': None, 'source': {'file': M, 'line': 3}, 'method': 'sql-rls-v1'}
+              'using': 'true', 'with_check': None, 'source': {'file': M, 'line': 3}, 'method': 'sql-rls-v1',
+              'supported_version': 'postgresql-17'}
 
     def test_every_fact_extracted_from_the_samples_is_a_code_fact(self):
         for version in SAMPLE_VERSIONS:
@@ -329,6 +330,65 @@ class EscapedAndPlainStrings(unittest.TestCase):
                                          "create table public.b (id int);\n")
         self.assertEqual(tables, [('public.a', 1)])
         self.assertEqual(unresolved, [{'file': M, 'line': 2, 'reason': 'string, comment or $-quote is never closed'}])
+
+
+class FunctionsThatMayChangeTablesOrPolicies(unittest.TestCase):
+    """〈定義：擷取結果〉: a function or procedure body is not read; it is unresolved only when it mentions
+    create table, create policy or row level security, so the inventory cannot be called complete."""
+
+    REASON = 'function or procedure body may change tables or policies and is not read'
+
+    def unresolved_of(self, sql):
+        return facts_of(sql)['unresolved']
+
+    def test_a_body_that_mentions_one_of_the_three_is_unresolved_at_the_line_of_the_statement(self):
+        for body in ('create table public.t (id int)', 'CREATE  POLICY p ON public.t USING (true)',
+                     'alter table public.t enable ROW LEVEL SECURITY', 'create\ntable public.t (id int)'):
+            for head in ('create function public.f() returns void language plpgsql as',
+                         'create or replace function public.f() returns void language plpgsql as',
+                         'create procedure public.p() language plpgsql as'):
+                with self.subTest(head=head, body=body):
+                    self.assertEqual(self.unresolved_of(f'select 1;\n{head} $$ begin {body}; end $$;\n'),
+                                     [{'file': M, 'line': 2, 'reason': self.REASON}])
+
+    def test_a_quoted_body_counts_like_a_dollar_quoted_one(self):
+        sql = "create function public.f() returns void language sql as 'create table public.t (id int)';\n"
+        self.assertEqual(self.unresolved_of(sql), [{'file': M, 'line': 1, 'reason': self.REASON}])
+
+    def test_a_function_that_mentions_none_of_the_three_is_not_unresolved_and_adds_nothing(self):
+        result = facts_of("create function public.f() returns int language sql as $$ select 1 $$;\n"
+                          "create function public.g() returns trigger language plpgsql as $$\n"
+                          "begin new.updated_at = now(); return new; end $$;\n")
+        self.assertEqual((result['facts'], result['unresolved']), ([], []))
+
+    def test_the_rest_of_the_file_is_still_read(self):
+        result = facts_of("create function public.f() returns void language plpgsql as $$ begin "
+                          "create table public.hidden (id int); end $$;\ncreate table public.shown (id int);\n")
+        self.assertEqual(names(result, 'table'), ['public.shown'])
+        self.assertEqual(len(result['unresolved']), 1)
+
+
+class EveryFactNamesTheVersionItSupports(unittest.TestCase):
+    """〈定義：擷取結果〉: each CodeFact carries the PostgreSQL major version its rule was written for."""
+
+    def test_every_extracted_fact_carries_it(self):
+        for version in SAMPLE_VERSIONS:
+            facts = extract.extract_facts(sample_files(version))['facts']
+            self.assertTrue(facts)
+            self.assertEqual({f['supported_version'] for f in facts}, {'postgresql-17'})
+
+    def test_it_is_the_postgresql_major_version_of_the_support_matrix(self):
+        import json
+        matrix = json.loads((SAMPLES.parents[1] / 'toolkit' / 'support-matrix.json').read_text(encoding='utf-8'))
+        image = matrix['services']['db']['image']  # e.g. public.ecr.aws/supabase/postgres:17.11.0.006
+        self.assertEqual('postgresql-' + image.rsplit(':', 1)[1].split('.')[0], extract.SUPPORTED_VERSION)
+
+    def test_a_fact_without_it_or_with_another_is_not_a_code_fact(self):
+        policy = OnlyExtractionMakesACodeFact.POLICY
+        without = {k: v for k, v in policy.items() if k != 'supported_version'}
+        self.assertEqual(extract.codefact_problems(without), ["supported_version None is not 'postgresql-17'"])
+        self.assertEqual(extract.codefact_problems({**policy, 'supported_version': 'postgresql-9'}),
+                         ["supported_version 'postgresql-9' is not 'postgresql-17'"])
 
 
 if __name__ == '__main__':

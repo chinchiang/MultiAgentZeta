@@ -63,7 +63,8 @@ def coverage(inventory, cases, exclusions=()):
         'valid_judgements': len(valid),
         'blocked': sum(c['result'] == 'blocked' for c in judged),
         'errors': sum(c['result'] == 'error' for c in judged),
-        'untested': sum(c['result'] in ('untested', 'cancelled') for c in judged),
+        'untested': sum(c['result'] == 'untested' for c in judged),
+        'cancelled': sum(c['result'] == 'cancelled' for c in judged),
         'unsupported': unsupported,
         'effective_judgement_rate': len(valid) / denominator if denominator else None,
         # Pending confirmation (〈定義：覆蓋面向〉): the supported share of the denominator, and the share of the
