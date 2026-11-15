@@ -82,9 +82,14 @@ def coverage(inventory, cases, exclusions=()):
 
 def _tables_and_policies(inventory, valid):
     """The counts of the 資料表與政策 row: what was inventoried, how many tables have row level security and
-    how many of those no policy covers, what is unresolved, and the items a valid case exercised."""
+    how many of those no policy covers, what is unresolved, and the items a valid case exercised. A table's
+    row level security is what its last enable or disable statement left it."""
     facts = inventory['facts']
-    with_rls = {f['table'] for f in facts if f['kind'] == 'rls' and f['enabled']}
+    state = {}  # the facts come in migration order (file path, then line), so the last one decides
+    for f in facts:
+        if f['kind'] == 'rls':
+            state[f['table']] = f['enabled']
+    with_rls = {table for table, enabled in state.items() if enabled}
     with_policy = {f['table'] for f in facts if f['kind'] == 'policy'}
     inventoried = {i['ref'] for i in inventory['items'] if i['state'] == 'inventoried'}
     return {'inventoried': len(inventoried), 'rls_enabled': len(with_rls), 'without_policy': len(with_rls - with_policy),

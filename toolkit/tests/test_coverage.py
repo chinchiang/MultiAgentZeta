@@ -177,6 +177,36 @@ class TablesAndPolicies(unittest.TestCase):
         t = coverage.coverage(inv, [])['tables_and_policies']
         self.assertEqual((t['inventoried'], t['rls_enabled'], t['without_policy'], t['judged']), (4, 2, 1, 0))
 
+    def counts_for(self, files):
+        t = coverage.coverage(inventory.inventory(files), [])['tables_and_policies']
+        return t['rls_enabled'], t['without_policy']
+
+    def test_the_last_state_of_a_table_counts_when_it_is_enabled_and_then_disabled(self):
+        self.assertEqual(self.counts_for({'supabase/migrations/001.sql':
+                                          'create table public.a (id int);\n'
+                                          'alter table public.a enable row level security;\n'
+                                          'alter table public.a disable row level security;\n'}), (0, 0))
+
+    def test_the_last_state_also_counts_when_it_is_disabled_and_then_enabled(self):
+        self.assertEqual(self.counts_for({'supabase/migrations/001.sql':
+                                          'create table public.a (id int);\n'
+                                          'alter table public.a disable row level security;\n'
+                                          'alter table public.a enable row level security;\n'}), (1, 1))
+
+    def test_a_later_migration_file_decides_over_an_earlier_one(self):
+        create_and_enable = ('create table public.a (id int);\nalter table public.a enable row level security;\n')
+        disable = 'alter table public.a disable row level security;\n'
+        self.assertEqual(self.counts_for({'supabase/migrations/001.sql': create_and_enable,
+                                          'supabase/migrations/002.sql': disable}), (0, 0))
+        self.assertEqual(self.counts_for({'supabase/migrations/001.sql': disable,
+                                          'supabase/migrations/002.sql': create_and_enable}), (1, 1))
+
+    def test_one_table_being_disabled_does_not_change_another(self):
+        sql = ('create table public.a (id int);\ncreate table public.b (id int);\n'
+               'alter table public.a enable row level security;\nalter table public.b enable row level security;\n'
+               'alter table public.a disable row level security;\n')
+        self.assertEqual(self.counts_for({'supabase/migrations/001.sql': sql}), (1, 1))
+
     def test_unresolved_content_is_counted(self):
         inv = inventory.inventory({'supabase/migrations/001.sql': 'do $$ begin end $$;\ndrop table public.x;\n'})
         self.assertEqual(coverage.coverage(inv, [])['tables_and_policies']['unresolved'], 2)
