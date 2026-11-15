@@ -251,5 +251,85 @@ class OnlyExtractionMakesACodeFact(unittest.TestCase):
                                  ['source needs a file and an integer line'])
 
 
+class NestedBlockComments(unittest.TestCase):
+    """PostgreSQL block comments nest: /* outer /* inner */ still a comment */ is one comment."""
+
+    def test_what_follows_a_nested_comment_is_still_read(self):
+        result = facts_of("/* outer /* inner */ still a comment */\ncreate table public.after (id int);\n")
+        self.assertEqual([(f['name'], f['source']['line']) for f in of_kind(result, 'table')], [('public.after', 2)])
+        self.assertEqual(result['unresolved'], [])
+
+    def test_nothing_inside_a_nested_comment_is_extracted_and_lines_still_count(self):
+        result = facts_of("select 1;\n/* a\n/* create table public.hidden (id int);\n*/\ncreate table public.hidden2 (id int);\n*/\n"
+                          "create table public.shown (id int);\n")
+        self.assertEqual([(f['name'], f['source']['line']) for f in of_kind(result, 'table')], [('public.shown', 7)])
+
+    def test_a_nested_comment_that_is_never_closed_is_unresolved_from_its_start(self):
+        result = facts_of("create table public.a (id int);\n/* outer /* inner */ never closed\ncreate table public.b (id int);\n")
+        self.assertEqual(names(result, 'table'), ['public.a'])
+        self.assertEqual(result['unresolved'],
+                         [{'file': M, 'line': 2, 'reason': 'string, comment or $-quote is never closed'}])
+
+
+class PoliciesThatCannotBeRead(unittest.TestCase):
+    """TK-ARC-004: a policy that cannot be read is listed as unresolved; it never stops the extraction or vanishes."""
+
+    NOT_UNDERSTOOD = 'policy statement not understood'
+
+    def assert_unresolved_and_the_rest_still_read(self, policy):
+        result = facts_of(f'create table public.a (id int);\n{policy};\ncreate table public.b (id int);\n')
+        self.assertEqual(names(result, 'table'), ['public.a', 'public.b'])
+        self.assertEqual(of_kind(result, 'policy'), [])
+        self.assertEqual(result['unresolved'], [{'file': M, 'line': 2, 'reason': self.NOT_UNDERSTOOD}])
+
+    def test_a_condition_whose_parenthesis_is_never_closed(self):
+        for policy in ('create policy p on public.a using (true', 'create policy p on public.a with check (id = 1',
+                       'create policy p on public.a using (true) with check (id = (1'):
+            with self.subTest(policy=policy):
+                self.assert_unresolved_and_the_rest_still_read(policy)
+
+    def test_a_parenthesis_closed_twice(self):
+        self.assert_unresolved_and_the_rest_still_read('create policy p on public.a using (true))')
+
+    def test_a_condition_without_parentheses(self):
+        for policy in ('create policy p on public.a using true', 'create policy p on public.a with check id = 1'):
+            with self.subTest(policy=policy):
+                self.assert_unresolved_and_the_rest_still_read(policy)
+
+    def test_parentheses_inside_strings_and_quoted_names_do_not_count(self):
+        result = facts_of("create policy \"odd (name\" on public.a for select using (title = ')' and body <> '(');\n")
+        policy = of_kind(result, 'policy')[0]
+        self.assertEqual((policy['name'], policy['using']), ('odd (name', "title = ')' and body <> '('"))
+        self.assertEqual(result['unresolved'], [])
+
+
+class EscapedAndPlainStrings(unittest.TestCase):
+    """E'...' strings take backslash escapes; ordinary strings do not (standard_conforming_strings is on)."""
+
+    AFTER = [('public.after', 2)]
+
+    def tables(self, sql):
+        result = facts_of(sql)
+        return [(f['name'], f['source']['line']) for f in of_kind(result, 'table')], result['unresolved']
+
+    def test_a_backslash_escaped_quote_does_not_end_an_E_string(self):
+        for string in ("E'it\\'s;'", "e'it\\'s;'", "E'a\\\\'", "E'say ''hi'';'"):
+            with self.subTest(string=string):
+                self.assertEqual(self.tables(f'select {string};\ncreate table public.after (id int);\n'),
+                                 (self.AFTER, []))
+
+    def test_a_backslash_in_an_ordinary_string_is_just_a_character(self):
+        self.assertEqual(self.tables("select 'a\\';\ncreate table public.after (id int);\n"), (self.AFTER, []))
+
+    def test_an_e_that_ends_a_word_does_not_make_the_string_an_E_string(self):
+        self.assertEqual(self.tables("select name_e'x\\';\ncreate table public.after (id int);\n"), (self.AFTER, []))
+
+    def test_an_E_string_that_is_never_closed_is_unresolved(self):
+        tables, unresolved = self.tables("create table public.a (id int);\nselect E'never closed\\';\n"
+                                         "create table public.b (id int);\n")
+        self.assertEqual(tables, [('public.a', 1)])
+        self.assertEqual(unresolved, [{'file': M, 'line': 2, 'reason': 'string, comment or $-quote is never closed'}])
+
+
 if __name__ == '__main__':
     unittest.main()

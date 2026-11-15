@@ -28,17 +28,29 @@ def _statements(text):
             while i < len(text) and text[i] != '\n':
                 i += 1
             continue
-        if text.startswith('/*', i):
-            end = text.find('*/', i + 2)
-            if end < 0:
+        if text.startswith('/*', i):  # block comments nest in PostgreSQL
+            depth, end = 1, i + 2
+            while end < len(text) and depth:
+                if text.startswith('/*', end):
+                    depth, end = depth + 1, end + 2
+                elif text.startswith('*/', end):
+                    depth, end = depth - 1, end + 2
+                else:
+                    end += 1
+            if depth:
                 return out, line
-            line += text.count('\n', i, end + 2)
-            i = end + 2
+            line += text.count('\n', i, end)
+            i = end
             continue
         if c in ('"', "'"):  # a quoted identifier or a string: a doubled quote inside is a literal quote
+            # E'...' (the E not the end of a longer word) also takes backslash escapes; an ordinary string does not
+            escapes = (c == "'" and i > 0 and text[i - 1] in 'eE'
+                       and not (i > 1 and (text[i - 2].isalnum() or text[i - 2] in '_$')))
             end = i + 1
             while end < len(text):
-                if text[end] == c and text[end + 1:end + 2] == c:
+                if escapes and text[end] == '\\':
+                    end += 2
+                elif text[end] == c and text[end + 1:end + 2] == c:
                     end += 2
                 elif text[end] == c:
                     break
@@ -76,9 +88,11 @@ _CREATE_POLICY = re.compile(rf'create\s+policy\s+({_IDENT})\s+on\s+({_IDENT}(?:\
 
 
 def _masked(text):
-    """text with quoted parts and everything inside parentheses blanked, so keywords can be found at the top
-    level; each depth-0 parenthesis stays, and every character keeps its position."""
-    out, depth, quote = [], 0, None
+    """(text with quoted parts and everything inside parentheses blanked, whether its parentheses balance).
+
+    Blanking lets keywords be found at the top level; each depth-0 parenthesis stays and every character keeps
+    its position. Parentheses balance when none is closed before it is opened and none is left open."""
+    out, depth, quote, lowest = [], 0, None, 0
     for c in text:
         if quote:
             out.append('_')
@@ -91,30 +105,43 @@ def _masked(text):
             depth += 1
         elif c == ')':
             depth -= 1
+            lowest = min(lowest, depth)
             out.append(')' if depth == 0 else ' ')
         else:
             out.append(c if depth == 0 else ' ')
-    return ''.join(out)
+    return ''.join(out), depth == 0 and lowest == 0
+
 
 
 def _condition(rest, masked, keyword):
-    """The text inside the parentheses after keyword (USING or WITH CHECK), as written; None when absent."""
-    m = re.search(rf'\b{keyword}\s*\(', masked, re.I)
+    """The text inside the parentheses after keyword (USING or WITH CHECK), as written; None when the
+    keyword is absent; False when the keyword is there without a parenthesized condition."""
+    m = re.search(rf'\b{keyword}\b', masked, re.I)
     if not m:
         return None
-    open_at = m.end() - 1
+    after = masked[m.end():].lstrip()
+    if not after.startswith('('):
+        return False
+    open_at = m.end() + len(masked[m.end():]) - len(after)
     return rest[open_at + 1:masked.index(')', open_at)].strip()
 
 
 def _policy(m, statement):
+    """The policy fact of a create policy statement; None when it cannot be read (unbalanced parentheses, or a
+    USING or WITH CHECK without a parenthesized condition)."""
     rest = statement[m.end():]
-    masked = _masked(rest)
+    masked, balanced = _masked(rest)
+    if not balanced:
+        return None
+    using, with_check = _condition(rest, masked, 'using'), _condition(rest, masked, r'with\s+check')
+    if using is False or with_check is False:
+        return None
     command = re.search(r'\bfor\s+(all|select|insert|update|delete)\b', masked, re.I)
     to = re.search(r'\bto\s+(.+?)(?=\s+(?:using|with)\b|$)', masked, re.I | re.S)
     roles = [_unquote(r.strip()) for r in rest[to.start(1):to.end(1)].split(',')] if to else ['public']
     return {'kind': 'policy', 'name': _unquote_name(m.group(1)), 'table': _qualified(m.group(2)),
             'command': command.group(1).lower() if command else 'all', 'roles': roles,
-            'using': _condition(rest, masked, 'using'), 'with_check': _condition(rest, masked, r'with\s+check')}
+            'using': using, 'with_check': with_check}
 
 
 def _unquote_name(ident):
@@ -153,7 +180,10 @@ def _read(statement):
         m = _CREATE_POLICY.match(statement)
         if not m:
             return None, 'policy statement not understood'
-        return (_policy(m, statement), None) if _qualified(m.group(2)) else (None, _NO_SCHEMA)
+        if not _qualified(m.group(2)):
+            return None, _NO_SCHEMA
+        policy = _policy(m, statement)
+        return (policy, None) if policy else (None, 'policy statement not understood')
     m = _ALTER_TABLE.match(statement)
     if m:
         clause = m.group(2).strip()
