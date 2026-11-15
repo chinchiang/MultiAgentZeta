@@ -5,6 +5,7 @@ the numbers of the coverage record out. Nothing blocked, failed to run or unsupp
 """
 
 from toolkit import extract
+from toolkit import inventory as inventory_module
 
 EXECUTED = ('passed', 'failed')
 RESULTS = EXECUTED + ('blocked', 'error', 'untested', 'cancelled', 'unsupported')  # 〈定義：測試結果〉 and 取消
@@ -90,11 +91,7 @@ def _tables_and_policies(inventory, valid):
     how many of those no policy covers, what is unresolved, and the items a valid case exercised. A table's
     row level security is what its last enable or disable statement left it."""
     facts = inventory['facts']
-    state = {}  # the facts come in migration order (file path, then line), so the last one decides
-    for f in facts:
-        if f['kind'] == 'rls':
-            state[f['table']] = f['enabled']
-    with_rls = {table for table, enabled in state.items() if enabled}
+    with_rls = {table for table, enabled in inventory_module.rls_state(inventory).items() if enabled}
     with_policy = {f['table'] for f in facts if f['kind'] == 'policy'}
     inventoried = {i['ref'] for i in inventory['items'] if i['state'] == 'inventoried'}
     return {'inventoried': len(inventoried), 'rls_enabled': len(with_rls), 'without_policy': len(with_rls - with_policy),

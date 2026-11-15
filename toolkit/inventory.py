@@ -94,3 +94,13 @@ def covers(inventory, resources, command):
                  if f['kind'] == 'policy' and f['table'] == table and f['command'] in (command, 'all')
                  and (ref := f"{table}: {f['name']}") in inventoried]
     return refs
+
+
+def rls_state(inventory):
+    """Whether each table has row level security, as its last enable or disable statement left it: table -> bool.
+    The facts come in migration order (file path, then line), so the last one decides."""
+    state = {}
+    for fact in inventory['facts']:
+        if fact['kind'] == 'rls':
+            state[fact['table']] = fact['enabled']
+    return state
