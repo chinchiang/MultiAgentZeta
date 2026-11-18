@@ -671,17 +671,62 @@ class MalformedTestFields(unittest.TestCase):
 
     def test_unusable_field_blocks_the_test_before_the_environment_starts(self):
         for field in self.FIELDS:
-            for value in (None, '', 7):
+            for value in ('absent', None, '', '   ', 7, ['bad']):
                 with self.subTest(field=field, value=value):
                     m = manifest('vulnerable')
-                    m['tests'] = [dict(m['tests'][0], **{field: value})]
+                    test = dict(m['tests'][0])
+                    if value == 'absent':
+                        del test[field]
+                        expected = None
+                    else:
+                        test[field] = value
+                        expected = value
+                    m['tests'] = [test]
                     rep = scan.run(m).report
                     self.assertEqual(report.validate(rep), [])
                     self.assertNotIn('environment', rep)
                     (ex,) = rep['execution_records']
-                    self.assertEqual((ex['result'], ex[field]), ('blocked', value))
+                    self.assertEqual((ex['result'], ex[field]), ('blocked', expected))
                     # Rejected by the test's own check, not by a later step such as the BuildRecipe.
                     self.assertIn(field, ex['error'])
+
+    def test_denial_case_missing_or_invalid_owner_ref_is_blocked_while_allowed_case_needs_none(self):
+        for value in ('absent', None, '', '   ', 7, ['owner']):
+            with self.subTest(owner_ref=value):
+                m = manifest('vulnerable')
+                denial = dict(m['tests'][0])
+                if value == 'absent':
+                    del denial['owner_ref']
+                else:
+                    denial['owner_ref'] = value
+                m['tests'] = [denial]
+                rep = scan.run(m).report
+                self.assertEqual(report.validate(rep), [])
+                (ex,) = rep['execution_records']
+                self.assertEqual(ex['result'], 'blocked')
+                self.assertIn('owner_ref', ex['error'])
+        for ignored in (None, '   ', 7, ['owner']):
+            with self.subTest(allowed_ignores_owner_ref=ignored):
+                m = manifest('vulnerable')
+                allowed = dict(next(t for t in m['tests'] if t['test_id'] == 'PUBLIC-READ-other-tenant'),
+                               owner_ref=ignored)
+                m['tests'] = [allowed]
+                rep = scan.run(m).report
+                self.assertEqual(report.validate(rep), [])
+                (ex,) = rep['execution_records']
+                self.assertNotEqual(ex['result'], 'unsupported')
+                self.assertNotIn('owner_ref', ex['error'] or '')
+
+    def test_non_object_test_limits_blocks_the_test_instead_of_crashing_or_falling_back(self):
+        for value in (None, 0, 15, [], [15], '15s'):
+            with self.subTest(limits=value):
+                m = manifest('vulnerable')
+                m['tests'] = [dict(m['tests'][0], limits=value)]
+                rep = scan.run(m).report
+                self.assertEqual(report.validate(rep), [])
+                (ex,) = rep['execution_records']
+                self.assertEqual(ex['result'], 'blocked')
+                self.assertIn('limits', ex['error'])
 
 
 def manifest_for_recipe_change(d, change):
@@ -744,6 +789,8 @@ class RequiredInputs(unittest.TestCase):
             'impact not a list': ({'name': 'documents', 'impact': 'confidential'}, "scope.resources/0 ('documents').impact must be a list"),
             'an unknown category': ({'name': 'documents', 'impact': ['secret']},
                                     "scope.resources/0 ('documents').impact: unknown high-impact category 'secret'"),
+            'an unhashable category': ({'name': 'documents', 'impact': [['confidential']]},
+                                       "scope.resources/0 ('documents').impact: unknown high-impact category ['confidential']"),
             'a category twice': ({'name': 'documents', 'impact': ['confidential', 'confidential']},
                                  "scope.resources/0 ('documents').impact lists 'confidential' twice"),
             'no name': ({'impact': []}, 'scope.resources/0.name'),
@@ -833,6 +880,33 @@ class RequiredInputs(unittest.TestCase):
                     m = manifest('vulnerable')
                     m['limits'][name] = value
                     self.assert_blocked_before_start(m, f'limits.{name}')
+
+    def test_missing_or_invalid_manifest_id_target_tests_and_scope_resources_block_before_start(self):
+        cases = [
+            ('no id', lambda m: m.pop('id'), 'id'),
+            ('blank id', lambda m: m.update(id='   '), 'id'),
+            ('non-string id', lambda m: m.update(id=7), 'id'),
+            ('no target', lambda m: m.pop('target'), 'target'),
+            ('non-dict target', lambda m: m.update(target='samples/object-authz/vulnerable'), 'target'),
+            ('no target.project', lambda m: m['target'].pop('project'), 'target.project'),
+            ('bad target.project', lambda m: m['target'].update(project=7), 'target.project'),
+            ('no target.source_digest', lambda m: m['target'].pop('source_digest'), 'target.source_digest'),
+            ('bad target.source_digest', lambda m: m['target'].update(source_digest=None), 'target.source_digest'),
+            ('no tests', lambda m: m.pop('tests'), 'tests'),
+            ('non-list tests', lambda m: m.update(tests='READ-same-tenant'), 'tests'),
+            ('empty tests', lambda m: m.update(tests=[]), 'no test in the ScanManifest can run'),
+            ('non-dict test entry', lambda m: m['tests'].append('READ-same-tenant'), 'tests/'),
+            ('non-list scope.resources', lambda m: m['scope'].update(resources=7), 'scope.resources'),
+        ]
+        for label, change, reason_part in cases:
+            with self.subTest(label):
+                m = manifest('vulnerable')
+                change(m)
+                rep = scan.run(m).report
+                self.assertEqual(report.validate(rep), [])
+                self.assertEqual((rep['status'], rep['stages'][0]['status']), ('blocked', 'blocked'))
+                self.assertIn(reason_part, rep['status_reason'])
+                self.assertNotIn('environment', rep)
 
 
 def preflight_manifest(d):
@@ -1154,6 +1228,35 @@ class ConfirmationListInScan(unittest.TestCase):
                 del m['requirements'][0][field]
                 self.assertIn(field, self.blocked(m)['status_reason'])
 
+    def test_s1_entries_must_be_a_list_with_unique_ids_and_resource_lists(self):
+        path = Path(tempfile.mkdtemp(dir=CONTROL)) / 'list.json'
+        base = copy.deepcopy(self.m)
+        base['confirmation_list'] = {'path': str(path)}
+        cases = [
+            ('requirements not a list', lambda m: m.update(requirements='S1-1'), 'requirements'),
+            ('requirements is null', lambda m: m.update(requirements=None), 'requirements'),
+            ('id not a string', lambda m: m['requirements'][0].update(id=7), 'requirements/0.id'),
+            ('blank id', lambda m: m['requirements'][0].update(id='   '), 'requirements/0.id'),
+            ('blank statement', lambda m: m['requirements'][0].update(statement='   '), 'requirements/0.statement'),
+            ('resources is a string', lambda m: m['requirements'][0].update(resources='announcements'),
+             'requirements/0.resources'),
+            ('resources has non-string', lambda m: m['requirements'][0].update(resources=[7]),
+             'requirements/0.resources'),
+            ('resources has blank name', lambda m: m['requirements'][0].update(resources=['']),
+             'requirements/0.resources'),
+            ('resources lists a name twice',
+             lambda m: m['requirements'][0].update(resources=['announcements', 'announcements']),
+             'requirements/0.resources'),
+            ('duplicate S1 id', lambda m: m['requirements'].append(copy.deepcopy(S1_PUBLIC)),
+             "requirements/1.id 'S1-ANNOUNCEMENTS-PUBLIC-READ'"),
+        ]
+        for label, change, expected in cases:
+            with self.subTest(label):
+                m = copy.deepcopy(base)
+                change(m)
+                self.assertIn(expected, self.blocked(m)['status_reason'])
+                self.assertFalse(path.exists())
+
     def test_an_s1_entry_id_with_an_at_sign_is_refused_before_any_list_is_written(self):
         # "@" belongs to S2 item ids (clause@resource); an S1 id with it could take one's place.
         path = Path(tempfile.mkdtemp(dir=CONTROL)) / 'list.json'
@@ -1238,6 +1341,124 @@ class ConfirmationListInScan(unittest.TestCase):
                                                     'digest': confirmation.file_digest(self.m['confirmation_list']['path']),
                                                     'list_version': after['list_version'], 'updated': True})
 
+    def test_later_preflight_blocks_do_not_overwrite_or_create_the_confirmation_list(self):
+        from toolkit import confirmation
+        older = reviewed_list(self.tmp.name, resources=[{'name': 'documents', 'impact': ['confidential']}])
+        original_bytes = Path(older['path']).read_bytes()
+        missing_review = {'path': str(CONTROL / 'missing-review.json'), 'digest': 'sha256:' + '0' * 64}
+        with self.subTest('existing list is not overwritten when review_record blocks'):
+            m = copy.deepcopy(self.m)
+            m['confirmation_list'] = dict(older)
+            m['review_record'] = missing_review
+            rep = self.blocked(m)
+            self.assertIn('review record', rep['status_reason'])
+            self.assertEqual(Path(older['path']).read_bytes(), original_bytes)
+            self.assertEqual(confirmation.file_digest(older['path']), older['digest'])
+        with self.subTest('existing list is not overwritten when authorization target blocks'):
+            with tempfile.TemporaryDirectory() as d:
+                m = manifest_for_recipe_change(d, lambda r: r.update(sample='object-authz/unlisted'))
+                m['confirmation_list'] = dict(older)
+                rep = self.blocked(m)
+                self.assertIn("sample 'object-authz/unlisted' is not a target", rep['status_reason'])
+                self.assertEqual(Path(older['path']).read_bytes(), original_bytes)
+        with self.subTest('new list is not written when review_record blocks'):
+            new_path = Path(tempfile.mkdtemp(dir=CONTROL)) / 'unwritten-list.json'
+            m = copy.deepcopy(self.m)
+            m['confirmation_list'] = {'path': str(new_path)}
+            m['review_record'] = missing_review
+            rep = self.blocked(m)
+            self.assertIn('review record', rep['status_reason'])
+            self.assertFalse(new_path.exists())
+            self.assertNotIn('confirmation_list', rep)
+        with self.subTest('existing list is not overwritten when tests are blocked by plan or authorization only'):
+            m = copy.deepcopy(self.m)
+            m['confirmation_list'] = dict(older)
+            m['authorization'] = authorized(self.tmp.name, {**AUTHORIZATION, 'extra_approvals': []})
+            delete_case = next(t for t in m['tests'] if t['test_id'] == 'DELETE-other-tenant')
+            unknown_req = dict(delete_case, test_id='UNKNOWN-REQ', requirement_id='REQ-NOT-IN-THE-LIST')
+            m['tests'] = [dict(delete_case), dict(delete_case, test_id='BAD-TEMPLATE', template_id='raw-sql'), unknown_req]
+            rep = self.blocked(m)
+            self.assertEqual(Path(older['path']).read_bytes(), original_bytes)
+            self.assertEqual(rep['confirmation_list']['digest'], older['digest'])
+            self.assertFalse(rep['confirmation_list']['updated'])
+        with self.subTest('new list is not written when tests fail only authorization or identity checks, keeping their reasons'):
+            new_path = Path(tempfile.mkdtemp(dir=CONTROL)) / 'unwritten-auth-list.json'
+            m = manifest('vulnerable')
+            m['confirmation_list'] = {'path': str(new_path)}
+            m['authorization'] = authorized(SAMPLES / 'vulnerable', {**AUTHORIZATION, 'extra_approvals': []})
+            delete_case = next(t for t in m['tests'] if t['test_id'] == 'DELETE-other-tenant')
+            missing_actor = dict(next(t for t in m['tests'] if t['test_id'] == 'READ-other-tenant'),
+                                 test_id='MISSING-ACTOR', actor_ref='tenant_admin')
+            m['tests'] = [dict(delete_case), missing_actor]
+            rep = self.blocked(m)
+            self.assertFalse(new_path.exists())
+            self.assertNotIn('confirmation_list', rep)
+            by_id = {e['test_id']: e for e in rep['execution_records']}
+            self.assertIn("DELETE on 'documents' is not in the test authorization", by_id['DELETE-other-tenant']['error'])
+            self.assertEqual(by_id['MISSING-ACTOR']['result'], 'unsupported')
+            self.assertIn('identity:tenant_admin', {u['scope'] for u in rep['coverage']['unsupported_items']})
+        with self.subTest('list is written when a test is blocked by a pending item of the updated list'):
+            copy_path = Path(tempfile.mkdtemp(dir=CONTROL)) / 'handover-list.json'
+            copy_path.write_bytes(original_bytes)
+            m = copy.deepcopy(self.m)
+            m['confirmation_list'] = {'path': str(copy_path), 'digest': older['digest']}
+            m['requirements'][0]['statement'] = 'Updated announcement spec needing owner confirmation.'
+            m['tests'] = [dict(S1_READ)]
+            rep = self.blocked(m)
+            self.assertTrue(rep['confirmation_list']['updated'])
+            self.assertNotEqual(copy_path.read_bytes(), original_bytes)
+        with self.subTest('list is written when an exception test is newly blocked via a changed S1 basis'):
+            full = Path(self.m['confirmation_list']['path']).read_bytes()
+            copy_path = Path(tempfile.mkdtemp(dir=CONTROL)) / 'basis-handover-list.json'
+            copy_path.write_bytes(full)
+            m = copy.deepcopy(self.m)
+            m['confirmation_list'] = {'path': str(copy_path), 'digest': self.m['confirmation_list']['digest']}
+            m['requirements'][0]['statement'] = 'Updated S1 basis statement.'
+            m['tests'] = [next(t for t in m['tests'] if t['test_id'] == 'PUBLIC-READ-other-tenant')]
+            rep = self.blocked(m)
+            self.assertTrue(rep['confirmation_list']['updated'])
+            self.assertNotEqual(copy_path.read_bytes(), full)
+        with self.subTest('existing list is not overwritten when only impact changes and the item block already existed'):
+            full = Path(self.m['confirmation_list']['path']).read_bytes()
+            copy_path = Path(tempfile.mkdtemp(dir=CONTROL)) / 'impact-only-list.json'
+            copy_path.write_bytes(full)
+            m = copy.deepcopy(self.m)
+            m['confirmation_list'] = {'path': str(copy_path), 'digest': self.m['confirmation_list']['digest']}
+            m['scope']['resources'][0]['impact'] = ['admin']
+            public = next(t for t in m['tests'] if t['test_id'] == 'PUBLIC-READ-other-tenant')
+            m['tests'] = [dict(public, test_id='MISMATCHED-ON-OWNER', requirement_id=OWNER_ITEM)]
+            rep = self.blocked(m)
+            self.assertFalse(rep['confirmation_list']['updated'])
+            self.assertEqual(copy_path.read_bytes(), full)
+        with self.subTest('unwritten scope return keeps report valid against on-disk out-of-scope item'):
+            out_path = Path(tempfile.mkdtemp(dir=CONTROL)) / 'out-of-scope-list.json'
+            out_doc = confirmation.update(json.loads(original_bytes.decode('utf-8')),
+                                          confirmation.policy.load_template(),
+                                          [{'name': 'announcements', 'impact': []}], [S1_PUBLIC],
+                                          now=confirmation.control.utc_time('2026-06-01T00:00:00Z'))
+            out_digest = confirmation.write(out_path, out_doc, SAMPLES / 'vulnerable')
+            out_bytes = out_path.read_bytes()
+            m = manifest('vulnerable')
+            m['confirmation_list'] = {'path': str(out_path), 'digest': out_digest}
+            read_same = next(t for t in m['tests'] if t['test_id'] == 'READ-same-tenant')
+            m['tests'] = [dict(read_same, actor_ref='tenant_admin')]
+            rep = self.blocked(m)
+            self.assertFalse(rep['confirmation_list']['updated'])
+            self.assertEqual(out_path.read_bytes(), out_bytes)
+            self.assertEqual(rep['execution_records'][0]['result'], 'blocked')
+            self.assertIn('out of scope', rep['execution_records'][0]['error'])
+        with self.subTest('pending S1 statement edit writes v2 for handover even though item was already pending'):
+            pending_ref = reviewed_list(self.tmp.name, accepted=())
+            pending_bytes = Path(pending_ref['path']).read_bytes()
+            m = copy.deepcopy(self.m)
+            m['confirmation_list'] = dict(pending_ref)
+            m['requirements'][0]['statement'] = 'Revised pending S1 statement needing v2 handover.'
+            m['tests'] = [dict(S1_READ)]
+            rep = self.blocked(m)
+            self.assertTrue(rep['confirmation_list']['updated'])
+            self.assertNotEqual(Path(pending_ref['path']).read_bytes(), pending_bytes)
+            self.assertEqual(rep['execution_records'][0]['requirement_version'], 2)
+
 
 class AuthorizationInScan(unittest.TestCase):
     """〈定義：測試授權紀錄〉 in a run (TK-ENV-001, TK-ENV-002). The empty project stops the run at the
@@ -1305,6 +1526,12 @@ class AuthorizationInScan(unittest.TestCase):
             m = manifest_for_recipe_change(d, lambda r: None)
             m['authorization'] = self.m['authorization']
             self.preflight_blocked("environment 'E1' is not the authorized environment 'E2'", m)
+
+    def test_a_build_recipe_without_a_sample_id_blocks_in_preflight(self):
+        for change in (lambda r: r.pop('sample', None), lambda r: r.update(sample=''), lambda r: r.update(sample=7)):
+            with tempfile.TemporaryDirectory() as d:
+                m = manifest_for_recipe_change(d, change)
+                self.preflight_blocked('BuildRecipe sample', m)
 
     def test_the_scopes_operations_are_http_methods_of_the_authorization(self):
         self.assertEqual(self.run_scan()['stages'][0]['status'], 'completed')

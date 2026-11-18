@@ -12,8 +12,8 @@ from pathlib import Path
 
 from toolkit import report, scan
 from toolkit.tests import scripted
-from toolkit.tests.test_e1 import SAMPLES
-from toolkit.tests.test_scan import manifest
+from toolkit.tests.test_e1 import SAMPLES, failing_copy
+from toolkit.tests.test_scan import AUTHORIZATION, authorized, manifest
 
 
 def one_case(test_id, **changes):
@@ -253,6 +253,53 @@ class TheCoverageComesFromTheInventory(unittest.TestCase):
         self.assertEqual((cov['inventory']['completeness'], cov['claim'], cov['tables_and_policies']['inventoried']),
                          ('unknown', 'known_scope_only', 0))
         self.assertEqual(cov['inventory']['unresolved'][0]['file'], '(project)')
+
+
+class DuplicateTestIdsAreRefusedInPreflight(unittest.TestCase):
+    """TK-ENV-001, TK-RUN-001: each test in ScanManifest.tests has its own test_id; a second test with the
+    same test_id blocks preflight instead of overwriting an earlier test's precheck."""
+
+    def test_duplicate_test_id_blocks_preflight_and_never_lets_an_unauthorized_or_unrestorable_test_run(self):
+        import tempfile
+        from toolkit import e1
+        with self.subTest('unauthorized delete before valid read'):
+            m = cases(('DELETE-other-tenant', 'SAME-ID', {}), ('READ-other-tenant', 'SAME-ID', {}))
+            m['authorization'] = authorized(SAMPLES / 'vulnerable', {**AUTHORIZATION, 'extra_approvals': []})
+            world = scripted.World(attempt=(403, []))
+            prepare, lifecycle = scripted.prepare_with(world)
+            rep = scan.run(m, prepare=prepare).report
+            self.assertEqual(report.validate(rep), [])
+            self.assertEqual((rep['status'], rep['stages'][0]['status']), ('blocked', 'blocked'))
+            self.assertIn('SAME-ID', rep['status_reason'])
+            self.assertEqual((world.http_calls, lifecycle.calls), ([], []))
+            self.assertEqual([e['result'] for e in rep['execution_records']], ['blocked', 'blocked'])
+        with self.subTest('unrestorable write before valid read'), tempfile.TemporaryDirectory() as d:
+            src = failing_copy(d, recipe_change=lambda r: r['snapshot_reset'].update(reset_scope='none'))
+            m = cases(('UPDATE-other-tenant', 'SAME-ID', {}), ('READ-other-tenant', 'SAME-ID', {}))
+            m['target'] = {'project': str(src), 'source_digest': e1.source_digest(src)}
+            world = scripted.World(attempt=(403, []))
+            prepare, lifecycle = scripted.prepare_with(world)
+            rep = scan.run(m, prepare=prepare).report
+            self.assertEqual(report.validate(rep), [])
+            self.assertEqual((rep['status'], rep['stages'][0]['status']), ('blocked', 'blocked'))
+            self.assertIn('SAME-ID', rep['status_reason'])
+            self.assertEqual((world.http_calls, lifecycle.calls), ([], []))
+
+    def test_distinct_test_ids_keep_blocking_the_unauthorized_delete_while_the_read_runs(self):
+        m = cases(('DELETE-other-tenant', 'DELETE-1', {}), ('READ-other-tenant', 'READ-1', {}))
+        m['authorization'] = authorized(SAMPLES / 'vulnerable', {**AUTHORIZATION, 'extra_approvals': []})
+        _, by_id, _ = run(m, scripted.World(attempt=(403, [])))
+        self.assertEqual((by_id['DELETE-1']['result'], by_id['READ-1']['result']), ('blocked', 'passed'))
+
+    def test_denial_case_without_owner_ref_is_blocked_without_crashing_a_mixed_run(self):
+        m = cases(('READ-other-tenant', 'NO-OWNER', {}),
+                  ('PUBLIC-READ-other-tenant', 'PUBLIC-READ-other-tenant', {}))
+        del m['tests'][0]['owner_ref']
+        world = scripted.World(attempt=(200, [{'title': 'MARK-PUBLIC-ANNOUNCEMENT'}]))
+        _, by_id, _ = run(m, world)
+        self.assertEqual(by_id['NO-OWNER']['result'], 'blocked')
+        self.assertIn('owner_ref', by_id['NO-OWNER']['error'])
+        self.assertEqual(by_id['PUBLIC-READ-other-tenant']['result'], 'passed')
 
 
 if __name__ == '__main__':

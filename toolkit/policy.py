@@ -86,8 +86,7 @@ def impact_problems(impact, where, required=True):
         return [f'{where}.impact must be a list of high-impact categories, [] for none, got {impact!r}']
     return ([f'{where}.impact: unknown high-impact category {c!r}, not one of {IMPACT_CATEGORIES}'
              for c in impact if c not in IMPACT_CATEGORIES]
-            + [f'{where}.impact lists {c!r} twice' for c in dict.fromkeys(impact)
-               if c in IMPACT_CATEGORIES and impact.count(c) > 1])
+            + [f'{where}.impact lists {c!r} twice' for c in IMPACT_CATEGORIES if impact.count(c) > 1])
 
 
 def template_digest(template):

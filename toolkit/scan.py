@@ -98,12 +98,12 @@ class _Precheck:
 @dataclass
 class _RunState:
     """What one run carries from its start to its report. listed, granted and gaps stay empty until they
-    are read; prechecks has an entry per planned test once the tests are checked."""
+    are read; prechecks has an entry per planned test, in plan order, once the tests are checked."""
     manifest: dict
     records: _Records
     listed: _Listed = field(default_factory=_Listed)
     granted: _Granted = field(default_factory=_Granted)
-    prechecks: dict = field(default_factory=dict)  # test_id -> _Precheck
+    prechecks: list = field(default_factory=list)  # one _Precheck per planned test, in plan order
     reviewed: _Reviewed = field(default_factory=_Reviewed)
     gaps: list = field(default_factory=list)  # 測試身分 the BuildRecipe cannot provide
 
@@ -340,9 +340,9 @@ class _TestChecks:
     now: datetime
 
     @classmethod
-    def of(cls, state, recipe, now):
+    def of(cls, state, recipe, now, items):
         manifest = state.manifest
-        return cls(tests=manifest['tests'], items=state.listed.items, plan=_plan(manifest),
+        return cls(tests=manifest['tests'], items=items, plan=_plan(manifest),
                    identities={i['name'] for i in recipe['auth']['identities']} if recipe else None,
                    restorable=not (recipe and recipe['snapshot_reset'].get('reset_scope') == 'none'),
                    allowed_operations=manifest['scope']['allowed_operations'], granted=state.granted.doc, now=now)
@@ -376,8 +376,8 @@ class _TestChecks:
         """測試身分: an identity the BuildRecipe does not provide is an unsupported matrix cell."""
         if self.identities is None:  # no readable recipe: the BuildRecipe step will block the run
             return None
-        for ref in (test.get('actor_ref'), test.get('owner_ref')):
-            if ref and ref not in self.identities:
+        for ref in _test_identities(test):
+            if ref not in self.identities:
                 return f'identity {ref!r} is not in the BuildRecipe: unsupported cell of the authorization matrix'
         return None
 
@@ -385,9 +385,16 @@ class _TestChecks:
         """Coverage gaps for identities the recipe cannot provide."""
         if self.identities is None:
             return []
-        names = sorted({ref for t in self.tests for ref in (t.get('actor_ref'), t.get('owner_ref'))
-                        if ref and ref not in self.identities})
+        names = sorted({ref for t in self.tests for ref in _test_identities(t) if ref not in self.identities})
         return [{'scope': f'identity:{n}', 'reason': 'no such identity in the BuildRecipe (測試身分)'} for n in names]
+
+
+def _test_identities(test):
+    """The valid identity names a test uses: actor_ref, plus owner_ref for a denial case (〈定義：必要輸入〉)."""
+    template = test.get('template_id')
+    refs = [test.get('actor_ref')] + ([test.get('owner_ref')]
+                                      if isinstance(template, str) and template in DENIAL_TEMPLATES else [])
+    return [r for r in refs if _nonempty_str(r)]
 
 
 DENIAL_RESOURCE = 'documents'  # the table every denial-case template works on (RESOURCE_ROWS, CONTROL_ROWS, DOCUMENTS)
@@ -405,14 +412,16 @@ def test_operation(test):
 def _case_kind(test):
     """The case kind of a test's template, or None for a template on no allow-list (blocked by _plan_problem)."""
     template = test.get('template_id')
+    if not isinstance(template, str):
+        return None
     return item_rule.DENIAL if template in DENIAL_TEMPLATES else item_rule.ALLOWED if template in ALLOWED_TEMPLATES else None
 
 
 def _plan(manifest):
     """Each planned test_id with its requirement_id and case kind, for the allowed tests of a 合法例外
     (TK-DYN-003)."""
-    return {t.get('test_id'): {'requirement_id': t.get('requirement_id'), 'case_kind': _case_kind(t)}
-            for t in manifest['tests']}
+    return {tid: {'requirement_id': t.get('requirement_id'), 'case_kind': _case_kind(t)}
+            for t in _planned_tests(manifest) if _nonempty_str(tid := t.get('test_id'))}
 
 
 def _item_problem(test, items, plan):
@@ -428,19 +437,47 @@ def _item_problem(test, items, plan):
 S1_FIELDS = ('id', 'statement', 'resources', 'rule')
 
 
+def _duplicates(pairs):
+    """(where, value) for each pair whose value was already seen earlier in pairs."""
+    seen, dup = set(), []
+    for where, value in pairs:
+        if value in seen:
+            dup.append((where, value))
+        seen.add(value)
+    return dup
+
+
 def _s1_problems(manifest):
     """S1 entries are the owner's spec as input (〈定義：確認清單〉): id, statement, resources and an
     allow/deny rule, optionally the high-impact categories it involves, and no confirmation, which
     belongs in the confirmation list. An id has no "@", so it never equals an S2 item id."""
-    problems = []
-    for i, entry in enumerate(manifest.get('requirements') or []):
+    if 'requirements' not in manifest:
+        return []
+    entries = manifest['requirements']
+    if not isinstance(entries, list):
+        return ['requirements (S1 entries) must be a list']
+    problems, ids = [], []
+    for i, entry in enumerate(entries):
         if not isinstance(entry, dict):
             problems.append(f'requirements/{i} must be an object')
             continue
         problems += [f'requirements/{i}.{name} (S1 entry) is missing' for name in S1_FIELDS if not entry.get(name)]
-        if isinstance(entry.get('id'), str) and '@' in entry['id']:
-            problems.append(f"requirements/{i}.id {entry['id']!r} must not contain '@': it is kept for S2 item "
-                            f"ids (clause@resource), which an S1 entry id could otherwise take")
+        eid = entry.get('id')
+        if eid and not _nonempty_str(eid):
+            problems.append(f'requirements/{i}.id must be a non-empty string')
+        elif _nonempty_str(eid):
+            if '@' in eid:
+                problems.append(f"requirements/{i}.id {eid!r} must not contain '@': it is kept for S2 item "
+                                f"ids (clause@resource), which an S1 entry id could otherwise take")
+            ids.append((i, eid))
+        if entry.get('statement') and not _nonempty_str(entry['statement']):
+            problems.append(f'requirements/{i}.statement must be a non-empty string')
+        res = entry.get('resources')
+        if res:
+            if not isinstance(res, list) or not all(_nonempty_str(r) for r in res):
+                problems.append(f'requirements/{i}.resources must be a non-empty list of resource names')
+            else:
+                problems += [f'requirements/{i}.resources lists {r!r} twice' for _, r in _duplicates((i, r) for r in res)]
         if entry.get('rule') and entry['rule'] not in policy.RULES:
             problems.append(f'requirements/{i}.rule must be one of {policy.RULES}')
         if 'impact' in entry:  # optional (TK-REQ-012); given, it is a list of high-impact categories
@@ -448,59 +485,91 @@ def _s1_problems(manifest):
         if 'confirmation' in entry:
             problems.append(f'requirements/{i}.confirmation: S1 entries carry no confirmation; it is given '
                             f'in the confirmation list')
+    problems += [f'requirements/{i}.id {eid!r} is listed twice' for i, eid in _duplicates(ids)]
     return problems
 
 
+@dataclass(frozen=True)
+class _PreparedList:
+    """A confirmation list read or prepared in memory during preflight, before deciding whether to write it."""
+    on_disk: _Listed
+    items: dict
+    updated: bool
+    write: object  # () -> (_Listed, problem)
+
+
+def _listed_from(path, digest, doc, updated):
+    ref = {'path': str(path), 'digest': digest, 'list_version': doc['list_version'], 'updated': updated,
+           's2_template': doc['s2_template'], **confirmation.summary(doc)}
+    return _Listed({i['item_id']: i for i in doc['items']}, ref)
+
+
 def _load_confirmation_list(manifest, now):
-    """Read the referenced list, or generate it and hand it over when there is none yet (no digest and no
+    """Read the referenced list, or prepare a new one when there is none yet (no digest and no
     file; a list referenced with its digest is read even when its file is gone, TK-REQ-004);
-    bring it up to date with the S2 template and the scope, and reset the 合法例外 expired by `now`, the
-    run's start (〈定義：確認清單〉 到期). Returns (_Listed, None), or (None, problem)."""
+    bring it up to date in memory with the S2 template, the scope and `now` (〈定義：確認清單〉 到期).
+    Returns (_PreparedList, None), or (None, problem): writing happens only once preflight passes
+    or a test is blocked by an added or changed item of the confirmation list."""
     ref = manifest.get('confirmation_list')
     path = ref.get('path') if isinstance(ref, dict) else None
-    if not path:
-        return None, ('confirmation_list.path (獨立安全需求) is missing: there is no control-zone location to read '
-                'the confirmation list from or hand it over to')
+    if not _nonempty_str(path):
+        return None, ('confirmation_list.path (獨立安全需求) is missing: there is no control-zone location '
+                      'to read the confirmation list from or hand it over to')
     source, resources, s1 = manifest['target']['project'], manifest['scope']['resources'], manifest.get('requirements') or []
     try:
         template = policy.load_template()
     except (OSError, ValueError, policy.PolicyTemplateInvalid) as e:
         return None, f'the S2 template cannot be used: {e}'
     try:
+        control.outside_source(path, source, 'confirmation list')
         if ref.get('digest'):  # the list existed: read it, even when its file is gone (TK-REQ-004)
             existing = confirmation.read(path, ref['digest'], source)
             doc = confirmation.update(existing, template, resources, s1, now=now)
             updated = doc != existing
+            on_disk = _listed_from(path, ref['digest'], existing, False)
         elif Path(path).exists():
             return None, f'confirmation_list.digest is missing: the list at {path} is read only with its digest'
         else:
-            doc, updated = confirmation.generate(template, resources, s1), True
-        digest = confirmation.write(path, doc, source) if updated else ref['digest']
+            doc, updated, on_disk = confirmation.generate(template, resources, s1), True, _Listed()
     except (confirmation.ConfirmationListUnusable, OSError) as e:
         return None, f'confirmation list unusable: {e}'
-    ref = {'path': str(path), 'digest': digest, 'list_version': doc['list_version'], 'updated': updated,
-           's2_template': doc['s2_template'], **confirmation.summary(doc)}
-    return _Listed({i['item_id']: i for i in doc['items']}, ref), None
+    items = {i['item_id']: i for i in doc['items']}
+
+    def write():
+        if not updated:
+            return on_disk, None
+        try:
+            digest = confirmation.write(path, doc, source)
+        except (confirmation.ConfirmationListUnusable, OSError) as e:
+            return None, f'confirmation list unusable: {e}'
+        return _listed_from(path, digest, doc, True), None
+
+    return _PreparedList(on_disk=on_disk, items=items, updated=updated, write=write), None
 
 
 def _plan_problem(test):
-    """Why a test from the manifest cannot run, or None."""
+    """Why a test from the manifest cannot run, or None (〈定義：必要輸入〉, TK-IDN-006, TK-IDN-009)."""
     # Fields that name the test in its ExecutionRecord: an unusable one blocks the test before anything
     # starts (TK-IDN-009), instead of reaching the environment. template_id and resource_ref are
     # checked below against their allow-lists.
     for name in ('test_id', 'requirement_id', 'actor_ref'):
-        if not isinstance(test.get(name), str) or not test[name]:
+        if not _nonempty_str(test.get(name)):
             return f'{name} must be a non-empty string'
     template = test.get('template_id')
-    if template not in TEST_TEMPLATES:
+    if not isinstance(template, str) or template not in TEST_TEMPLATES:
         return f'template_id {template!r} is not an allow-listed test template'
-    if test.get('observation_ref') not in TEST_TEMPLATES[template]:
-        return f'observation_ref {test.get("observation_ref")!r} is not an allow-listed observation template for {template}'
+    if template in DENIAL_TEMPLATES and not _nonempty_str(test.get('owner_ref')):
+        return 'owner_ref must be a non-empty string'
+    obs = test.get('observation_ref')
+    if (obs is not None and not isinstance(obs, str)) or obs not in TEST_TEMPLATES[template]:
+        return f'observation_ref {obs!r} is not an allow-listed observation template for {template}'
     for name in ['resource_ref'] + _typed_params(template, 'marker'):
         if not isinstance(test.get(name), str) or not IDENTIFIER.match(test[name]):
             return f'{name} must be a resource marker identifier (A-Z, 0-9, -)'
     if test.get('fault') is not None and test['fault'] not in environment.FAULTS:
         return f'fault must be one of {list(environment.FAULTS)}'
+    if 'limits' in test and not isinstance(test['limits'], dict):
+        return 'limits must be an object'
     timeout = (test.get('limits') or {}).get('timeout_seconds', 15)
     if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or timeout <= 0:
         return 'limits.timeout_seconds must be a positive number'
@@ -533,24 +602,47 @@ LIMIT_RULES = {
 }
 
 
+def _nonempty_str(v):
+    return isinstance(v, str) and bool(v.strip())
+
+
+def _planned_tests(manifest):
+    """The dict entries of manifest['tests'], so a blocked report can still be built when tests is malformed."""
+    tests = manifest.get('tests')
+    return [t for t in tests if isinstance(t, dict)] if isinstance(tests, list) else []
+
+
 def _commit(manifest):
     """The source commit under test (受測範圍 of 〈定義：必要輸入〉, TK-SCP-002), or None when the ScanManifest
     names no usable one; None then blocks at preflight, the one place TK-DAT-001 allows a null commit."""
     commit = manifest.get('commit')
-    return commit if isinstance(commit, str) and commit.strip() else None
+    return commit if _nonempty_str(commit) else None
 
 
 def _input_problems(manifest):
     """Missing or invalid required inputs (〈定義：必要輸入〉, TK-SCP-002) of the ScanManifest; each one blocks the run."""
     problems = []
+    if not _nonempty_str(manifest.get('id')):
+        problems.append('id (ScanManifest identifier) must be a non-empty string')
     if _commit(manifest) is None:
         problems.append('commit (受測範圍: the source commit under test) is missing: dynamic testing is not started')
+    target = manifest.get('target')
+    if not isinstance(target, dict):
+        problems.append('target (受測範圍) must be an object {project, source_digest}')
+    else:
+        for part in ('project', 'source_digest'):
+            if not _nonempty_str(target.get(part)):
+                problems.append(f'target.{part} (受測範圍) must be a non-empty string')
     scope = manifest.get('scope')
     if not isinstance(scope, dict):
         problems.append('scope (受測範圍) is missing: dynamic testing is not started')
     else:
         problems += [f'scope.{p} (受測範圍) is missing' for p in SCOPE_PARTS if not scope.get(p)]
-        problems += _resource_problems(scope.get('resources') or [])
+        resources = scope.get('resources')
+        if resources and not isinstance(resources, list):
+            problems.append('scope.resources (受測範圍) must be a list')
+        elif resources:
+            problems += _resource_problems(resources)
         ops = scope.get('allowed_operations')
         if ops and (not isinstance(ops, list) or any(o not in authorization.METHODS for o in ops)):
             problems.append(f'scope.allowed_operations (受測範圍) must list HTTP methods of {list(authorization.METHODS)}')
@@ -564,6 +656,17 @@ def _input_problems(manifest):
                 problems.append(f'limits.{name} (執行限制) is missing: no unlimited default is used')
             elif not ok(limits[name]):
                 problems.append(f'limits.{name} must be {expected}, got {limits[name]!r}')
+    tests = manifest.get('tests')
+    if not isinstance(tests, list):
+        problems.append('tests must be a list of test objects')
+    else:
+        test_ids = []
+        for i, t in enumerate(tests):
+            if not isinstance(t, dict):
+                problems.append(f'tests/{i} must be an object')
+            elif _nonempty_str(tid := t.get('test_id')):
+                test_ids.append((i, tid))
+        problems += [f'tests: duplicate test_id {tid!r}' for _, tid in _duplicates(test_ids)]
     return problems
 
 
@@ -620,7 +723,7 @@ def _resource_problems(resources):
     """受測資源 of 〈定義：必要輸入〉: each one is {name, impact}, impact listing the 〈定義：高影響類別〉 it
     involves, [] for none. Refused: a missing impact (never taken as none), a code not in the table, a
     code listed twice, a resource listed twice."""
-    problems, seen = [], set()
+    problems, names = [], []
     for i, r in enumerate(resources):
         if not isinstance(r, dict):
             problems.append(f'scope.resources/{i} must be an object {{name, impact}}, got {r!r}')
@@ -630,10 +733,9 @@ def _resource_problems(resources):
             problems.append(f'scope.resources/{i}.name (受測資源) is missing')
             continue
         where = f'scope.resources/{i} ({name!r})'
-        if name in seen:
-            problems.append(f'{where} is listed twice')
-        seen.add(name)
+        names.append((where, name))
         problems += policy.impact_problems(r.get('impact'), where)
+    problems += [f'{where} is listed twice' for where, _ in _duplicates(names)]
     return problems
 
 
@@ -647,6 +749,31 @@ def _template_override_problems(manifest):
     not checked here."""
     return [f'{name}: the S2 template is provided by the toolkit only; a ScanManifest cannot supply '
             f'or replace it' for name in TEMPLATE_OVERRIDES if name in manifest]
+
+
+def _item_versions(item, items):
+    """Version of `item` and of the S1 entry its review.basis names (if any), or None when absent."""
+    if item is None:
+        return None
+    basis = (item.get('review') or {}).get('basis')
+    s1 = items.get(basis) if isinstance(basis, str) else None
+    return item['version'], (s1['version'] if s1 and s1['source'] == 'S1' else None)
+
+
+def _needs_handover(prepared, tests, plan):
+    """Whether a generated or updated confirmation list itself introduced a new item block or item version on a
+    valid planned test (〈定義：確認清單〉 寫入控制區)."""
+    if not prepared.updated:
+        return False
+    old = prepared.on_disk.items
+    for t in tests:
+        if _plan_problem(t) is not None or (item := report.listed_item(prepared.items, t)) is None:
+            continue
+        problem = _item_problem(t, prepared.items, plan)
+        if problem is not None and (problem, _item_versions(item, prepared.items)) != (
+                _item_problem(t, old, plan), _item_versions(report.listed_item(old, t), old)):
+            return True
+    return False
 
 
 def _preflight(state, now):
@@ -672,22 +799,33 @@ def _preflight(state, now):
         return f'nothing was started: {problem}'
     # A record is stored only once it is read: one that could not be read stays empty in the blocked report.
     state.granted = granted
-    listed, problem = _load_confirmation_list(manifest, now)
+    prepared_list, problem = _load_confirmation_list(manifest, now)
     if problem:
         return f'nothing was started: {problem}'
-    state.listed = listed
+    state.listed = prepared_list.on_disk
     reviewed, problem = _load_review_record(manifest)
     if problem:
         return f'nothing was started: {problem}'
     state.reviewed = reviewed
     recipe, _ = e1.load_recipe(project)  # without one, e1.prepare blocks the run at the BuildRecipe step
+    if recipe is not None and not _nonempty_str(recipe.get('sample')):
+        return 'nothing was started: BuildRecipe sample is missing or not a non-empty string'
     problem = recipe and authorization.target_problem(state.granted.doc, recipe['sample'], e1.MODE)
     if problem:
         return f'nothing was started: test authorization does not cover this run: {problem}'
-    checks = _TestChecks.of(state, recipe, now)
-    state.prechecks = {t['test_id']: checks.precheck(t) for t in manifest['tests']}
-    state.gaps = checks.identity_gaps()
-    if not any(p.runnable for p in state.prechecks.values()):
+    checks = _TestChecks.of(state, recipe, now, items=prepared_list.items)
+    prechecks = [checks.precheck(t) for t in manifest['tests']]
+    runnable = any(p.runnable for p in prechecks)
+    if runnable or _needs_handover(prepared_list, manifest['tests'], checks.plan):
+        listed, problem = prepared_list.write()
+        if problem:
+            return f'nothing was started: {problem}'
+        state.listed = listed
+    elif state.listed.ref is not None and prepared_list.updated:
+        prechecks = [_TestChecks.of(state, recipe, now, items=state.listed.items).precheck(t)
+                     for t in manifest['tests']]
+    state.prechecks, state.gaps = prechecks, checks.identity_gaps()
+    if not runnable:
         return 'no test in the ScanManifest can run; nothing was started'
     return None
 
@@ -713,9 +851,8 @@ def run(manifest, prepare=environment.prepare):
     executions, findings = [], []
     stopped = None  # reason the remaining tests cannot run
     try:
-        for test in manifest['tests']:
+        for test, precheck in zip(manifest['tests'], state.prechecks):
             started, evidence = _now(), []
-            precheck = state.prechecks[test['test_id']]
             if not precheck.runnable or stopped:
                 executions.append(_execution(state, test, started, *precheck.outcome(stopped)))
                 continue
@@ -783,10 +920,11 @@ def _item_version(listed, test):
 
 
 def _execution(state, test, started, result, error=None, approval_id=None):
-    ex = state.records.new('exec', test_id=test['test_id'], template_id=test['template_id'],
-                           requirement_id=test['requirement_id'], requirement_version=_item_version(state.listed, test),
-                           actor_ref=test['actor_ref'],
-                           resource_ref=test['resource_ref'], started_at=started, ended_at=_now(),
+    ex = state.records.new('exec', test_id=test.get('test_id'), template_id=test.get('template_id'),
+                           requirement_id=test.get('requirement_id'),
+                           requirement_version=_item_version(state.listed, test),
+                           actor_ref=test.get('actor_ref'),
+                           resource_ref=test.get('resource_ref'), started_at=started, ended_at=_now(),
                            result=result, error=error, evidence=[])
     if approval_id:  # the extra approval a test that ran was let past 〈定義：測試授權紀錄〉 by (TK-ENV-001)
         ex['approval_id'] = approval_id
@@ -804,7 +942,7 @@ def _handover_note(listed):
 
 def _requirements(manifest, listed):
     """The confirmation items the planned tests rest on, as the report shows them."""
-    used = {i['item_id']: i for t in manifest['tests'] if (i := listed.item(t))}  # each item once, in plan order
+    used = {i['item_id']: i for t in _planned_tests(manifest) if (i := listed.item(t))}  # each item once, in plan order
     return [item_rule.requirement(i) for i in used.values()]
 
 
@@ -812,8 +950,9 @@ def _blocked(state, reason, stage='preflight'):
     """Every planned test blocked at `stage`, or held by its own precheck; later stages do not run
     (〈定義：工作階段〉)."""
     now = _now()
-    executions = [_execution(state, t, now, *state.prechecks.get(t['test_id'], _Precheck()).outcome(reason))
-                  for t in state.manifest['tests']]
+    tests = _planned_tests(state.manifest)
+    prechecks = state.prechecks if len(state.prechecks) == len(tests) else [_Precheck()] * len(tests)
+    executions = [_execution(state, t, now, *p.outcome(reason)) for t, p in zip(tests, prechecks)]
     if stage == 'preflight':
         stages = _stages(preflight={'status': 'blocked', 'reason': reason},
                          dynamic_execution={'status': 'not_run', 'reason': 'preflight blocked; no dependent work'})
@@ -856,17 +995,19 @@ def _inventory(state, stages):
 
 def _command(test):
     """The SQL command a test exercises, or None when its template is not one of ours."""
-    template = DENIAL_TEMPLATES.get(test.get('template_id')) or ALLOWED_TEMPLATES.get(test.get('template_id'))
+    tid = test.get('template_id')
+    if not isinstance(tid, str):
+        return None
+    template = DENIAL_TEMPLATES.get(tid) or ALLOWED_TEMPLATES.get(tid)
     return COMMAND_OF_METHOD[template['method']] if template else None
 
 
 def _cases(state, executions, inv):
     """The scheduled tests as coverage() takes them: each with its result and the inventory items it exercises.
     A test rests on a confirmation item, which names its resource (S2) or resources (S1)."""
-    tests = {t['test_id']: t for t in state.manifest['tests']}
     cases = []
-    for ex in executions:
-        test, item = tests[ex['test_id']], state.listed.item(tests[ex['test_id']])
+    for test, ex in zip(_planned_tests(state.manifest), executions):
+        item = state.listed.item(test)
         resources = [item['resource']] if item and item.get('resource') else list((item or {}).get('resources', []))
         command = _command(test)
         # passed and failed are only given when the precondition and the control held (everything else is blocked)
@@ -888,7 +1029,7 @@ def _finish(state, executions, findings, status, reason, stages, environment, ma
         unsupported_items=[dict(u) for u in inv['unsupported_items']], **numbers)
     doc = {'schema_version': '1', 'run_id': records.run_id, 'id': f'report-{records.run_id}', 'created_at': _now(),
            'source_id': SOURCE_ID, 'commit': records.commit, 'status': status,
-           'manifest': {'id': manifest['id'], 'digest': _digest(manifest)},
+           'manifest': {'id': manifest.get('id'), 'digest': _digest(manifest)},
            'stages': stages, 'requirements': _requirements(manifest, listed), 'authorization_matrix': matrix,
            'execution_records': executions, 'findings': findings, 'coverage': cov_record,
            'source_changes': []}  # TK-ENV-006: the source under test is the pinned one (source_digest); v0.1 changes none
