@@ -1138,7 +1138,7 @@ class EnvironmentInReport(unittest.TestCase):
         cov['claim'] = 'known_scope_only'
         return doc
 
-    def test_environment_schema_requires_all_four_fields_and_forbids_extras(self):
+    def test_environment_schema_requires_all_four_fields_forbids_extras_and_checks_stage_presence(self):
         for missing in ('mode', 'profile_digest', 'unsupported', 'known_differences'):
             with self.subTest(missing=missing):
                 doc = valid_report()
@@ -1147,6 +1147,14 @@ class EnvironmentInReport(unittest.TestCase):
         doc = valid_report()
         doc['environment']['observer_password'] = 'secret'
         self.assertTrue(any('observer_password' in p for p in report.validate(doc)))
+
+        missing_env = valid_report()
+        del missing_env['environment']
+        self.assertTrue(any('environment: required' in p for p in report.validate(missing_env)))
+
+        not_run_with_env = fixture('report-blocked-no-commit')
+        not_run_with_env['environment'] = valid_report()['environment']
+        self.assertTrue(any('environment: must be omitted' in p for p in report.validate(not_run_with_env)))
 
     def test_unsupported_environment_enforces_blocked_stage_unrun_tests_known_scope_and_coverage_item(self):
         item = 'docker-engine 99.0.0 (matrix 29.1.3)'
@@ -1193,8 +1201,10 @@ class EnvironmentInReport(unittest.TestCase):
         self.assertIn('## 測試環境與差異', no_env)
         self.assertIn('未建立測試環境', no_env)
 
-        item = 'service rest img:0 <!-- hidden'
+        item = 'service rest img:0` <!-- hidden'
         rendered = report.render_markdown(self.unsupported_report(item))
         self.assertIn('支援矩陣外版本', rendered)
-        self.assertNotIn('<!--', rendered)
+        self.assertIn(f'``environment:{item}``', rendered)  # backtick cannot close the inline code span early
+        outside_code = re.sub(r'(`+).*?\1', '', rendered)
+        self.assertNotIn('<!--', outside_code)
         self.assertIn('## 覆蓋', rendered)

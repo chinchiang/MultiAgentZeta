@@ -90,9 +90,9 @@ class _Precheck:
     def runnable(self):
         return self.result is None
 
-    def outcome(self, reason):
-        """(result, reason) of a test that does not run: its own when it cannot run, else blocked for reason."""
-        return ('blocked', reason) if self.runnable else (self.result, self.reason)
+    def outcome(self, reason, default='blocked'):
+        """(result, reason) of a test that does not run: its own when it cannot run, else default for reason."""
+        return (default, reason) if self.runnable else (self.result, self.reason)
 
 
 @dataclass
@@ -920,7 +920,7 @@ def run(manifest, prepare=environment.prepare):
         state.gaps = state.gaps + [{'scope': f'environment:{u}', 'reason': 'version outside support matrix (TK-SCP-001)'}
                                    for u in dict.fromkeys(env_report['unsupported'])]
         now = _now()
-        executions = [_execution(state, t, now, *(('unsupported', reason) if p.runnable else (p.result, p.reason)))
+        executions = [_execution(state, t, now, *p.outcome(reason, 'unsupported'))
                       for t, p in zip(manifest['tests'], state.prechecks)]
         return _finish(state, executions, [], status='blocked', reason=reason,
                        stages=_stages(preflight={'status': 'completed'},

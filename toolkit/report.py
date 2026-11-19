@@ -5,6 +5,7 @@ JSON Schema in schemas/report-v1.json. validate() also checks the conditions tha
 span records, which JSON Schema cannot express.
 """
 import json
+import re
 from pathlib import Path
 
 import jsonschema
@@ -60,15 +61,28 @@ def _cross_record_problems(doc):
 
 
 def _environment_problems(doc):
-    """Versions outside the support matrix (TK-SCP-001, TK-ENV-007, TK-EVD-008, TK-EVD-009, 〈定義：工作階段〉): when
+    """Environment summary and versions outside the support matrix (〈定義：核心資料物件與相依紀錄〉, 〈定義：工作階段〉,
+    TK-SCP-001, TK-ENV-007, TK-EVD-005, TK-EVD-008, TK-EVD-009): environment is required once dynamic_execution
+    completed or failed (or status is completed/partial) and omitted when dynamic_execution is not_run; when
     environment.unsupported is non-empty, dynamic_execution and overall status must be blocked, no test can run
     beyond blocked/unsupported, coverage cannot claim whole_scope, and every unsupported environment entry must
     appear in coverage.unsupported_items."""
-    env = doc.get('environment') if isinstance(doc, dict) else None
+    if not isinstance(doc, dict):
+        return []
+    stages = {s.get('stage'): s.get('status') for s in _list(doc, 'stages') if isinstance(s, dict)}
+    has_env = 'environment' in doc
+    problems = []
+    if not has_env and (doc.get('status') in ('completed', 'partial')
+                        or stages.get('dynamic_execution') in ('completed', 'failed')):
+        problems.append('environment: required when status is completed/partial or dynamic_execution ran '
+                        '(〈定義：核心資料物件與相依紀錄〉, TK-EVD-005)')
+    if has_env and stages.get('dynamic_execution') == 'not_run':
+        problems.append("environment: must be omitted when dynamic_execution is 'not_run' "
+                        "(〈定義：核心資料物件與相依紀錄〉)")
+    env = doc.get('environment')
     unsupported = env.get('unsupported') if isinstance(env, dict) else None
     if not (isinstance(unsupported, list) and unsupported):
-        return []
-    problems = []
+        return problems
     if doc.get('status') != 'blocked':
         problems.append(f"environment: status must be 'blocked' when environment.unsupported is non-empty, "
                         f"not {doc.get('status')!r} (TK-SCP-001, TK-ENV-007)")
@@ -338,8 +352,17 @@ def render_review_issue(finding, doc, option_of_label):
 
 
 def _inline(text):
-    """Single-line escaped text safe in Markdown (no line break and no raw HTML, TK-EVD-002)."""
+    """Single-line escaped text safe in Markdown prose (no line break and no raw HTML, TK-EVD-002)."""
     return ' '.join(str(text).split()).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
+
+def _code(text):
+    """Single-line Markdown code span that untrusted backticks or HTML cannot break out of (TK-EVD-002)."""
+    s = ' '.join(str(text).split())
+    ticks = max((len(m.group(0)) for m in re.finditer(r'`+', s)), default=0)
+    fence = '`' * (ticks + 1)
+    pad = ' ' if not s or s[0] in '` ' or s[-1] in '` ' else ''
+    return f'{fence}{pad}{s}{pad}{fence}'
 
 
 def _cell(text):
@@ -420,7 +443,7 @@ def _coverage_lines(c):
              f'- 資料表與政策：已盤點 {tp["inventoried"]}、已啟用 RLS {tp["rls_enabled"]}、尚無政策 {tp["without_policy"]}、'
              f'未解析 {tp["unresolved"]}、已判定 {tp["judged"]}']
     lines += [f'  - 未解析：`{u["file"]}{":" + str(u["line"]) if u["line"] else ""}`（{u["reason"]}）' for u in inv['unresolved']]
-    lines += [f'  - 不支援：`{_inline(u["scope"])}`（{_inline(u["reason"])}'
+    lines += [f'  - 不支援：{_code(u["scope"])}（{_inline(u["reason"])}'
               f'{"；需補充觀測" if u.get("needs_supplement") else ""}）'
               for u in c['unsupported_items']]
     lines += [f'  - 排除：`{e["ref"]}`（{e["reason"]}；確認者 {e["confirmed_by"]}、版本 {e["version"]}）' for e in c['excluded']]
