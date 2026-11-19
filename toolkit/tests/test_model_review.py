@@ -117,11 +117,23 @@ class SliceOfADatabaseTask(unittest.TestCase):
         s = self.slice_of(sample_inventory(), 'public.documents')
         self.assertEqual((s['rule'], s['supported_version']), ('sql-rls-v1', 'postgresql-17'))
 
-    def test_unresolved_content_of_its_source_files_is_disclosed_in_it(self):
-        sql = 'create table public.a (id int);\ndo $$ begin end $$;\n'
-        inv = inventory.inventory({M: sql, 'supabase/migrations/002.sql': 'create table public.b (id int);\ndo $$ begin end $$;\n'})
-        s = self.slice_of(inv, 'public.a')
-        self.assertEqual([(u['file'], u['line']) for u in s['unresolved']], [(M, 2)])  # not the other file's
+    def test_unresolved_content_of_any_migration_including_files_without_facts_is_disclosed_in_it(self):
+        files = {
+            M: 'create table public.a (id int);\n',
+            'supabase/migrations/002.sql': 'do $$ begin end $$;\n',
+            'supabase/migrations/003.sql': 'drop policy p on public.a;\n',
+            'supabase/migrations/004.sql': None,
+        }
+        inv = inventory.inventory(files)
+        reordered = inventory.inventory(dict(reversed(list(files.items()))))
+        s, s_rev = self.slice_of(inv, 'public.a'), self.slice_of(reordered, 'public.a')
+        self.assertEqual([(u['file'], u['line'], u['reason']) for u in s['unresolved']], [
+            ('supabase/migrations/002.sql', 1, 'do block runs SQL that is not read'),
+            ('supabase/migrations/003.sql', 1, 'statement changes a table or policy that is not tracked'),
+            ('supabase/migrations/004.sql', 0, 'file could not be read'),
+        ])
+        self.assertEqual((s['unresolved'], s['digest']), (s_rev['unresolved'], s_rev['digest']))
+        self.assertEqual(self.slice_of(sample_inventory(), 'public.documents')['unresolved'], [])
 
 
 class TheDigestOfASlice(unittest.TestCase):
@@ -156,6 +168,39 @@ class TheDigestOfASlice(unittest.TestCase):
         s = model_review.slice_of(task, inv)
         self.assertEqual((s['task'], s['entry']), ('entry:GET /api/documents', 'GET /api/documents'))
         self.assertEqual(s['digest'], model_review.slice_of(task, inv)['digest'])
+
+
+class SliceGuards(unittest.TestCase):
+    """TK-DAT-007, 〈定義：審查任務的單位〉: slice_of() refuses non-CodeFact records in the inventory."""
+
+    def test_slice_of_refuses_an_inventory_containing_non_codefact_records(self):
+        base = sample_inventory()
+        db_task = next(t for t in model_review.review_tasks(base) if t['unit'] == 'public.documents')
+        entry_inv = with_entries(base, ENTRY)
+        entry_task = model_review.review_tasks(entry_inv)[0]
+        valid_fact = dict(base['facts'][0])
+        bad_records = [
+            ({**valid_fact, 'method': 'model:claude'}, "method 'model:claude' is not a registered extraction rule"),
+            ({**valid_fact, 'confidence': 0.9}, "field 'confidence' is not part of an extracted"),
+            ({'kind': 'threat', 'source': {'file': M, 'line': 1}, 'method': 'sql-rls-v1',
+              'supported_version': 'postgresql-17'}, "kind 'threat' is not extracted"),
+            ({**valid_fact, 'source': None}, 'source needs a file and an integer line'),
+        ]
+        for forged, reason in bad_records:
+            for task, inv in ((db_task, base), (entry_task, entry_inv)):
+                with self.subTest(kind=task['kind'], reason=reason):
+                    tainted = {**inv, 'facts': [*inv['facts'], forged]}
+                    with self.assertRaisesRegex(ValueError, reason):
+                        model_review.slice_of(task, tainted)
+
+    def test_slice_of_refuses_an_unknown_task_kind(self):
+        inv = sample_inventory()
+        for bad_kind in ('storage', 'middleware', 'db', '', None):
+            with self.subTest(kind=bad_kind):
+                with self.assertRaisesRegex(ValueError, 'task kind'):
+                    model_review.slice_of({'kind': bad_kind, 'id': 'x:1', 'unit': 'public.documents'}, inv)
+        with self.assertRaisesRegex(ValueError, 'task kind'):
+            model_review.slice_of({'id': 'x:1', 'unit': 'public.documents'}, inv)
 
 
 if __name__ == '__main__':

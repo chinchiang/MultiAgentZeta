@@ -21,13 +21,25 @@ def review_tasks(inventory):
                for i in inventoried if i['scope'] == 'rls-table'])
 
 
+TASK_KINDS = ('entry', 'database')
+
+
 def slice_of(task, inventory):
     """The slice of a task: what the model is sent, assembled from CodeFacts in a fixed order, with the digest of
     its content (TK-REV-003). The same inventory gives the same slice and digest, whatever the order of the files.
 
-    A database slice holds the table, whether it has row level security, its policies as written, and the
-    unresolved content of the files it came from, so a gap the model cannot see is still disclosed."""
-    if task['kind'] == 'entry':
+    A database slice holds the table, whether it has row level security, its policies as written, and all
+    unresolved content of the inventory in a fixed order, so a gap the model cannot see is still disclosed
+    even when it came from a migration file that yielded no CodeFact (TK-ARC-004). Only extracted CodeFacts
+    and known task kinds ('entry', 'database') are accepted (TK-DAT-007, 〈定義：審查任務的單位〉)."""
+    kind = task.get('kind') if isinstance(task, dict) else None
+    if kind not in TASK_KINDS:
+        raise ValueError(f'unknown review task kind {kind!r}; expected one of {TASK_KINDS}')
+    not_facts = [p for f in inventory['facts']
+                 for p in (extract.codefact_problems(f) if isinstance(f, dict) else ['CodeFact must be an object'])]
+    if not_facts:  # TK-DAT-007: only extraction makes a CodeFact; anything else is refused before assembling a slice
+        raise ValueError('the inventory holds something that is not a CodeFact: ' + '; '.join(not_facts))
+    if kind == 'entry':
         content = {'task': task['id'], 'kind': 'entry', 'entry': task['unit'], 'unresolved': []}
     else:
         table = task['unit']
@@ -35,10 +47,11 @@ def slice_of(task, inventory):
                  if (f['kind'] == 'table' and f['name'] == table) or (f['kind'] in ('rls', 'policy') and f['table'] == table)]
         policies = [{k: f[k] for k in ('name', 'permissive', 'command', 'roles', 'using', 'with_check', 'source')}
                     for f in facts if f['kind'] == 'policy']
-        files = {f['source']['file'] for f in facts}
+        unresolved = sorted((dict(u) for u in inventory['unresolved']),
+                            key=lambda u: (u['file'], u['line'], u['reason']))
         content = {'task': task['id'], 'kind': 'database', 'table': table,
                    'rls_enabled': inventory_module.rls_state(inventory).get(table, False), 'policies': policies,
-                   'unresolved': [u for u in inventory['unresolved'] if u['file'] in files]}
+                   'unresolved': unresolved}
     content |= {'rule': inventory['rule'], 'supported_version': extract.SUPPORTED_VERSION}
     canonical = json.dumps(content, sort_keys=True, ensure_ascii=False, separators=(',', ':'))
     return {**content, 'digest': 'sha256:' + hashlib.sha256(canonical.encode('utf-8')).hexdigest()}
