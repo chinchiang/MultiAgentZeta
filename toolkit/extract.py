@@ -19,6 +19,36 @@ _CREATE_TABLE = re.compile(rf'create\s+(?:unlogged\s+)?table\s+(?:if\s+not\s+exi
 _DOLLAR = re.compile(r'\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$')
 
 
+def _is_e_quote(text, i):
+    """Whether single quote at i starts a PostgreSQL E'...' escaped string (the E not ending a longer word)."""
+    return (text[i] == "'" and i > 0 and text[i - 1] in 'eE'
+            and not (i > 1 and (text[i - 2].isalnum() or text[i - 2] in '_$')))
+
+
+def _quoted_end(text, i):
+    """End index (exclusive) of a '...' / E'...' / "..." / $tag$...$tag$ literal starting at i,
+    -1 when i starts one that is never closed, or None when i does not start one."""
+    c = text[i]
+    if c in ('"', "'"):  # a quoted identifier or a string: a doubled quote inside is a literal quote
+        escapes = _is_e_quote(text, i)
+        end = i + 1
+        while end < len(text):
+            if escapes and text[end] == '\\':
+                end += 2
+            elif text[end] == c and text[end + 1:end + 2] == c:
+                end += 2
+            elif text[end] == c:
+                return end + 1
+            else:
+                end += 1
+        return -1
+    if c == '$' and not (i and (text[i - 1].isalnum() or text[i - 1] in '_$')) and (m := _DOLLAR.match(text, i)):
+        tag = m.group(0)
+        end = text.find(tag, i + len(tag))
+        return -1 if end < 0 else end + len(tag)
+    return None
+
+
 def _statements(text):
     """The statements of one SQL file as (line of the first token, text without comments), in file order, and
     the line where a string, comment or $-quote is never closed (None when all are). Quoted text, quoted
@@ -41,32 +71,16 @@ def _statements(text):
                     end += 1
             if depth:
                 return out, line
+            if start is not None:
+                buf.append(' ')
             line += text.count('\n', i, end)
             i = end
             continue
-        if c in ('"', "'"):  # a quoted identifier or a string: a doubled quote inside is a literal quote
-            # E'...' (the E not the end of a longer word) also takes backslash escapes; an ordinary string does not
-            escapes = (c == "'" and i > 0 and text[i - 1] in 'eE'
-                       and not (i > 1 and (text[i - 2].isalnum() or text[i - 2] in '_$')))
-            end = i + 1
-            while end < len(text):
-                if escapes and text[end] == '\\':
-                    end += 2
-                elif text[end] == c and text[end + 1:end + 2] == c:
-                    end += 2
-                elif text[end] == c:
-                    break
-                else:
-                    end += 1
-            if end >= len(text):
-                return out, line
-            seg = text[i:end + 1]
-        elif c == '$' and not (i and (text[i - 1].isalnum() or text[i - 1] in '_$')) and _DOLLAR.match(text, i):
-            tag = _DOLLAR.match(text, i).group(0)
-            end = text.find(tag, i + len(tag))
-            if end < 0:
-                return out, line
-            seg = text[i:end + len(tag)]
+        q_end = _quoted_end(text, i)
+        if q_end == -1:
+            return out, line
+        if q_end is not None:
+            seg = text[i:q_end]
         elif c == ';':
             if start is not None:
                 out.append((start, ''.join(buf).strip()))
@@ -93,16 +107,21 @@ def _masked(text):
     """(text with quoted parts and everything inside parentheses blanked, whether its parentheses balance).
 
     Blanking lets keywords be found at the top level; each depth-0 parenthesis stays and every character keeps
-    its position. Parentheses balance when none is closed before it is opened and none is left open."""
-    out, depth, quote, lowest = [], 0, None, 0
-    for c in text:
-        if quote:
-            out.append('_')
-            quote = None if c == quote else quote
-        elif c in ('"', "'"):
-            out.append('_')
-            quote = c
-        elif c == '(':
+    its position ('~' is neither whitespace nor a word character, so word boundaries around keywords stay intact).
+    Parentheses balance when none is closed before it is opened and none is left open."""
+    out, depth, lowest, i = [], 0, 0, 0
+    while i < len(text):
+        q_end = _quoted_end(text, i)
+        if q_end == -1:
+            return ''.join(out) + '~' * (len(text) - i), False
+        if q_end is not None:
+            if _is_e_quote(text, i) and depth == 0:
+                out[-1] = '~'
+            out.append(('~' if depth == 0 else ' ') * (q_end - i))
+            i = q_end
+            continue
+        c = text[i]
+        if c == '(':
             out.append('(' if depth == 0 else ' ')
             depth += 1
         elif c == ')':
@@ -111,38 +130,55 @@ def _masked(text):
             out.append(')' if depth == 0 else ' ')
         else:
             out.append(c if depth == 0 else ' ')
+        i += 1
     return ''.join(out), depth == 0 and lowest == 0
 
 
 
-def _condition(rest, masked, keyword):
-    """The text inside the parentheses after keyword (USING or WITH CHECK), as written; None when the
-    keyword is absent; False when the keyword is there without a parenthesized condition."""
-    m = re.search(rf'\b{keyword}\b', masked, re.I)
-    if not m:
-        return None
-    after = masked[m.end():].lstrip()
-    if not after.startswith('('):
-        return False
-    open_at = m.end() + len(masked[m.end():]) - len(after)
-    return rest[open_at + 1:masked.index(')', open_at)].strip()
+def _split_top_commas(text, masked):
+    """Slices of `text` separated by top-level commas (commas still present in `masked`)."""
+    parts, start = [], 0
+    for m in re.finditer(',', masked):
+        parts.append(text[start:m.start()])
+        start = m.end()
+    parts.append(text[start:])
+    return parts
+
+
+_ROLE = re.compile(rf'{_IDENT}$')
+_POLICY_TAIL = re.compile(
+    r'\s*(?:as\s+(permissive|restrictive)\b\s*)?'
+    r'(?:for\s+(all|select|insert|update|delete)\b\s*)?'
+    r'(?:to\s+(.+?)\s*)?'
+    r'(?:using\s*(\(\s*\))\s*)?'
+    r'(?:with\s+check\s*(\(\s*\))\s*)?$',
+    re.I | re.S,
+)
 
 
 def _policy(m, statement):
-    """The policy fact of a create policy statement; None when it cannot be read (unbalanced parentheses, or a
-    USING or WITH CHECK without a parenthesized condition)."""
+    """The policy fact of a create policy statement; None when it cannot be read (unbalanced parentheses,
+    unknown clause, malformed role list, or a USING or WITH CHECK without a parenthesized condition)."""
     rest = statement[m.end():]
     masked, balanced = _masked(rest)
     if not balanced:
         return None
-    using, with_check = _condition(rest, masked, 'using'), _condition(rest, masked, r'with\s+check')
-    if using is False or with_check is False:
+    clauses = _POLICY_TAIL.fullmatch(masked)
+    if not clauses:
         return None
-    command = re.search(r'\bfor\s+(all|select|insert|update|delete)\b', masked, re.I)
-    to = re.search(r'\bto\s+(.+?)(?=\s+(?:using|with)\b|$)', masked, re.I | re.S)
-    roles = [_unquote(r.strip()) for r in rest[to.start(1):to.end(1)].split(',')] if to else ['public']
+    if clauses.group(3) is not None:
+        raw_roles = [r.strip() for r in _split_top_commas(rest[clauses.start(3):clauses.end(3)],
+                                                          masked[clauses.start(3):clauses.end(3)])]
+        if not raw_roles or not all(_ROLE.fullmatch(r) for r in raw_roles):
+            return None
+        roles = [_unquote(r) for r in raw_roles]
+    else:
+        roles = ['public']
+    using = rest[clauses.start(4) + 1:clauses.end(4) - 1].strip() if clauses.group(4) else None
+    with_check = rest[clauses.start(5) + 1:clauses.end(5) - 1].strip() if clauses.group(5) else None
     return {'kind': 'policy', 'name': _unquote_name(m.group(1)), 'table': _qualified(m.group(2)),
-            'command': command.group(1).lower() if command else 'all', 'roles': roles,
+            'permissive': (clauses.group(1) or 'permissive').lower() == 'permissive',
+            'command': (clauses.group(2) or 'all').lower(), 'roles': roles,
             'using': using, 'with_check': with_check}
 
 
@@ -162,46 +198,67 @@ def _qualified(name):
 
 _NO_SCHEMA = 'table name has no schema'
 _UNTRACKED = 'statement changes a table or policy that is not tracked'
-_ALTER_TABLE = re.compile(rf'alter\s+table\s+(?:if\s+exists\s+)?(?:only\s+)?({_IDENT}(?:\s*\.\s*{_IDENT})?)\s+(.*)$', re.I | re.S)
+_ALTER_TABLE = re.compile(
+    rf'alter\s+table\s+(?:if\s+exists\s+)?(?:only\s+)?({_IDENT}(?:\s*\.\s*{_IDENT})?)(?:\s*\*)?\s+(.*)$',
+    re.I | re.S,
+)
 _ENABLE_OR_DISABLE_RLS = re.compile(r'(enable|disable)\s+row\s+level\s+security$', re.I)
-_CHANGES_UNTRACKED = re.compile(r'(?:(?:no\s+)?force\s+row\s+level\s+security|rename\b)', re.I)
+_CHANGES_UNTRACKED = re.compile(r'(?:(?:no\s+)?force\s+row\s+level\s+security|rename\b|set\s+schema\b)', re.I)
 _FUNCTION = re.compile(r'create\s+(?:or\s+replace\s+)?(?:function|procedure)\b', re.I)
 _MAY_CHANGE = re.compile(r'create\s+table|create\s+policy|row\s+level\s+security', re.I)
-_DROPS_OR_ALTERS = re.compile(r'(?:drop\s+(?:table|policy)\b|alter\s+policy\b)', re.I)
+_DROPS_OR_ALTERS = re.compile(r'(?:drop\s+(?:table|policy|schema)\b|alter\s+(?:policy|schema)\b)', re.I)
+
+
+def _alter_table(m):
+    """(facts, reason) of an ALTER TABLE statement, split by top-level commas (〈定義：擷取結果〉, TK-ARC-004)."""
+    body = m.group(2).strip()
+    masked, balanced = _masked(body)
+    if not balanced:
+        return [], _UNTRACKED
+    actions = [a.strip() for a in _split_top_commas(masked, masked)]
+    if any(not a for a in actions):
+        return [], _UNTRACKED
+    rls_states = []
+    for action in actions:
+        rls = _ENABLE_OR_DISABLE_RLS.fullmatch(action)
+        if rls:
+            rls_states.append(rls.group(1).lower() == 'enable')
+        elif _CHANGES_UNTRACKED.match(action) or re.search(r'\brow\s+level\s+security\b', action, re.I):
+            return [], _UNTRACKED
+    if not rls_states:
+        return [], None
+    table = _qualified(m.group(1))
+    if not table:
+        return [], _NO_SCHEMA
+    return [{'kind': 'rls', 'table': table, 'enabled': enabled} for enabled in rls_states], None
 
 
 def _read(statement):
-    """The fact one statement gives, or the reason it cannot be read; (None, None) for a statement that does not
-    touch tables, row level security or policies."""
+    """(facts, reason) for one statement; ([], None) for a statement that does not touch tables, row level
+    security or policies."""
     if re.match(r'do\b', statement, re.I):
-        return None, 'do block runs SQL that is not read'
+        return [], 'do block runs SQL that is not read'
     if _FUNCTION.match(statement):  # the body is not read; it matters only if it may change tables or policies
-        return None, ('function or procedure body may change tables or policies and is not read'
-                      if _MAY_CHANGE.search(statement) else None)
+        return [], ('function or procedure body may change tables or policies and is not read'
+                    if _MAY_CHANGE.search(statement) else None)
     if _DROPS_OR_ALTERS.match(statement):
-        return None, _UNTRACKED
+        return [], _UNTRACKED
     m = _CREATE_TABLE.match(statement)
     if m:
-        return ({'kind': 'table', 'name': _qualified(m.group(1))}, None) if _qualified(m.group(1)) else (None, _NO_SCHEMA)
+        table = _qualified(m.group(1))
+        return ([{'kind': 'table', 'name': table}], None) if table else ([], _NO_SCHEMA)
     if re.match(r'create\s+policy\b', statement, re.I):
         m = _CREATE_POLICY.match(statement)
         if not m:
-            return None, 'policy statement not understood'
+            return [], 'policy statement not understood'
         if not _qualified(m.group(2)):
-            return None, _NO_SCHEMA
+            return [], _NO_SCHEMA
         policy = _policy(m, statement)
-        return (policy, None) if policy else (None, 'policy statement not understood')
-    m = _ALTER_TABLE.match(statement)
-    if m:
-        clause = m.group(2).strip()
-        rls = _ENABLE_OR_DISABLE_RLS.fullmatch(clause)
-        if rls:
-            if not _qualified(m.group(1)):
-                return None, _NO_SCHEMA
-            return {'kind': 'rls', 'table': _qualified(m.group(1)), 'enabled': rls.group(1).lower() == 'enable'}, None
-        if _CHANGES_UNTRACKED.match(clause):
-            return None, _UNTRACKED
-    return None, None
+        return ([policy], None) if policy else ([], 'policy statement not understood')
+    if re.match(r'alter\s+table\b', statement, re.I):
+        m = _ALTER_TABLE.match(statement)
+        return _alter_table(m) if m else ([], _UNTRACKED)
+    return [], None
 
 
 # What an extracted fact may carry, by kind: nothing else rides along (TK-DAT-007). A model's confidence or
@@ -209,7 +266,7 @@ def _read(statement):
 FACT_FIELDS = {
     'table': {'name'},
     'rls': {'table', 'enabled'},
-    'policy': {'name', 'table', 'command', 'roles', 'using', 'with_check'},
+    'policy': {'name', 'table', 'permissive', 'command', 'roles', 'using', 'with_check'},
 }
 REGISTERED_RULES = (RULE,)
 COMMON_FIELDS = {'kind', 'source', 'method', 'supported_version'}
@@ -265,11 +322,11 @@ def extract_facts(files):
             continue
         statements, never_closed = _statements(files[path])
         for line, statement in statements:
-            fact, reason = _read(statement)
-            if fact:
+            found, reason = _read(statement)
+            for fact in found:
                 facts.append({**fact, 'source': {'file': path, 'line': line}, 'method': RULE,
                               'supported_version': SUPPORTED_VERSION})
-            elif reason:
+            if reason:
                 unresolved.append({'file': path, 'line': line, 'reason': reason})
         if never_closed:
             unresolved.append({'file': path, 'line': never_closed, 'reason': 'string, comment or $-quote is never closed'})

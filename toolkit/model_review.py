@@ -33,7 +33,7 @@ def slice_of(task, inventory):
         table = task['unit']
         facts = [f for f in inventory['facts']
                  if (f['kind'] == 'table' and f['name'] == table) or (f['kind'] in ('rls', 'policy') and f['table'] == table)]
-        policies = [{k: f[k] for k in ('name', 'command', 'roles', 'using', 'with_check', 'source')}
+        policies = [{k: f[k] for k in ('name', 'permissive', 'command', 'roles', 'using', 'with_check', 'source')}
                     for f in facts if f['kind'] == 'policy']
         files = {f['source']['file'] for f in facts}
         content = {'task': task['id'], 'kind': 'database', 'table': table,

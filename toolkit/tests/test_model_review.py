@@ -89,9 +89,19 @@ class SliceOfADatabaseTask(unittest.TestCase):
     def test_a_policy_keeps_its_command_roles_conditions_as_written_and_source(self):
         s = self.slice_of(sample_inventory(), 'public.documents')
         update = next(p for p in s['policies'] if p['name'] == 'tenant members update documents')
-        self.assertEqual((update['command'], update['roles'], update['with_check']), ('update', ['authenticated'], None))
+        self.assertEqual((update['permissive'], update['command'], update['roles'], update['with_check']),
+                         (True, 'update', ['authenticated'], None))
         self.assertIn('tenant_id in (select tenant_id from public.memberships', update['using'])
         self.assertEqual(update['source'], {'file': 'supabase/migrations/20261031000002_document_policies.sql', 'line': 13})
+
+    def test_restrictive_and_permissive_policies_are_distinguished_in_the_slice_and_its_digest(self):
+        perm = inventory_of('create table public.a (id int);\n'
+                            'create policy p on public.a as permissive for select using (true);\n')
+        rest = inventory_of('create table public.a (id int);\n'
+                            'create policy p on public.a as restrictive for select using (true);\n')
+        s_perm, s_rest = self.slice_of(perm, 'public.a'), self.slice_of(rest, 'public.a')
+        self.assertEqual((s_perm['policies'][0]['permissive'], s_rest['policies'][0]['permissive']), (True, False))
+        self.assertNotEqual(s_perm['digest'], s_rest['digest'])
 
     def test_the_policies_of_other_tables_are_not_in_it(self):
         s = self.slice_of(sample_inventory(), 'public.announcements')

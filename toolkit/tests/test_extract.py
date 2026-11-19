@@ -117,6 +117,11 @@ def facts_of(sql, path=M):
     return extract.extract_facts({path: sql})
 
 
+def inventory_completeness(sql, path=M):
+    from toolkit import inventory
+    return inventory.inventory({path: sql})['completeness']
+
+
 def names(result, kind):
     return [f.get('name') or f['table'] for f in of_kind(result, kind)]
 
@@ -149,8 +154,27 @@ class WhatIsNotAStatement(unittest.TestCase):
                           'create policy "Mixed Case" on public."Docs" for SELECT to "Anon", Authenticated using (true);\n')
         self.assertEqual(names(result, 'table'), ['public.tenants'])
         policy = of_kind(result, 'policy')[0]
-        self.assertEqual((policy['name'], policy['table'], policy['command'], policy['roles']),
-                         ('Mixed Case', 'public.Docs', 'select', ['Anon', 'authenticated']))
+        self.assertEqual((policy['name'], policy['table'], policy['permissive'], policy['command'], policy['roles']),
+                         ('Mixed Case', 'public.Docs', True, 'select', ['Anon', 'authenticated']))
+
+    def test_permissive_and_restrictive_policies_and_quoted_roles_with_commas(self):
+        sql = ('create policy p_default on public.docs for select using (true);\n'
+               'create policy p_perm on public.docs as permissive for select to "role,a", "using" using (true);\n'
+               'create policy p_rest on public.docs AS RESTRICTIVE for update to "ops,lead", authenticated '
+               'using (true) with check (true);\n')
+        result = facts_of(sql)
+        self.assertEqual(result['unresolved'], [])
+        by_name = {f['name']: f for f in of_kind(result, 'policy')}
+        self.assertIs(by_name['p_default']['permissive'], True)
+        self.assertEqual((by_name['p_perm']['permissive'], by_name['p_perm']['roles']),
+                         (True, ['role,a', 'using']))
+        self.assertEqual((by_name['p_rest']['permissive'], by_name['p_rest']['roles']),
+                         (False, ['ops,lead', 'authenticated']))
+        for invalid in ('create policy p on public.docs as mandatory using (true);',
+                        'create policy p on public.docs to "role,a", using (true);'):
+            with self.subTest(invalid=invalid):
+                self.assertEqual(facts_of(invalid)['unresolved'],
+                                 [{'file': M, 'line': 1, 'reason': 'policy statement not understood'}])
 
     def test_only_migrations_are_read(self):
         result = extract.extract_facts({'supabase/seed.sql': 'create table public.seed (id int);',
@@ -187,10 +211,32 @@ class UnresolvedContentIsListedNotDropped(unittest.TestCase):
     def test_statements_that_change_tables_or_policies_are_unresolved(self):
         for sql in ('drop table public.t;', 'drop policy p on public.t;', 'alter policy p on public.t using (true);',
                     'alter table public.t rename to u;', 'alter table public.t force row level security;',
-                    'alter table public.t no force row level security;', 'alter table public.t rename column a to b;'):
+                    'alter table public.t no force row level security;', 'alter table public.t rename column a to b;',
+                    'alter table public.t set schema archive;',
+                    'alter table public.t add column c int, force row level security;',
+                    'alter table public.t add column c int, no force row level security;',
+                    'alter table public.t add column c int, rename to u;',
+                    'alter table public.t add column c int, set schema archive;',
+                    'drop schema public cascade;', 'drop schema if exists app;',
+                    'alter schema public rename to app;'):
             with self.subTest(sql=sql):
                 self.assertEqual(self.unresolved(sql),
                                  [{'file': M, 'line': 1, 'reason': 'statement changes a table or policy that is not tracked'}])
+                self.assertEqual(inventory_completeness(sql), 'unknown')
+
+    def test_compound_alter_table_extracts_rls_and_ignores_commas_inside_types_or_strings(self):
+        from toolkit import inventory
+        sql = ("create table public.docs (id int);\n"
+               "alter table public.docs add column amount numeric(10, 2) default 0, enable row level security;\n"
+               "alter table public.docs add column note text default 'a, rename to x', disable row level security;\n")
+        result = facts_of(sql)
+        self.assertEqual(result['unresolved'], [])
+        self.assertEqual([(f['table'], f['enabled'], f['source']['line']) for f in of_kind(result, 'rls')],
+                         [('public.docs', True, 2), ('public.docs', False, 3)])
+        inv = inventory.inventory({M: sql})
+        self.assertEqual((inv['completeness'], inventory.rls_state(inv)), ('complete', {'public.docs': False}))
+        self.assertEqual(facts_of('alter table docs add column c int, enable row level security;')['unresolved'],
+                         [{'file': M, 'line': 1, 'reason': 'table name has no schema'}])
 
     def test_a_policy_that_cannot_be_read_is_unresolved(self):
         self.assertEqual(self.unresolved('create policy p;'),
@@ -219,9 +265,9 @@ class UnresolvedContentIsListedNotDropped(unittest.TestCase):
 class OnlyExtractionMakesACodeFact(unittest.TestCase):
     """TK-DAT-007: what a model proposed or an observation showed cannot be written as a CodeFact."""
 
-    POLICY = {'kind': 'policy', 'name': 'p', 'table': 'public.t', 'command': 'select', 'roles': ['anon'],
-              'using': 'true', 'with_check': None, 'source': {'file': M, 'line': 3}, 'method': 'sql-rls-v1',
-              'supported_version': 'postgresql-17'}
+    POLICY = {'kind': 'policy', 'name': 'p', 'table': 'public.t', 'permissive': True, 'command': 'select',
+              'roles': ['anon'], 'using': 'true', 'with_check': None, 'source': {'file': M, 'line': 3},
+              'method': 'sql-rls-v1', 'supported_version': 'postgresql-17'}
 
     def test_every_fact_extracted_from_the_samples_is_a_code_fact(self):
         for version in SAMPLE_VERSIONS:
@@ -271,6 +317,28 @@ class NestedBlockComments(unittest.TestCase):
         self.assertEqual(result['unresolved'],
                          [{'file': M, 'line': 2, 'reason': 'string, comment or $-quote is never closed'}])
 
+    def test_block_comments_between_tokens_separate_them_instead_of_gluing_them(self):
+        sql = ("CREATE/*c*/TABLE/*outer/*inner*/*/public./*c*/docs(id int);\n"
+               "ALTER/*c*/TABLE public.docs/*c*/ENABLE/*c*/ROW/*c*/LEVEL/*c*/SECURITY;\n"
+               "ALTER TABLE public.docs/*c*/DISABLE/*c*/ROW LEVEL SECURITY;\n"
+               "CREATE/*c*/POLICY/*c*/p/*c*/ON/*c*/public.docs/*c*/FOR/*c*/SELECT/*c*/USING(true);\n")
+        result = facts_of(sql)
+        self.assertEqual(result['unresolved'], [])
+        self.assertEqual(names(result, 'table'), ['public.docs'])
+        self.assertEqual([(f['table'], f['enabled'], f['source']['line']) for f in of_kind(result, 'rls')],
+                         [('public.docs', True, 2), ('public.docs', False, 3)])
+        self.assertEqual([(f['name'], f['table'], f['command']) for f in of_kind(result, 'policy')],
+                         [('p', 'public.docs', 'select')])
+        for tracked in ('ALTER TABLE public.docs/*c*/FORCE ROW LEVEL SECURITY;',
+                        'DROP/*outer/*inner*/*/TABLE public.docs;',
+                        'DROP/*c*/POLICY p ON public.docs;',
+                        'ALTER/*c*/POLICY p ON public.docs USING (false);'):
+            with self.subTest(tracked=tracked):
+                res = facts_of(tracked)
+                self.assertEqual(res['unresolved'],
+                                 [{'file': M, 'line': 1, 'reason': 'statement changes a table or policy that is not tracked'}])
+                self.assertEqual(inventory_completeness(tracked), 'unknown')
+
 
 class PoliciesThatCannotBeRead(unittest.TestCase):
     """TK-ARC-004: a policy that cannot be read is listed as unresolved; it never stops the extraction or vanishes."""
@@ -302,6 +370,23 @@ class PoliciesThatCannotBeRead(unittest.TestCase):
         policy = of_kind(result, 'policy')[0]
         self.assertEqual((policy['name'], policy['using']), ('odd (name', "title = ')' and body <> '('"))
         self.assertEqual(result['unresolved'], [])
+
+    def test_escaped_and_dollar_quoted_strings_inside_policy_conditions_do_not_confuse_masking(self):
+        sql = ("create policy p_escaped on public.a for update "
+               "using (title = E'it\\'s)' and note <> e'\\\\)') with check (title <> 'plain''s)');\n"
+               "create policy p_dollar on public.a for update "
+               "using (body <> $$) with check (true$$ and tag <> $t$) using ($t$);\n")
+        result = facts_of(sql)
+        self.assertEqual(result['unresolved'], [])
+        by_name = {f['name']: f for f in of_kind(result, 'policy')}
+        self.assertEqual(by_name['p_escaped']['using'], "title = E'it\\'s)' and note <> e'\\\\)'")
+        self.assertEqual(by_name['p_escaped']['with_check'], "title <> 'plain''s)'")
+        self.assertEqual(by_name['p_dollar']['using'], "body <> $$) with check (true$$ and tag <> $t$) using ($t$")
+        self.assertIsNone(by_name['p_dollar']['with_check'])
+        for broken in ("create policy p on public.a using (title = E'it\\'s)'",
+                       "create policy p on public.a using (body <> $$) with check (true$$"):
+            with self.subTest(broken=broken):
+                self.assert_unresolved_and_the_rest_still_read(broken)
 
 
 class EscapedAndPlainStrings(unittest.TestCase):
