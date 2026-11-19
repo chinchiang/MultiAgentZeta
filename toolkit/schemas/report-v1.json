@@ -128,6 +128,18 @@
       "description": "TK-ENV-006: changes made to the source under test for the run. v0.1 makes none: the source is the one source_digest pins.",
       "type": "array", "maxItems": 0
     },
+    "environment": {
+      "description": "〈定義：核心資料物件與相依紀錄〉 EnvironmentProfile summary for this run (TK-SCP-001, TK-ENV-007, TK-EVD-005): the environment mode, the digest of the full profile, any versions outside the support matrix, and the known differences from E2 or production.",
+      "type": "object",
+      "required": ["mode", "profile_digest", "unsupported", "known_differences"],
+      "additionalProperties": false,
+      "properties": {
+        "mode": {"enum": ["E0", "E1", "E2"]},
+        "profile_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "unsupported": {"type": "array", "items": {"$ref": "#/$defs/text"}},
+        "known_differences": {"type": "array", "items": {"$ref": "#/$defs/text"}}
+      }
+    },
     "confirmation_list": {
       "description": "〈定義：確認清單〉: the list this run used or handed over, in the control zone. digest is the file as it is after the run: a list the run generated or updated (updated true) needs the owner's review and a new ScanManifest reference.",
       "type": "object",

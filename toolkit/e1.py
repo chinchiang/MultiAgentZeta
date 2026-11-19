@@ -216,12 +216,17 @@ def _project_config(project_dir):
     return tomllib.loads((Path(project_dir) / 'supabase' / 'config.toml').read_text(encoding='utf-8'))
 
 
-def _start(env):
-    si = env.recipe['service_init']
-    found = sorted(p.name for p in (env.project_dir / 'supabase' / 'migrations').glob('*.sql'))
+def _check_migrations(project_dir, recipe):
+    """〈定義：建置配方最低內容〉 服務初始化: verify migrations on disk match the recipe before starting the stack."""
+    si = recipe['service_init']
+    found = sorted(p.name for p in (project_dir / 'supabase' / 'migrations').glob('*.sql'))
     if found != sorted(si['migrations']):
         raise _Stop(Blocked('service_init', f'migrations on disk {found} differ from the recipe {sorted(si["migrations"])}; '
                                             'migrations are never skipped or added silently'))
+
+
+def _start(env):
+    si = env.recipe['service_init']
     _create_network(env)
     r = _run([env.cli, 'start', '--workdir', str(env.project_dir), '--network-id', env.network])
     if r.returncode:
@@ -468,6 +473,7 @@ def prepare(project_dir, matrix=None):
     env = None
     try:
         tools = _check_source(project_dir, recipe, matrix)
+        _check_migrations(project_dir, recipe)
         env = Environment(project_dir, _project_config(project_dir)['project_id'], recipe, tools['supabase-cli'])
         _start(env)
         _check_test_data(env)

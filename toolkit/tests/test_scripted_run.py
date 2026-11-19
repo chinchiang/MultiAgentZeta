@@ -302,5 +302,50 @@ class DuplicateTestIdsAreRefusedInPreflight(unittest.TestCase):
         self.assertEqual(by_id['PUBLIC-READ-other-tenant']['result'], 'passed')
 
 
+class EnvironmentSupportMatrixAndKnownDifferences(unittest.TestCase):
+    """TK-SCP-001, TK-ENV-007, TK-EVD-005, TK-EVD-008: EnvironmentProfile.known_differences and unsupported
+    enter the report and Markdown; an out-of-matrix version destroys the stack without sending requests,
+    marks runnable cases unsupported, blocks the run and drops whole_scope."""
+
+    def test_supported_environment_carries_known_differences_into_report_and_markdown(self):
+        diffs = ['service disabled in this stack: storage', *scripted.DEFAULT_DIFFERENCES]
+        prepare, lifecycle = scripted.prepare_with(scripted.World(attempt=(403, [])), known_differences=diffs)
+        res = scan.run(one_case('READ-other-tenant'), prepare=prepare)
+        rep = res.report
+        self.assertEqual(report.validate(rep), [])
+        self.assertEqual(rep['status'], 'completed')
+        self.assertEqual(rep['coverage']['claim'], 'whole_scope')
+        self.assertEqual((rep['environment']['unsupported'], rep['environment']['known_differences']), ([], diffs))
+        self.assertEqual(lifecycle.calls, ['destroy'])
+        self.assertIn('service disabled in this stack: storage', res.markdown)
+
+    def test_unsupported_environment_version_destroys_stack_without_requests_and_discloses_gap(self):
+        bad_ver = 'service rest public.ecr.aws/supabase/postgrest:v0.0.0@sha256:0 (matrix v16.5)'
+        m = cases(('DELETE-other-tenant', 'BLOCKED-DELETE', {}), ('READ-other-tenant', 'RUNNABLE-READ', {}))
+        m['authorization'] = authorized(SAMPLES / 'vulnerable', {**AUTHORIZATION, 'extra_approvals': []})
+        world = scripted.World(attempt=(200, [{'title': 'MARK-A-ALICE-PRIVATE', 'body': 'leaked'}]))
+        prepare, lifecycle = scripted.prepare_with(world, unsupported=[bad_ver])
+        res = scan.run(m, prepare=prepare)
+        rep = res.report
+        self.assertEqual(report.validate(rep), [])
+        self.assertEqual((world.http_calls, world.exec_calls, lifecycle.calls), ([], [], ['destroy']))
+        self.assertEqual(rep['status'], 'blocked')
+        self.assertIn(bad_ver, rep['status_reason'])
+        dynamic = next(s for s in rep['stages'] if s['stage'] == 'dynamic_execution')
+        self.assertEqual(dynamic['status'], 'blocked')
+        self.assertEqual(rep['environment']['unsupported'], [bad_ver])
+        by_id = {e['test_id']: e for e in rep['execution_records']}
+        self.assertEqual(by_id['BLOCKED-DELETE']['result'], 'blocked')  # keeps its preflight authorization block
+        self.assertEqual(by_id['RUNNABLE-READ']['result'], 'unsupported')
+        self.assertIn(bad_ver, by_id['RUNNABLE-READ']['error'])
+        cov = rep['coverage']
+        self.assertEqual(cov['claim'], 'known_scope_only')
+        self.assertIn(f'environment:{bad_ver}', {u['scope'] for u in cov['unsupported_items']})
+        # 2 scheduled tests (1 blocked, 1 unsupported) + 6 unsupported scopes (5 fixed + 1 environment) = 8
+        self.assertEqual((cov['denominator'], cov['blocked'], cov['unsupported'], cov['executed']), (8, 1, 7, 0))
+        self.assertIn('支援矩陣外版本', res.markdown)
+        self.assertIn(bad_ver, res.markdown)
+
+
 if __name__ == '__main__':
     unittest.main()

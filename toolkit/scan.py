@@ -830,6 +830,17 @@ def _preflight(state, now):
     return None
 
 
+def _environment_report(profile):
+    """The report's environment summary from an EnvironmentProfile (〈定義：核心資料物件與相依紀錄〉, TK-SCP-001,
+    TK-ENV-007, TK-EVD-005)."""
+    return {
+        'mode': profile['mode'],
+        'profile_digest': _digest(profile),
+        'unsupported': list(profile.get('unsupported') or []),
+        'known_differences': list(profile.get('known_differences') or []),
+    }
+
+
 def run(manifest, prepare=environment.prepare):
     """Run the manifest's tests against its project and return the report and its Markdown.
 
@@ -851,57 +862,70 @@ def run(manifest, prepare=environment.prepare):
     executions, findings = [], []
     stopped = None  # reason the remaining tests cannot run
     try:
-        for test, precheck in zip(manifest['tests'], state.prechecks):
-            started, evidence = _now(), []
-            if not precheck.runnable or stopped:
-                executions.append(_execution(state, test, started, *precheck.outcome(stopped)))
-                continue
-            denial = _case_kind(test) == item_rule.DENIAL
-            undo = None
-            try:
-                # Inside the case's handling: a failed injection is that case's error, not the run's (TK-RUN-001).
-                undo = ops.inject(test.get('fault'), test['actor_ref'],
-                                           test.get('fault_api_key') or test.get('api_key', 'anon-jwt'), _timeout(test))
-                _check_api_keys(ops, test, denial)
-                if denial:
-                    result, checks = _denial_case(ops, test, evidence)
-                else:
-                    result, checks = _allowed_case(ops, test, evidence)
-                error = None
-            except observer.ObservationFailed as e:
-                result, checks, error = 'blocked', None, f'observation failed: {e}'
-            except environment.RequestTimeout as e:
-                result, checks, error = 'error', None, f'timeout: {e}'
-            except environment.RequestFailed as e:
-                result, checks, error = 'error', None, f'request failed: {e}'
-            except environment.ApiKeyUnavailable as e:
-                result, checks, error = 'blocked', None, f'API key unavailable: {e}'
-            finally:
-                if undo:
-                    undo()
-            ex = _execution(state, test, started, result, error,
-                            approval_id=precheck.approval_id)  # it ran under this approval
-            if test.get('fault'):
-                ex['fault'] = test['fault']
-            ex['case_kind'] = _case_kind(test)
-            if checks is not None:
-                ex['checks'] = checks
-            ex['evidence'] = [{'id': f'{ex["id"]}-ev{i + 1}', **ev} for i, ev in enumerate(evidence)]
-            executions.append(ex)
-            if result == 'failed' and denial:  # a failed allowed case is a broken permitted access, not a leak
-                findings.append(state.records.new('finding', fingerprint=_fingerprint(test),
-                                                  fingerprint_version=FINGERPRINT_VERSION,
-                                                  requirement_id=test['requirement_id'],
-                                                  requirement_version=_item_version(state.listed, test),
-                                                  root_cause='object-ownership-not-enforced',
-                                                  status=item_rule.finding_cap(state.listed.item(test)),
-                                                  evidence_type='dynamic', execution_record_ids=[ex['id']]))
-            if denial and DENIAL_TEMPLATES[test['template_id']]['writes']:
-                reset = ops.reset()
-                if reset:
-                    stopped = f'environment reset failed after {test["test_id"]}: {reset.reason}'
+        env_report = _environment_report(prepared.profile)
+        if not env_report['unsupported']:
+            for test, precheck in zip(manifest['tests'], state.prechecks):
+                started, evidence = _now(), []
+                if not precheck.runnable or stopped:
+                    executions.append(_execution(state, test, started, *precheck.outcome(stopped)))
+                    continue
+                denial = _case_kind(test) == item_rule.DENIAL
+                undo = None
+                try:
+                    # Inside the case's handling: a failed injection is that case's error, not the run's (TK-RUN-001).
+                    undo = ops.inject(test.get('fault'), test['actor_ref'],
+                                               test.get('fault_api_key') or test.get('api_key', 'anon-jwt'), _timeout(test))
+                    _check_api_keys(ops, test, denial)
+                    if denial:
+                        result, checks = _denial_case(ops, test, evidence)
+                    else:
+                        result, checks = _allowed_case(ops, test, evidence)
+                    error = None
+                except observer.ObservationFailed as e:
+                    result, checks, error = 'blocked', None, f'observation failed: {e}'
+                except environment.RequestTimeout as e:
+                    result, checks, error = 'error', None, f'timeout: {e}'
+                except environment.RequestFailed as e:
+                    result, checks, error = 'error', None, f'request failed: {e}'
+                except environment.ApiKeyUnavailable as e:
+                    result, checks, error = 'blocked', None, f'API key unavailable: {e}'
+                finally:
+                    if undo:
+                        undo()
+                ex = _execution(state, test, started, result, error,
+                                approval_id=precheck.approval_id)  # it ran under this approval
+                if test.get('fault'):
+                    ex['fault'] = test['fault']
+                ex['case_kind'] = _case_kind(test)
+                if checks is not None:
+                    ex['checks'] = checks
+                ex['evidence'] = [{'id': f'{ex["id"]}-ev{i + 1}', **ev} for i, ev in enumerate(evidence)]
+                executions.append(ex)
+                if result == 'failed' and denial:  # a failed allowed case is a broken permitted access, not a leak
+                    findings.append(state.records.new('finding', fingerprint=_fingerprint(test),
+                                                      fingerprint_version=FINGERPRINT_VERSION,
+                                                      requirement_id=test['requirement_id'],
+                                                      requirement_version=_item_version(state.listed, test),
+                                                      root_cause='object-ownership-not-enforced',
+                                                      status=item_rule.finding_cap(state.listed.item(test)),
+                                                      evidence_type='dynamic', execution_record_ids=[ex['id']]))
+                if denial and DENIAL_TEMPLATES[test['template_id']]['writes']:
+                    reset = ops.reset()
+                    if reset:
+                        stopped = f'environment reset failed after {test["test_id"]}: {reset.reason}'
     finally:
         ops.destroy()
+    if env_report['unsupported']:
+        reason = 'environment outside support matrix (TK-SCP-001): ' + '; '.join(env_report['unsupported'])
+        state.gaps = state.gaps + [{'scope': f'environment:{u}', 'reason': 'version outside support matrix (TK-SCP-001)'}
+                                   for u in dict.fromkeys(env_report['unsupported'])]
+        now = _now()
+        executions = [_execution(state, t, now, *(('unsupported', reason) if p.runnable else (p.result, p.reason)))
+                      for t, p in zip(manifest['tests'], state.prechecks)]
+        return _finish(state, executions, [], status='blocked', reason=reason,
+                       stages=_stages(preflight={'status': 'completed'},
+                                      dynamic_execution={'status': 'blocked', 'reason': reason}),
+                       environment=env_report, matrix=_authorization_matrix(prepared))
     definite = all(e['result'] in ('passed', 'failed') for e in executions)
     dynamic = ({'status': 'failed', 'reason': f'stopped, environment isolated: {stopped}'} if stopped
                else {'status': 'completed'})
@@ -909,7 +933,7 @@ def run(manifest, prepare=environment.prepare):
                    status='completed' if definite else 'partial',
                    reason='' if definite else 'some tests have no definite result',
                    stages=_stages(preflight={'status': 'completed'}, dynamic_execution=dynamic),
-                   environment={'mode': prepared.profile['mode'], 'profile_digest': _digest(prepared.profile)},
+                   environment=env_report,
                    matrix=_authorization_matrix(prepared))
 
 
@@ -1019,7 +1043,8 @@ def _cases(state, executions, inv):
 def _finish(state, executions, findings, status, reason, stages, environment, matrix):
     manifest, records, listed = state.manifest, state.records, state.listed
     inv = _inventory(state, stages)
-    numbers = coverage.coverage(inv, _cases(state, executions, inv))
+    env_supported = not (environment and environment['unsupported'])
+    numbers = coverage.coverage(inv, _cases(state, executions, inv), environment_supported=env_supported)
     read = not any(u['file'] == '(project)' for u in inv['unresolved'])
     cov_record = records.new(
         'coverage', inventory_source=(f"{inv['rule']} extraction of supabase/migrations/*.sql" if read

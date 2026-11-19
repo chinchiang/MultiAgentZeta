@@ -10,7 +10,9 @@
   "review_record": {"path": "/control/review-record.json", "digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555"},
   "review_summary": {"pending": 0, "overdue": 0, "approved": 1, "rejected": 0, "evidence_pending": 0},
   "manifest": {"id": "manifest-object-authz-vulnerable", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"},
-  "environment": {"mode": "E1", "profile_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"},
+  "environment": {"mode": "E1", "profile_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+                  "unsupported": [],
+                  "known_differences": ["E1 local stack: no cloud network, real third-party identity or hosted-only limits; results here do not imply E2 or production (TK-ENV-007)"]},
   "stages": [
     {"stage": "preflight", "status": "completed"},
     {"stage": "static_analysis", "status": "not_run", "reason": "not implemented in this toolkit version"},

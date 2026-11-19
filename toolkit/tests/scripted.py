@@ -110,10 +110,19 @@ def handles(api_keys=None):
         api_keys={'anon-jwt': 'anon-key', 'publishable': 'sb_publishable_key'} if api_keys is None else api_keys)
 
 
-def prepare_with(world, api_keys=None, reset_fails=False):
+DEFAULT_DIFFERENCES = (
+    'E1 local stack: no cloud network, real third-party identity or hosted-only limits; '
+    'results here do not imply E2 or production (TK-ENV-007)',
+)
+
+
+def prepare_with(world, api_keys=None, reset_fails=False, unsupported=(), known_differences=DEFAULT_DIFFERENCES):
     """A `prepare` for scan.run(): a ready stack whose transport is the world. Returns it and its lifecycle."""
     lifecycle = Lifecycle(reset_fails)
-    profile = {'mode': 'E1', 'identities': {n: {'login': 'ok', 'path': 'scripted'} for n in [*EMAILS, 'anonymous']}}
+    profile = {'mode': 'E1',
+               'identities': {n: {'login': 'ok', 'path': 'scripted'} for n in [*EMAILS, 'anonymous']},
+               'unsupported': list(unsupported),
+               'known_differences': list(known_differences)}
 
     def prepare(project_dir):
         env = environment.Operations(handles(api_keys), Transport(world), lifecycle)

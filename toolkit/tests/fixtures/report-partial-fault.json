@@ -15,7 +15,9 @@
   },
   "environment": {
     "mode": "E1",
-    "profile_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+    "profile_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    "unsupported": [],
+    "known_differences": ["E1 local stack: no cloud network, real third-party identity or hosted-only limits; results here do not imply E2 or production (TK-ENV-007)"]
   },
   "stages": [
     {

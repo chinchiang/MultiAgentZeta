@@ -55,7 +55,41 @@ def _cross_record_problems(doc):
         if not any(results.get(x) == 'failed' for x in ids):
             problems.append(f'findings/{i}: a confirmed finding needs a failed execution record; '
                             f'execution_record_ids {ids} do not include one')
-    return problems + _requirement_problems(doc) + _approval_problems(doc) + _review_problems(doc) + _coverage_problems(doc)
+    return (problems + _requirement_problems(doc) + _approval_problems(doc)
+            + _review_problems(doc) + _environment_problems(doc) + _coverage_problems(doc))
+
+
+def _environment_problems(doc):
+    """Versions outside the support matrix (TK-SCP-001, TK-ENV-007, TK-EVD-008, TK-EVD-009, 〈定義：工作階段〉): when
+    environment.unsupported is non-empty, dynamic_execution and overall status must be blocked, no test can run
+    beyond blocked/unsupported, coverage cannot claim whole_scope, and every unsupported environment entry must
+    appear in coverage.unsupported_items."""
+    env = doc.get('environment') if isinstance(doc, dict) else None
+    unsupported = env.get('unsupported') if isinstance(env, dict) else None
+    if not (isinstance(unsupported, list) and unsupported):
+        return []
+    problems = []
+    if doc.get('status') != 'blocked':
+        problems.append(f"environment: status must be 'blocked' when environment.unsupported is non-empty, "
+                        f"not {doc.get('status')!r} (TK-SCP-001, TK-ENV-007)")
+    for s in _list(doc, 'stages'):
+        if isinstance(s, dict) and s.get('stage') == 'dynamic_execution' and s.get('status') != 'blocked':
+            problems.append(f"stages: dynamic_execution must be 'blocked' when environment.unsupported is non-empty, "
+                            f"not {s.get('status')!r} (TK-SCP-001, 〈定義：工作階段〉)")
+    for i, e in enumerate(_list(doc, 'execution_records')):
+        if isinstance(e, dict) and e.get('result') not in ('blocked', 'unsupported'):
+            problems.append(f"execution_records/{i}: result cannot be {e.get('result')!r} when environment.unsupported "
+                            f"is non-empty; no test runs against an unverified environment (TK-SCP-001, TK-ENV-007)")
+    cov = doc.get('coverage') if isinstance(doc.get('coverage'), dict) else {}
+    if cov.get('claim') == 'whole_scope':
+        problems.append("coverage: claim cannot be 'whole_scope' when environment.unsupported is non-empty "
+                        "(TK-SCP-001, TK-EVD-009)")
+    scopes = {i.get('scope') for i in _list(cov, 'unsupported_items') if isinstance(i, dict)}
+    problems += [f"coverage: unsupported_items lacks 'environment:{u}' from environment.unsupported "
+                 f"(TK-SCP-001, TK-EVD-008)"
+                 for u in dict.fromkeys(u for u in unsupported if isinstance(u, str))
+                 if f'environment:{u}' not in scopes]
+    return problems
 
 
 COVERAGE_CLASSES = ('executed', 'blocked', 'errors', 'untested', 'cancelled', 'unsupported')
@@ -303,11 +337,34 @@ def render_review_issue(finding, doc, option_of_label):
     return title, body
 
 
+def _inline(text):
+    """Single-line escaped text safe in Markdown (no line break and no raw HTML, TK-EVD-002)."""
+    return ' '.join(str(text).split()).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
+
 def _cell(text):
     """Free text (a reviewer's comment) inside one Markdown table cell: no line break, no cell border, and no
     HTML, which a renderer would act on (a comment opener hides the rest of the report)."""
-    text = ' '.join(str(text).split()).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-    return text.replace('|', '\\|')
+    return _inline(text).replace('|', '\\|')
+
+
+def _environment_section(env):
+    """〈定義：核心資料物件與相依紀錄〉 EnvironmentProfile: support-matrix warnings (TK-SCP-001) and known
+    differences from E2 or production (TK-ENV-007, TK-EVD-005)."""
+    lines = ['', '## 測試環境與差異', '']
+    if not env:
+        lines.append('- **測試環境**：本次執行未建立測試環境，尚無環境差異紀錄')
+        return lines
+    lines.append(f'- **環境模式**：`{env["mode"]}`（`{env["profile_digest"]}`）')
+    if env['unsupported']:
+        lines.append('- **支援矩陣外版本（不支援，TK-SCP-001）**：')
+        lines += [f'  - {_inline(u)}' for u in env['unsupported']]
+    if env['known_differences']:
+        lines.append('- **環境差異（TK-ENV-007、TK-EVD-005）**：')
+        lines += [f'  - {_inline(d)}' for d in env['known_differences']]
+    else:
+        lines.append('- **環境差異**：（無宣告差異）')
+    return lines
 
 
 def _waiting_first(finding):
@@ -363,7 +420,8 @@ def _coverage_lines(c):
              f'- 資料表與政策：已盤點 {tp["inventoried"]}、已啟用 RLS {tp["rls_enabled"]}、尚無政策 {tp["without_policy"]}、'
              f'未解析 {tp["unresolved"]}、已判定 {tp["judged"]}']
     lines += [f'  - 未解析：`{u["file"]}{":" + str(u["line"]) if u["line"] else ""}`（{u["reason"]}）' for u in inv['unresolved']]
-    lines += [f'  - 不支援：`{u["scope"]}`（{u["reason"]}{"；需補充觀測" if u.get("needs_supplement") else ""}）'
+    lines += [f'  - 不支援：`{_inline(u["scope"])}`（{_inline(u["reason"])}'
+              f'{"；需補充觀測" if u.get("needs_supplement") else ""}）'
               for u in c['unsupported_items']]
     lines += [f'  - 排除：`{e["ref"]}`（{e["reason"]}；確認者 {e["confirmed_by"]}、版本 {e["version"]}）' for e in c['excluded']]
     lines += [f'  - 被拒絕的排除：`{r["ref"]}`（{r["problem"]}）' for r in c['rejected_exclusions']]
@@ -379,7 +437,7 @@ def render_markdown(doc):
     commit_text = f'`{doc["commit"]}`' if doc['commit'] is not None else '（未提供）'
     lines = [f'# 執行報告 `{doc["run_id"]}`', '',
              f'- **整體執行狀態**：{RUN_LABELS[doc["status"]]}（`{doc["status"]}`）'
-             + (f'；原因：{doc["status_reason"]}' if doc.get('status_reason') else ''),
+             + (f'；原因：{_inline(doc["status_reason"])}' if doc.get('status_reason') else ''),
              f'- **受測提交**：{commit_text}',
              f'- **報告建立時間**：{doc["created_at"]}']
     if doc.get('environment'):
@@ -404,6 +462,8 @@ def render_markdown(doc):
 
     if doc.get('authorization'):
         lines += _authorization_section(doc)
+
+    lines += _environment_section(doc.get('environment'))
 
     if doc.get('authorization_matrix'):
         lines += ['', '## 授權矩陣中的身分', '', '| 身分 | 傳遞方式 | 路徑 |', '| :--- | :--- | :--- |']

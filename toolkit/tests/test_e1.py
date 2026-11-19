@@ -510,3 +510,52 @@ class ResetWithoutRecovery(unittest.TestCase):
         result = e1.reset(env)
         self.assertEqual((type(result), result.step), (e1.Blocked, 'snapshot_reset'))
         self.assertIn('no reset', result.reason)
+
+
+class SourceBuildFastChecks(unittest.TestCase):
+    """TK-SCP-001, TK-SBX-008, 〈定義：建置配方最低內容〉 來源與建置: tools, binary digest, lockfiles and
+    build_commands are checked through e1.prepare() before any container or network is started."""
+
+    def setUp(self):
+        import hashlib
+        from unittest import mock
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.bin_path = Path(self.tmp.name) / 'fake-supabase'
+        self.bin_path.write_bytes(b'#!/bin/sh\necho 2.122.0\n')
+        self.bin_sha = hashlib.sha256(self.bin_path.read_bytes()).hexdigest()
+        self.matrix = {'tools': {'supabase-cli': {'version': '2.122.0', 'binary_sha256': self.bin_sha}}}
+        patcher = mock.patch.dict(os.environ, {'MAZ_SUPABASE_BIN': str(self.bin_path)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def prepare_copy(self, recipe_change=None, matrix=None):
+        d = tempfile.mkdtemp(dir=self.tmp.name)
+        src = failing_copy(d, recipe_change=recipe_change)
+        return e1.prepare(src, matrix=self.matrix if matrix is None else matrix)
+
+    def test_tool_not_in_support_matrix_is_blocked_at_source_build(self):
+        res = self.prepare_copy(lambda r: r['source_build'].update(tools=['unlisted-cli']))
+        self.assertEqual((type(res), res.step), (e1.Blocked, 'source_build'))
+        self.assertIn("'unlisted-cli' is not in the support matrix", res.reason)
+
+    def test_tool_binary_digest_mismatch_is_blocked_at_source_build(self):
+        wrong_matrix = {'tools': {'supabase-cli': {'version': '2.122.0', 'binary_sha256': '0' * 64}}}
+        res = self.prepare_copy(matrix=wrong_matrix)
+        self.assertEqual((type(res), res.step), (e1.Blocked, 'source_build'))
+        self.assertIn('does not match the support matrix digest', res.reason)
+
+    def test_missing_lockfile_is_blocked_at_source_build(self):
+        res = self.prepare_copy(lambda r: r['source_build'].update(lockfiles=['package-lock.json']))
+        self.assertEqual((type(res), res.step), (e1.Blocked, 'source_build'))
+        self.assertIn("lockfiles not found: ['package-lock.json']", res.reason)
+
+    def test_non_empty_build_commands_are_blocked_until_sandbox_exists(self):
+        res = self.prepare_copy(lambda r: r['source_build'].update(build_commands=['npm run build']))
+        self.assertEqual((type(res), res.step), (e1.Blocked, 'source_build'))
+        self.assertIn('TK-SBX-008', res.reason)
+
+    def test_valid_source_build_passes_and_advances_to_service_init(self):
+        # Removing a migration from the recipe stops at service_init before creating any Docker network.
+        res = self.prepare_copy(lambda r: r['service_init'].update(migrations=[]))
+        self.assertEqual((type(res), res.step), (e1.Blocked, 'service_init'))

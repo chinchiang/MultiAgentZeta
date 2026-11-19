@@ -36,14 +36,16 @@ def _state(denominator, any_excluded):
     return 'measured' if denominator else ('not_applicable' if any_excluded else 'insufficient_data')
 
 
-def coverage(inventory, cases, exclusions=()):
+def coverage(inventory, cases, exclusions=(), *, environment_supported=True):
     """The coverage record's numbers for the scheduled cases against the inventory.
 
     A case is {'id', 'result', 'valid', 'module', 'covers'}: its result (passed, failed, blocked, error,
-    untested or cancelled), whether its precondition and control held, the framework module whose judge it
-    needs, and the inventory items it exercises. The denominator is the scheduled cases plus the unsupported
-    scopes of the inventory; a case whose module is not loaded is counted as unsupported and never as a valid
-    judgement, so removing a module cannot raise the rate (TK-SCP-006).
+    untested, cancelled or unsupported), whether its precondition and control held, the framework module whose
+    judge it needs, and the inventory items it exercises. The denominator is the scheduled cases plus the
+    unsupported scopes of the inventory; a case whose module is not loaded is counted as unsupported and never
+    as a valid judgement, so removing a module cannot raise the rate (TK-SCP-006). When the runtime environment
+    has versions outside the support matrix (`environment_supported` false, TK-SCP-001), `claim` stays
+    'known_scope_only'.
     """
     extract.require_codefacts(inventory['facts'])
     unknown = [c for c in cases if c['result'] not in RESULTS]
@@ -77,7 +79,8 @@ def coverage(inventory, cases, exclusions=()):
         'states': {'effective_judgement_rate': _state(denominator, bool(accepted)),
                    'tool_support_rate': _state(denominator, bool(accepted)),
                    'required_test_completion_rate': _state(len(cases), bool(accepted))},
-        'claim': 'whole_scope' if inventory['completeness'] == 'complete' else 'known_scope_only',
+        'claim': ('whole_scope' if inventory['completeness'] == 'complete' and environment_supported
+                  else 'known_scope_only'),
         'tables_and_policies': _tables_and_policies(inventory, valid),
         'excluded': accepted,
         'rejected_exclusions': refused,

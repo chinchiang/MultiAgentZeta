@@ -1098,3 +1098,103 @@ class Stages(unittest.TestCase):
                 doc = valid_report()
                 doc['stages'][4] = {'stage': 'dynamic_execution', 'status': status}
                 self.assertNotEqual(report.validate(doc), [])
+
+
+class EnvironmentInReport(unittest.TestCase):
+    """TK-SCP-001, TK-ENV-007, TK-EVD-005, TK-EVD-008: environment carries unsupported and known_differences,
+    is rendered in Markdown, and cannot claim completed/partial, run tests, or claim whole_scope when versions are
+    outside the support matrix."""
+
+    def unsupported_report(self, item='docker-engine 99.0.0 (matrix 29.1.3)'):
+        doc = valid_report()
+        reason = f'environment outside support matrix (TK-SCP-001): {item}'
+        doc['status'] = 'blocked'
+        doc['status_reason'] = reason
+        doc['stages'][4] = {'stage': 'dynamic_execution', 'status': 'blocked', 'reason': reason}
+        doc['environment']['unsupported'] = [item]
+        doc['findings'] = []
+        doc['review_summary'] = dict.fromkeys(doc['review_summary'], 0)
+        for e in doc['execution_records']:
+            e['result'] = 'unsupported'
+            e['error'] = reason
+            e['evidence'] = []
+            e.pop('checks', None)
+            e.pop('approval_id', None)
+        cov = doc['coverage']
+        cov['unsupported_items'].append({'scope': f'environment:{item}',
+                                         'reason': 'version outside support matrix (TK-SCP-001)'})
+        cov['denominator'] = len(doc['execution_records']) + len(cov['unsupported_items'])
+        cov['executed'] = 0
+        cov['valid_judgements'] = 0
+        cov['blocked'] = 0
+        cov['errors'] = 0
+        cov['untested'] = 0
+        cov['cancelled'] = 0
+        cov['unsupported'] = cov['denominator']
+        cov['effective_judgement_rate'] = 0.0
+        cov['tool_support_rate'] = 0.0
+        cov['required_test_completion_rate'] = 0.0
+        cov['tables_and_policies']['judged'] = 0
+        cov['claim'] = 'known_scope_only'
+        return doc
+
+    def test_environment_schema_requires_all_four_fields_and_forbids_extras(self):
+        for missing in ('mode', 'profile_digest', 'unsupported', 'known_differences'):
+            with self.subTest(missing=missing):
+                doc = valid_report()
+                del doc['environment'][missing]
+                self.assertTrue(any('environment' in p for p in report.validate(doc)))
+        doc = valid_report()
+        doc['environment']['observer_password'] = 'secret'
+        self.assertTrue(any('observer_password' in p for p in report.validate(doc)))
+
+    def test_unsupported_environment_enforces_blocked_stage_unrun_tests_known_scope_and_coverage_item(self):
+        item = 'docker-engine 99.0.0 (matrix 29.1.3)'
+        base = self.unsupported_report(item)
+        self.assertEqual(report.validate(base), [])
+
+        for bad_status in ('completed', 'partial'):
+            with self.subTest(status=bad_status):
+                wrong = copy.deepcopy(base)
+                wrong['status'] = bad_status
+                self.assertTrue(any("status must be 'blocked'" in p for p in report.validate(wrong)))
+
+        bad_stage = copy.deepcopy(base)
+        bad_stage['stages'][4] = {'stage': 'dynamic_execution', 'status': 'completed'}
+        self.assertTrue(any("dynamic_execution must be 'blocked'" in p for p in report.validate(bad_stage)))
+
+        ran_test = copy.deepcopy(base)
+        ran_test['execution_records'][0]['result'] = 'passed'
+        ran_test['coverage']['executed'] = 1
+        ran_test['coverage']['valid_judgements'] = 1
+        ran_test['coverage']['unsupported'] -= 1
+        ran_test['coverage']['effective_judgement_rate'] = 1 / ran_test['coverage']['denominator']
+        ran_test['coverage']['tool_support_rate'] = 1 / ran_test['coverage']['denominator']
+        ran_test['coverage']['required_test_completion_rate'] = 1 / len(ran_test['execution_records'])
+        self.assertTrue(any('no test runs against an unverified environment' in p for p in report.validate(ran_test)))
+
+        whole = copy.deepcopy(base)
+        whole['coverage']['claim'] = 'whole_scope'
+        self.assertTrue(any('whole_scope' in p for p in report.validate(whole)))
+
+        dropped = copy.deepcopy(base)
+        dropped['coverage']['unsupported_items'].pop()
+        dropped['coverage']['denominator'] -= 1
+        dropped['coverage']['unsupported'] -= 1
+        self.assertTrue(any(f'environment:{item}' in p for p in report.validate(dropped)))
+
+    def test_markdown_renders_known_differences_missing_environment_and_unsupported_versions_safely(self):
+        md = report.render_markdown(valid_report())
+        self.assertIn('## 測試環境與差異', md)
+        self.assertIn('E1 local stack', md)
+        self.assertNotIn('支援矩陣外版本', md)
+
+        no_env = report.render_markdown(fixture('report-blocked-no-commit'))
+        self.assertIn('## 測試環境與差異', no_env)
+        self.assertIn('未建立測試環境', no_env)
+
+        item = 'service rest img:0 <!-- hidden'
+        rendered = report.render_markdown(self.unsupported_report(item))
+        self.assertIn('支援矩陣外版本', rendered)
+        self.assertNotIn('<!--', rendered)
+        self.assertIn('## 覆蓋', rendered)
