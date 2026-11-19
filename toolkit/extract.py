@@ -273,18 +273,19 @@ def _is_opt_str(v):
     return v is None or isinstance(v, str)
 
 
-POLICY_COMMANDS = ('select', 'insert', 'update', 'delete', 'all')
+POLICY_COMMANDS = ('select', 'insert', 'update', 'delete', 'all')  # 〈定義：擷取結果〉
+_BOOL_CHECK = (lambda v: isinstance(v, bool), 'a boolean')
+_TABLE_CHECK = (_is_qualified_table, 'a schema.table string')
 
 # What an extracted fact must carry, by kind, and nothing else (〈定義：擷取結果〉, TK-DAT-007). A model's
 # confidence or rationale, or a reference to an execution or an observation, are not extracted and have no place here.
 _FACT_CHECKS = {
-    'table': {'name': (_is_qualified_table, 'a schema.table string')},
-    'rls': {'table': (_is_qualified_table, 'a schema.table string'),
-            'enabled': (lambda v: isinstance(v, bool), 'a boolean')},
+    'table': {'name': _TABLE_CHECK},
+    'rls': {'table': _TABLE_CHECK, 'enabled': _BOOL_CHECK},
     'policy': {
         'name': (_is_nonempty_str, 'a non-empty string'),
-        'table': (_is_qualified_table, 'a schema.table string'),
-        'permissive': (lambda v: isinstance(v, bool), 'a boolean'),
+        'table': _TABLE_CHECK,
+        'permissive': _BOOL_CHECK,
         'command': (lambda v: v in POLICY_COMMANDS, f'one of {POLICY_COMMANDS}'),
         'roles': (lambda v: isinstance(v, list) and bool(v) and all(_is_nonempty_str(r) for r in v),
                   'a non-empty list of role names'),

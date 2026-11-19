@@ -21,7 +21,7 @@ def review_tasks(inventory):
                for i in inventoried if i['scope'] == 'rls-table'])
 
 
-TASK_KINDS = ('entry', 'database')
+TASK_KINDS = ('entry', 'database')  # 〈定義：審查任務的單位〉
 
 
 def slice_of(task, inventory):
