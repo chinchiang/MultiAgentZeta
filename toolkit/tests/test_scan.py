@@ -633,6 +633,23 @@ class BrokenReplies(unittest.TestCase):
         with self.assertRaises(environment.RequestFailed):
             self.request_to(url)
 
+    def test_non_json_utf8_reply_is_kept_as_unparsed_body_distinct_from_empty_and_json(self):
+        empty_url = one_reply_server(b'HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n')
+        self.assertEqual(self.request_to(empty_url), (204, None))
+
+        json_str_url = one_reply_server(
+            b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 8\r\n\r\n"quoted"')
+        self.assertEqual(self.request_to(json_str_url), (200, 'quoted'))
+
+        plain = b'Forbidden: MARK-A-ALICE-PRIVATE'
+        plain_url = one_reply_server(
+            f'HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nContent-Length: {len(plain)}\r\n\r\n'.encode()
+            + plain)
+        self.assertEqual(self.request_to(plain_url), (403, environment.UnparsedBody('Forbidden: MARK-A-ALICE-PRIVATE')))
+
+        blank_url = one_reply_server(b'HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\n  ')
+        self.assertEqual(self.request_to(blank_url), (200, environment.UnparsedBody('  ')))
+
 
 class MissingApiKeys(unittest.TestCase):
     """TK-DYN-004, TK-IDN-003: a request whose API key format the environment does not provide is never sent
@@ -2017,3 +2034,103 @@ class NoRecoveryMixedPlanEnv(unittest.TestCase):
         self.assertEqual(report.validate(rep), [])
         self.assertEqual(results(rep), {'READ-same-tenant': 'passed', 'UPDATE-same-tenant': 'blocked'})
         self.assertEqual(rep['status'], 'partial')
+
+
+DISCLOSURE_PROBE_SQL = """
+alter table public.documents rename to documents_store;
+
+create function public.masked_title(raw_title text) returns text
+language plpgsql volatile as $$
+declare
+  caller text := nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub';
+begin
+  if caller = 'a0000000-0000-4000-8000-000000000b0b' and raw_title = 'MARK-A-ALICE-PRIVATE' then
+    if current_setting('app.bob_filtered', true) = '1' then
+      return 'REDACTED';
+    end if;
+    perform set_config('app.bob_filtered', '1', true);
+  end if;
+  return raw_title;
+end $$;
+
+create view public.documents with (security_invoker = true) as
+  select id, tenant_id, owner_id, public.masked_title(title) as title, body, shared
+  from public.documents_store;
+
+grant select, insert, update, delete on public.documents to authenticated;
+
+create function public.documents_write_probe() returns trigger
+language plpgsql as $$
+declare
+  caller text := nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub';
+  raw_title text;
+begin
+  if tg_op = 'INSERT' then
+    insert into public.documents_store (id, tenant_id, owner_id, title, body, shared)
+    values (coalesce(new.id, gen_random_uuid()), new.tenant_id, new.owner_id, new.title, new.body,
+            coalesce(new.shared, false))
+    returning * into new;
+    return new;
+  end if;
+  if old.owner_id::text is distinct from caller then
+    select s.title into raw_title from public.documents_store s where s.id = old.id;
+    raise exception 'denied update on %', raw_title using errcode = '42501';
+  end if;
+  update public.documents_store set body = new.body where id = old.id;
+  return new;
+end $$;
+
+create trigger tr_documents_write_probe
+  instead of insert or update on public.documents
+  for each row execute function public.documents_write_probe();
+"""
+
+
+@needs_env
+class NonArrayAndNonTargetDisclosureEnv(unittest.TestCase):
+    """TK-DYN-001 item 3, TK-DYN-002, TK-IDN-008 (CODING_STANDARDS.md rule 12): on a real E1 stack with the real
+    observer, a 200 read returning a row whose title was masked away from the marker, and a 403 PostgREST JSON
+    error object leaking the target marker without mutating state, are both judged failed with findings."""
+
+    @classmethod
+    def setUpClass(cls):
+        from toolkit.tests.test_e1 import failing_copy
+        cls._tmp = tempfile.TemporaryDirectory()
+        src = failing_copy(
+            cls._tmp.name, version='vulnerable',
+            file_change=('supabase/migrations/20261031000002_document_policies.sql', DISCLOSURE_PROBE_SQL),
+            recipe_change=lambda r: r['observer'].update(select_on=['public.documents', 'public.documents_store']))
+        m = manifest('vulnerable')
+        m['target'] = {'project': str(src), 'source_digest': e1.source_digest(src)}
+        m['tests'] = [t for t in m['tests']
+                      if t['test_id'] in ('READ-same-tenant', 'READ-other-tenant', 'UPDATE-same-tenant')]
+        cls.report = scan.run(m).report
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def test_masked_row_read_and_403_json_error_marker_leak_both_fail_on_real_stack(self):
+        self.assertEqual(report.validate(self.report), [])
+        self.assertEqual(self.report['status'], 'completed')
+        by_id = {e['test_id']: e for e in self.report['execution_records']}
+
+        read_same = by_id['READ-same-tenant']
+        self.assertEqual(read_same['result'], 'failed')
+        self.assertFalse(read_same['checks']['no_disclosure_or_change'])
+
+        upd_same = by_id['UPDATE-same-tenant']
+        self.assertEqual(upd_same['result'], 'failed')
+        self.assertEqual(upd_same['checks'], {'resource_and_control': True, 'identity': True,
+                                              'no_disclosure_or_change': False, 'response_and_side_effects': True})
+        attempts = [ev for ev in upd_same['evidence']
+                    if ev['channel'] == 'actor' and ev['identity_ref'] == 'same_tenant_non_owner'
+                    and ev['request']['method'] == 'PATCH']
+        self.assertEqual([ev['response'] for ev in attempts], [{'status': 403, 'rows': None}])
+        before, after = [ev['observation'] for ev in upd_same['evidence'] if ev['channel'] == 'observer']
+        self.assertEqual((before['state_digest'], before['table_digest']),
+                         (after['state_digest'], after['table_digest']))
+
+        self.assertEqual(by_id['READ-other-tenant']['result'], 'passed')
+        self.assertEqual(len(self.report['findings']), 2)
+        self.assertNotIn('alice private note', json.dumps(self.report))

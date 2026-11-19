@@ -347,5 +347,72 @@ class EnvironmentSupportMatrixAndKnownDifferences(unittest.TestCase):
         self.assertIn(bad_ver, res.markdown)
 
 
+class DisclosureInNonTargetRowsAndNonArrayBodies(unittest.TestCase):
+    """TK-DYN-001 item 3, TK-DYN-002, TK-IDN-008: any non-empty row array on a read denial case, or any
+    response body (JSON list, JSON object, JSON string or non-JSON text) carrying the target marker under any
+    status code, fails no_disclosure_or_change and records a finding without storing raw body secrets."""
+
+    def test_read_denial_with_other_row_or_projected_row_without_title_fails_and_creates_finding(self):
+        for label, attempt in (
+            ('other-row', (200, [{'title': 'MARK-B-CAROL-PRIVATE', 'body': 'carol secret'}])),
+            ('no-title-column', (200, [{'body': 'projected secret without title'}])),
+            ('non-empty-list-on-403', (403, [{'id': 'd0000000-0000-4000-8000-0000000000b1'}])),
+        ):
+            with self.subTest(label):
+                rep, by_id, _ = run(one_case('READ-same-tenant'), scripted.World(attempt=attempt))
+                rec = by_id['READ-same-tenant']
+                self.assertEqual(rec['result'], 'failed')
+                self.assertFalse(rec['checks']['no_disclosure_or_change'])
+                self.assertEqual(len(rep['findings']), 1)
+                self.assertEqual(rep['findings'][0]['status'], 'confirmed')
+                self.assertNotIn('secret', str(rep))
+
+    def test_marker_in_json_object_array_or_plain_text_under_any_status_fails_and_creates_finding(self):
+        marker = 'MARK-A-ALICE-PRIVATE'
+        bodies = (
+            ('json-object', {'code': '42501', 'details': {'row': f'denied on {marker}', 'secret': 'RAW-SECRET-BODY'}}),
+            ('json-array-nested', [{'error': f'cannot read {marker}'}]),
+            ('plain-text', f'Forbidden: row {marker} RAW-SECRET-BODY\n'.encode()),
+        )
+        for status in (200, 401, 403, 404):
+            for kind, payload in bodies:
+                with self.subTest(status=status, body=kind):
+                    rep, by_id, _ = run(one_case('READ-same-tenant'), scripted.World(attempt=(status, payload)))
+                    rec = by_id['READ-same-tenant']
+                    self.assertEqual(rec['result'], 'failed')
+                    self.assertFalse(rec['checks']['no_disclosure_or_change'])
+                    self.assertEqual(len(rep['findings']), 1)
+                    self.assertEqual(rep['findings'][0]['status'], 'confirmed')
+                    self.assertNotIn('RAW-SECRET-BODY', str(rep))
+
+        # Write denial case leaking marker in a 403 plain-text error without mutating state also fails item 3.
+        rep, by_id, _ = run(one_case('UPDATE-same-tenant'),
+                            scripted.World(attempt=(403, f'denied update on {marker}'.encode()), mutates=False))
+        self.assertEqual(by_id['UPDATE-same-tenant']['result'], 'failed')
+        self.assertFalse(by_id['UPDATE-same-tenant']['checks']['no_disclosure_or_change'])
+        self.assertEqual(len(rep['findings']), 1)
+
+    def test_denial_bodies_without_marker_or_rows_do_not_falsely_report_disclosure(self):
+        for label, attempt in (
+            ('json-error-without-marker', (403, {'code': '42501', 'message': 'permission denied for table documents'})),
+            ('plain-text-without-marker', (403, b'Forbidden')),
+            ('empty-list-on-403', (403, [])),
+        ):
+            with self.subTest(label):
+                rep, by_id, _ = run(one_case('READ-same-tenant'), scripted.World(attempt=attempt))
+                rec = by_id['READ-same-tenant']
+                self.assertEqual(rec['result'], 'passed')
+                self.assertTrue(rec['checks']['no_disclosure_or_change'])
+                self.assertEqual(rep['findings'], [])
+
+        # On a pending S2 clause, a disclosure still fails the test while capping the finding at evidence_pending.
+        from toolkit.tests.test_scan import ACCEPTED, OWNER_ITEM, reviewed_list
+        m = one_case('READ-same-tenant')
+        m['confirmation_list'] = reviewed_list(SAMPLES / 'vulnerable', accepted=[i for i in ACCEPTED if i != OWNER_ITEM])
+        rep, by_id, _ = run(m, scripted.World(attempt=(403, b'leaked MARK-A-ALICE-PRIVATE')))
+        self.assertEqual(by_id['READ-same-tenant']['result'], 'failed')
+        self.assertEqual([f['status'] for f in rep['findings']], ['evidence_pending'])
+
+
 if __name__ == '__main__':
     unittest.main()

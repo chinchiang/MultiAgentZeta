@@ -17,12 +17,20 @@ answers from a test (tests/scripted.py). Tokens and the observer's password neve
 import json
 import secrets
 import socket
+from dataclasses import dataclass
 
 from toolkit import e1, observer
 from toolkit import transport as real_transport
 from toolkit.transport import RequestFailed, RequestTimeout  # raised by request(); named here for its callers
 
 FAULTS = ('session-revoked', 'observer-unavailable', 'observer-timeout', 'api-unreachable', 'api-key-missing')
+
+
+@dataclass(frozen=True)
+class UnparsedBody:
+    """Non-empty UTF-8 response body that is not valid JSON (TK-DYN-001, TK-DYN-002, TK-IDN-008, 〈定義：測試結果〉):
+    kept distinct from an empty body (None) and parsed JSON values so the judge can inspect it for disclosures."""
+    text: str
 
 
 class ApiKeyUnavailable(Exception):
@@ -77,12 +85,16 @@ class Operations:
         if identity in env.tokens:
             headers['Authorization'] = 'Bearer ' + env.tokens[identity]['access_token']
         status, raw = self._transport.http(method, env.api_url + path, headers, body, timeout)
-        try:
-            return status, json.loads(raw) if raw else None
-        except json.JSONDecodeError:
+        if not raw:
             return status, None
-        except UnicodeDecodeError as e:  # bytes json cannot even decode: no readable reply
+        try:
+            text = raw.decode('utf-8')
+        except UnicodeDecodeError as e:  # bytes that are not UTF-8 text: no readable reply
             raise RequestFailed(f'{method} {path}: response body is not text ({e.reason})') from e
+        try:
+            return status, json.loads(text)
+        except json.JSONDecodeError:
+            return status, UnparsedBody(text)
 
     def observe(self, marker):
         """Template document-row-state-v1 as the observer (observer.ObservationFailed when it cannot read)."""

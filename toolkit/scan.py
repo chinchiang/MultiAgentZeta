@@ -208,6 +208,25 @@ def _timeout(test):
     return (test.get('limits') or {}).get('timeout_seconds', 15)
 
 
+def _contains_marker(value, marker):
+    """Whether a parsed JSON value or UnparsedBody from the actor channel carries `marker` (TK-DYN-001, TK-IDN-008)."""
+    if isinstance(value, environment.UnparsedBody):
+        return marker in value.text
+    if isinstance(value, str):
+        return marker in value
+    if isinstance(value, list):
+        return any(_contains_marker(item, marker) for item in value)
+    if isinstance(value, dict):
+        return any(_contains_marker(k, marker) or _contains_marker(v, marker) for k, v in value.items())
+    return False
+
+
+def _disclosed(template, rows, data, marker):
+    """TK-DYN-001 item 3 and TK-DYN-002: a read denial case that returned any row (even another user's row or a
+    projection without title), or any denial response body carrying the target marker regardless of status code."""
+    return (not template['writes'] and bool(rows)) or _contains_marker(data, marker)
+
+
 def _denial_case(ops, test, evidence):
     """Run one denial case. Appends evidence; returns (result, checks).
 
@@ -257,9 +276,9 @@ def _denial_case(ops, test, evidence):
     # The attempt, then 3. no leak and no change, and 4. response and side effects.
     path, body = (_fill(v, test) for v in template['attempt'])
     prefer = 'return=minimal' if template['writes'] else 'return=representation'
-    status, rows, _ = actor(test['actor_ref'], method, path, body, prefer=prefer)
+    status, rows, data = actor(test['actor_ref'], method, path, body, prefer=prefer)
     after = observe('after')
-    disclosed = any(isinstance(r, dict) and r.get('title') == marker for r in rows or [])
+    disclosed = _disclosed(template, rows, data, marker)
     changed = changed_by(before, after)
     checks['no_disclosure_or_change'] = not disclosed and not changed
     response_ok = status in template['denials'] and (status != 200 or rows == [])

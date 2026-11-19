@@ -15,7 +15,8 @@ from toolkit import e1, environment
 
 OBSERVER_ROLE = 'maz_observer'
 OBSERVER_PASSWORD = 'observer-secret'
-EMAILS = {'owner': 'owner@example.test', 'other_tenant_user': 'carol@example.test'}
+EMAILS = {'owner': 'owner@example.test', 'same_tenant_non_owner': 'bob@example.test',
+          'other_tenant_user': 'carol@example.test'}
 
 
 @dataclass
@@ -62,7 +63,8 @@ class Transport:
         status, data = w.attempt
         if w.mutates and method != 'GET':
             w.rows[title] = ('alice', 'tenant-a', 'f', 'digest-changed')
-        return status, json.dumps(data).encode() if data is not None else b''
+        raw = data if isinstance(data, bytes) else (json.dumps(data).encode() if data is not None else b'')
+        return status, raw
 
     def docker_exec(self, container, command, env=None, stdin=None, timeout=60):
         w = self.world
