@@ -266,7 +266,7 @@ def _is_nonempty_str(v):
 
 
 def _is_qualified_table(v):
-    return isinstance(v, str) and '.' in v and not v.startswith('.') and not v.endswith('.')
+    return isinstance(v, str) and '.' in v[1:-1]
 
 
 def _is_opt_str(v):
@@ -307,7 +307,7 @@ def codefact_problems(record):
     if not isinstance(record, dict):
         return ['CodeFact must be an object']
     kind = record.get('kind')
-    if kind not in FACT_FIELDS:
+    if not isinstance(kind, str) or kind not in FACT_FIELDS:
         return [f"kind {kind!r} is not extracted by {RULE}"]
     problems = []
     if record.get('method') not in REGISTERED_RULES:
@@ -317,6 +317,9 @@ def codefact_problems(record):
             and isinstance(source.get('line'), int) and not isinstance(source.get('line'), bool)
             and source['line'] >= 1):
         problems.append('source needs a file and an integer line')
+    elif set(source) != {'file', 'line'}:
+        problems += [f"source field {k!r} is not part of a CodeFact source"
+                     for k in sorted(set(source) - {'file', 'line'})]
     if record.get('supported_version') != SUPPORTED_VERSION:
         problems.append(f"supported_version {record.get('supported_version')!r} is not {SUPPORTED_VERSION!r}")
     allowed = FACT_FIELDS[kind] | COMMON_FIELDS
@@ -332,7 +335,7 @@ def codefact_problems(record):
 def require_codefacts(facts):
     """Raise ValueError when `facts` is not a list of valid CodeFacts (〈定義：擷取結果〉, TK-DAT-007)."""
     if not isinstance(facts, list):
-        raise ValueError('inventory facts must be a list of CodeFacts')
+        raise ValueError('facts must be a list of CodeFacts')
     not_facts = [p for f in facts for p in codefact_problems(f)]
     if not_facts:  # TK-DAT-007: only extraction makes a CodeFact; anything else is refused
         raise ValueError('the inventory holds something that is not a CodeFact: ' + '; '.join(not_facts))

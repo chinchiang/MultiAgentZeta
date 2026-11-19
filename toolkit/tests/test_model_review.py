@@ -206,6 +206,8 @@ class SliceGuards(unittest.TestCase):
             ({**policy_fact, 'permissive': 'yes'}, "field 'permissive'"),
             ({**policy_fact, 'command': 'truncate'}, "field 'command'"),
             ({**valid_fact, 'name': 'unqualified'}, "field 'name'"),
+            ({**valid_fact, 'kind': ['table']}, "kind \\['table'\\] is not extracted"),
+            ({**valid_fact, 'source': {'file': M, 'line': 1, 'confidence': 0.9}}, "source field 'confidence'"),
         ]
         for forged, reason in bad_records:
             for task, inv in ((db_task, base), (entry_task, entry_inv)):
@@ -213,6 +215,9 @@ class SliceGuards(unittest.TestCase):
                     tainted = {**inv, 'facts': [*inv['facts'], forged]}
                     with self.assertRaisesRegex(ValueError, reason):
                         model_review.slice_of(task, tainted)
+        quoted_dots = inventory_of('create table public."t." (id int);\n')
+        self.assertEqual(model_review.slice_of(model_review.review_tasks(quoted_dots)[0], quoted_dots)['table'],
+                         'public.t.')
 
     def test_slice_of_refuses_an_unknown_task_kind(self):
         inv = sample_inventory()

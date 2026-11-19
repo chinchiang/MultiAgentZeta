@@ -292,10 +292,32 @@ class OnlyExtractionMakesACodeFact(unittest.TestCase):
                          ["kind 'threat' is not extracted by sql-rls-v1"])
 
     def test_a_fact_without_a_source_location_is_refused(self):
-        for source in (None, {}, {'file': M}, {'file': '', 'line': 3}, {'file': M, 'line': 'three'}):
+        for source in (None, {}, {'file': M}, {'file': '', 'line': 3}, {'file': M, 'line': 'three'},
+                       {'file': M, 'line': 0}, {'file': M, 'line': True}):
             with self.subTest(source=source):
                 self.assertEqual(extract.codefact_problems({**self.POLICY, 'source': source}),
                                  ['source needs a file and an integer line'])
+        self.assertEqual(extract.codefact_problems({**self.POLICY, 'source': {'file': M, 'line': 3, 'confidence': 0.9}}),
+                         ["source field 'confidence' is not part of a CodeFact source"])
+
+    def test_unhashable_kinds_missing_or_mistyped_fields_and_non_list_facts_are_refused(self):
+        self.assertEqual(extract.codefact_problems('not-an-object'), ['CodeFact must be an object'])
+        self.assertEqual(extract.codefact_problems({**self.POLICY, 'kind': ['policy']}),
+                         ["kind ['policy'] is not extracted by sql-rls-v1"])
+        rls = {'kind': 'rls', 'table': 'public.t', 'enabled': True, 'source': {'file': M, 'line': 1},
+               'method': 'sql-rls-v1', 'supported_version': 'postgresql-17'}
+        self.assertTrue(extract.codefact_problems({**rls, 'enabled': 1}))
+        for change in ({'roles': []}, {'roles': ['']}, {'using': 7}, {'with_check': False}):
+            with self.subTest(change=change):
+                self.assertTrue(extract.codefact_problems({**self.POLICY, **change}))
+        with self.assertRaisesRegex(ValueError, 'list of CodeFacts'):
+            extract.require_codefacts('not-a-list')
+
+    def test_quoted_identifiers_with_leading_or_trailing_dots_produce_valid_codefacts(self):
+        result = facts_of('create table public."t." (id int);\ncreate table ".s".t (id int);\n')
+        self.assertEqual(result['unresolved'], [])
+        for fact in result['facts']:
+            self.assertEqual(extract.codefact_problems(fact), [], fact)
 
 
 class NestedBlockComments(unittest.TestCase):
