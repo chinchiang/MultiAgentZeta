@@ -35,10 +35,7 @@ def slice_of(task, inventory):
     kind = task.get('kind') if isinstance(task, dict) else None
     if kind not in TASK_KINDS:
         raise ValueError(f'unknown review task kind {kind!r}; expected one of {TASK_KINDS}')
-    not_facts = [p for f in inventory['facts']
-                 for p in (extract.codefact_problems(f) if isinstance(f, dict) else ['CodeFact must be an object'])]
-    if not_facts:  # TK-DAT-007: only extraction makes a CodeFact; anything else is refused before assembling a slice
-        raise ValueError('the inventory holds something that is not a CodeFact: ' + '; '.join(not_facts))
+    extract.require_codefacts(inventory['facts'])
     if kind == 'entry':
         content = {'task': task['id'], 'kind': 'entry', 'entry': task['unit'], 'unresolved': []}
     else:

@@ -134,6 +134,19 @@ class SliceOfADatabaseTask(unittest.TestCase):
         ])
         self.assertEqual((s['unresolved'], s['digest']), (s_rev['unresolved'], s_rev['digest']))
         self.assertEqual(self.slice_of(sample_inventory(), 'public.documents')['unresolved'], [])
+        unsorted_unresolved = [
+            {'file': 'supabase/migrations/002.sql', 'line': 3, 'reason': 'statement changes a table or policy that is not tracked'},
+            {'file': 'supabase/migrations/001.sql', 'line': 5, 'reason': 'table name has no schema'},
+            {'file': 'supabase/migrations/001.sql', 'line': 5, 'reason': 'do block runs SQL that is not read'},
+        ]
+        s_unsorted = self.slice_of({**sample_inventory(), 'unresolved': unsorted_unresolved}, 'public.documents')
+        s_reversed = self.slice_of({**sample_inventory(), 'unresolved': list(reversed(unsorted_unresolved))}, 'public.documents')
+        self.assertEqual([(u['file'], u['line'], u['reason']) for u in s_unsorted['unresolved']], [
+            ('supabase/migrations/001.sql', 5, 'do block runs SQL that is not read'),
+            ('supabase/migrations/001.sql', 5, 'table name has no schema'),
+            ('supabase/migrations/002.sql', 3, 'statement changes a table or policy that is not tracked'),
+        ])
+        self.assertEqual(s_unsorted['digest'], s_reversed['digest'])
 
 
 class TheDigestOfASlice(unittest.TestCase):
@@ -179,12 +192,20 @@ class SliceGuards(unittest.TestCase):
         entry_inv = with_entries(base, ENTRY)
         entry_task = model_review.review_tasks(entry_inv)[0]
         valid_fact = dict(base['facts'][0])
+        policy_fact = dict(next(f for f in base['facts'] if f['kind'] == 'policy' and f['table'] == 'public.documents'))
+        without_command = {k: v for k, v in policy_fact.items() if k != 'command'}
         bad_records = [
+            ('not a dict', 'CodeFact must be an object'),
             ({**valid_fact, 'method': 'model:claude'}, "method 'model:claude' is not a registered extraction rule"),
             ({**valid_fact, 'confidence': 0.9}, "field 'confidence' is not part of an extracted"),
             ({'kind': 'threat', 'source': {'file': M, 'line': 1}, 'method': 'sql-rls-v1',
               'supported_version': 'postgresql-17'}, "kind 'threat' is not extracted"),
             ({**valid_fact, 'source': None}, 'source needs a file and an integer line'),
+            ({**valid_fact, 'source': {'file': M, 'line': 0}}, 'source needs a file and an integer line'),
+            (without_command, "missing field 'command'"),
+            ({**policy_fact, 'permissive': 'yes'}, "field 'permissive'"),
+            ({**policy_fact, 'command': 'truncate'}, "field 'command'"),
+            ({**valid_fact, 'name': 'unqualified'}, "field 'name'"),
         ]
         for forged, reason in bad_records:
             for task, inv in ((db_task, base), (entry_task, entry_inv)):
@@ -199,8 +220,10 @@ class SliceGuards(unittest.TestCase):
             with self.subTest(kind=bad_kind):
                 with self.assertRaisesRegex(ValueError, 'task kind'):
                     model_review.slice_of({'kind': bad_kind, 'id': 'x:1', 'unit': 'public.documents'}, inv)
-        with self.assertRaisesRegex(ValueError, 'task kind'):
-            model_review.slice_of({'id': 'x:1', 'unit': 'public.documents'}, inv)
+        for bad_task in ({'id': 'x:1', 'unit': 'public.documents'}, None, 'database:public.documents'):
+            with self.subTest(task=bad_task):
+                with self.assertRaisesRegex(ValueError, 'task kind'):
+                    model_review.slice_of(bad_task, inv)
 
 
 if __name__ == '__main__':

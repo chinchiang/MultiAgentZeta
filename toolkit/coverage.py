@@ -45,9 +45,7 @@ def coverage(inventory, cases, exclusions=()):
     scopes of the inventory; a case whose module is not loaded is counted as unsupported and never as a valid
     judgement, so removing a module cannot raise the rate (TK-SCP-006).
     """
-    not_facts = [p for f in inventory['facts'] for p in extract.codefact_problems(f)]
-    if not_facts:  # TK-DAT-007: only extraction makes a CodeFact; anything else is refused, not counted
-        raise ValueError('the inventory holds something that is not a CodeFact: ' + '; '.join(not_facts))
+    extract.require_codefacts(inventory['facts'])
     unknown = [c for c in cases if c['result'] not in RESULTS]
     if unknown:  # TK-EVD-008: a result no count knows would be dropped silently
         raise ValueError('; '.join(f"case {c['id']!r} has the unknown result {c['result']!r}" for c in unknown))

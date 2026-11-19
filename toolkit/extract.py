@@ -261,38 +261,81 @@ def _read(statement):
     return [], None
 
 
-# What an extracted fact may carry, by kind: nothing else rides along (TK-DAT-007). A model's confidence or
-# rationale, or a reference to an execution or an observation, are not extracted and have no place here.
-FACT_FIELDS = {
-    'table': {'name'},
-    'rls': {'table', 'enabled'},
-    'policy': {'name', 'table', 'permissive', 'command', 'roles', 'using', 'with_check'},
+def _is_nonempty_str(v):
+    return isinstance(v, str) and bool(v)
+
+
+def _is_qualified_table(v):
+    return isinstance(v, str) and '.' in v and not v.startswith('.') and not v.endswith('.')
+
+
+def _is_opt_str(v):
+    return v is None or isinstance(v, str)
+
+
+POLICY_COMMANDS = ('select', 'insert', 'update', 'delete', 'all')
+
+# What an extracted fact must carry, by kind, and nothing else (〈定義：擷取結果〉, TK-DAT-007). A model's
+# confidence or rationale, or a reference to an execution or an observation, are not extracted and have no place here.
+_FACT_CHECKS = {
+    'table': {'name': (_is_qualified_table, 'a schema.table string')},
+    'rls': {'table': (_is_qualified_table, 'a schema.table string'),
+            'enabled': (lambda v: isinstance(v, bool), 'a boolean')},
+    'policy': {
+        'name': (_is_nonempty_str, 'a non-empty string'),
+        'table': (_is_qualified_table, 'a schema.table string'),
+        'permissive': (lambda v: isinstance(v, bool), 'a boolean'),
+        'command': (lambda v: v in POLICY_COMMANDS, f'one of {POLICY_COMMANDS}'),
+        'roles': (lambda v: isinstance(v, list) and bool(v) and all(_is_nonempty_str(r) for r in v),
+                  'a non-empty list of role names'),
+        'using': (_is_opt_str, 'a string or null'),
+        'with_check': (_is_opt_str, 'a string or null'),
+    },
 }
+FACT_FIELDS = {k: set(v) for k, v in _FACT_CHECKS.items()}
 REGISTERED_RULES = (RULE,)
 COMMON_FIELDS = {'kind', 'source', 'method', 'supported_version'}
 
 
 def codefact_problems(record):
-    """Why record is not a CodeFact (TK-DAT-007); empty when it is.
+    """Why record is not a CodeFact (〈定義：擷取結果〉, TK-DAT-007); empty when it is.
 
-    A CodeFact comes from a registered extraction rule, is of a kind the rule extracts, has only the fields of
-    that kind and a source location. What a model proposed or an observation showed fails these checks, so it
-    cannot be stored as a CodeFact; it belongs in ThreatIR or in an observation record.
+    A CodeFact comes from a registered extraction rule, is of a kind the rule extracts, has all and only the
+    fields of that kind with valid values, and has a source location with a positive line number. What a model
+    proposed or an observation showed fails these checks, so it cannot be stored as a CodeFact.
     """
-    if record.get('kind') not in FACT_FIELDS:
-        return [f"kind {record.get('kind')!r} is not extracted by {RULE}"]
+    if not isinstance(record, dict):
+        return ['CodeFact must be an object']
+    kind = record.get('kind')
+    if kind not in FACT_FIELDS:
+        return [f"kind {kind!r} is not extracted by {RULE}"]
     problems = []
     if record.get('method') not in REGISTERED_RULES:
         problems.append(f"method {record.get('method')!r} is not a registered extraction rule")
     source = record.get('source')
-    if not (isinstance(source, dict) and isinstance(source.get('file'), str) and source['file']
-            and isinstance(source.get('line'), int) and not isinstance(source.get('line'), bool)):
+    if not (isinstance(source, dict) and _is_nonempty_str(source.get('file'))
+            and isinstance(source.get('line'), int) and not isinstance(source.get('line'), bool)
+            and source['line'] >= 1):
         problems.append('source needs a file and an integer line')
     if record.get('supported_version') != SUPPORTED_VERSION:
         problems.append(f"supported_version {record.get('supported_version')!r} is not {SUPPORTED_VERSION!r}")
-    allowed = FACT_FIELDS[record['kind']] | COMMON_FIELDS
-    problems += [f"field {k!r} is not part of an extracted {record['kind']} fact" for k in sorted(set(record) - allowed)]
+    allowed = FACT_FIELDS[kind] | COMMON_FIELDS
+    problems += [f"field {k!r} is not part of an extracted {kind} fact" for k in sorted(set(record) - allowed)]
+    for field, (ok, expected) in _FACT_CHECKS[kind].items():
+        if field not in record:
+            problems.append(f"missing field {field!r} of an extracted {kind} fact")
+        elif not ok(record[field]):
+            problems.append(f"field {field!r} of an extracted {kind} fact must be {expected}")
     return problems
+
+
+def require_codefacts(facts):
+    """Raise ValueError when `facts` is not a list of valid CodeFacts (〈定義：擷取結果〉, TK-DAT-007)."""
+    if not isinstance(facts, list):
+        raise ValueError('inventory facts must be a list of CodeFacts')
+    not_facts = [p for f in facts for p in codefact_problems(f)]
+    if not_facts:  # TK-DAT-007: only extraction makes a CodeFact; anything else is refused
+        raise ValueError('the inventory holds something that is not a CodeFact: ' + '; '.join(not_facts))
 
 
 def read_migrations(project):
