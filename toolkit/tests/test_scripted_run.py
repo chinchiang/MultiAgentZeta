@@ -372,9 +372,10 @@ class DisclosureInNonTargetRowsAndNonArrayBodies(unittest.TestCase):
         bodies = (
             ('json-object', {'code': '42501', 'details': {'row': f'denied on {marker}', 'secret': 'RAW-SECRET-BODY'}}),
             ('json-array-nested', [{'error': f'cannot read {marker}'}]),
+            ('json-string', f'denied {marker} RAW-SECRET-BODY'),
             ('plain-text', f'Forbidden: row {marker} RAW-SECRET-BODY\n'.encode()),
         )
-        for status in (200, 401, 403, 404):
+        for status in (200, 401, 403, 404, 500):
             for kind, payload in bodies:
                 with self.subTest(status=status, body=kind):
                     rep, by_id, _ = run(one_case('READ-same-tenant'), scripted.World(attempt=(status, payload)))
@@ -384,6 +385,14 @@ class DisclosureInNonTargetRowsAndNonArrayBodies(unittest.TestCase):
                     self.assertEqual(len(rep['findings']), 1)
                     self.assertEqual(rep['findings'][0]['status'], 'confirmed')
                     self.assertNotIn('RAW-SECRET-BODY', str(rep))
+
+        # Deeply nested JSON (2000 levels) carrying marker does not hit Python's recursion limit.
+        deep = f'leaked {marker}'
+        for _ in range(2000):
+            deep = [deep]
+        rep, by_id, _ = run(one_case('READ-same-tenant'), scripted.World(attempt=(403, deep)))
+        self.assertEqual(by_id['READ-same-tenant']['result'], 'failed')
+        self.assertFalse(by_id['READ-same-tenant']['checks']['no_disclosure_or_change'])
 
         # Write denial case leaking marker in a 403 plain-text error without mutating state also fails item 3.
         rep, by_id, _ = run(one_case('UPDATE-same-tenant'),

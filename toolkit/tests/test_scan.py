@@ -650,6 +650,9 @@ class BrokenReplies(unittest.TestCase):
         blank_url = one_reply_server(b'HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\n  ')
         self.assertEqual(self.request_to(blank_url), (200, environment.UnparsedBody('  ')))
 
+        nan_url = one_reply_server(b'HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 3\r\n\r\nNaN')
+        self.assertEqual(self.request_to(nan_url), (200, environment.UnparsedBody('NaN')))
+
 
 class MissingApiKeys(unittest.TestCase):
     """TK-DYN-004, TK-IDN-003: a request whose API key format the environment does not provide is never sent

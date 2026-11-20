@@ -209,22 +209,30 @@ def _timeout(test):
 
 
 def _contains_marker(value, marker):
-    """Whether a parsed JSON value or UnparsedBody from the actor channel carries `marker` (TK-DYN-001, TK-IDN-008)."""
-    if isinstance(value, environment.UnparsedBody):
-        return marker in value.text
-    if isinstance(value, str):
-        return marker in value
-    if isinstance(value, list):
-        return any(_contains_marker(item, marker) for item in value)
-    if isinstance(value, dict):
-        return any(_contains_marker(k, marker) or _contains_marker(v, marker) for k, v in value.items())
+    """Whether a parsed JSON value or UnparsedBody from the actor channel carries `marker` (TK-DYN-001, TK-IDN-008).
+    Iterative so deeply nested untrusted JSON never hits Python's recursion limit."""
+    stack = [value]
+    while stack:
+        cur = stack.pop()
+        if isinstance(cur, environment.UnparsedBody):
+            if marker in cur.text:
+                return True
+        elif isinstance(cur, str):
+            if marker in cur:
+                return True
+        elif isinstance(cur, list):
+            stack.extend(cur)
+        elif isinstance(cur, dict):
+            stack.extend(cur.keys())
+            stack.extend(cur.values())
     return False
 
 
-def _disclosed(template, rows, data, marker):
-    """TK-DYN-001 item 3 and TK-DYN-002: a read denial case that returned any row (even another user's row or a
-    projection without title), or any denial response body carrying the target marker regardless of status code."""
-    return (not template['writes'] and bool(rows)) or _contains_marker(data, marker)
+def _disclosed(template, data, marker):
+    """TK-DYN-001 item 3 and TK-DYN-002: a whole-row read denial template that returned any row (even another
+    user's row or a projection without title), or any denial response body carrying the target marker regardless
+    of status code."""
+    return (not template['writes'] and isinstance(data, list) and bool(data)) or _contains_marker(data, marker)
 
 
 def _denial_case(ops, test, evidence):
@@ -242,11 +250,10 @@ def _denial_case(ops, test, evidence):
     def actor(identity, method, path, body=None, prefer='return=representation'):
         key = _api_key_for(test, identity)
         status, data = ops.request(identity, method, path, body, key, prefer, _timeout(test))
-        rows = data if isinstance(data, list) else None
         evidence.append({'channel': 'actor', 'identity_ref': identity, 'api_key_format': key,
                          'request': {'method': method, 'path': path, 'prefer': prefer},
-                         'response': {'status': status, 'rows': len(rows) if rows is not None else None}})
-        return status, rows, data
+                         'response': {'status': status, 'rows': len(data) if isinstance(data, list) else None}})
+        return status, data
 
     def observe(point):
         state = ops.observe(marker)
@@ -256,15 +263,15 @@ def _denial_case(ops, test, evidence):
 
     # 1. The owner's control operation succeeds, and the resource is in the expected state.
     path, body = (_fill(v, test) for v in template['control'])
-    status, rows, _ = actor(test['owner_ref'], method, path, body)
-    control_ok = status in (200, 201) and rows is not None and len(rows) == 1
+    status, control_data = actor(test['owner_ref'], method, path, body)
+    control_ok = status in (200, 201) and isinstance(control_data, list) and len(control_data) == 1
     before = observe('before')
     checks['resource_and_control'] = control_ok and ready(before)
     if not checks['resource_and_control']:
         return 'blocked', checks
 
     # 2. The actor's identity is valid, and it is the identity the test expects.
-    status, _, user = actor(test['actor_ref'], 'GET', '/auth/v1/user')
+    status, user = actor(test['actor_ref'], 'GET', '/auth/v1/user')
     expected_email = ops.identity_email(test['actor_ref'])
     if expected_email is None:  # an anonymous identity: the request must carry no user session
         checks['identity'] = status in (401, 403) and not ops.has_session(test['actor_ref'])
@@ -276,12 +283,12 @@ def _denial_case(ops, test, evidence):
     # The attempt, then 3. no leak and no change, and 4. response and side effects.
     path, body = (_fill(v, test) for v in template['attempt'])
     prefer = 'return=minimal' if template['writes'] else 'return=representation'
-    status, rows, data = actor(test['actor_ref'], method, path, body, prefer=prefer)
+    status, data = actor(test['actor_ref'], method, path, body, prefer=prefer)
     after = observe('after')
-    disclosed = _disclosed(template, rows, data, marker)
+    disclosed = _disclosed(template, data, marker)
     changed = changed_by(before, after)
     checks['no_disclosure_or_change'] = not disclosed and not changed
-    response_ok = status in template['denials'] and (status != 200 or rows == [])
+    response_ok = status in template['denials'] and (status != 200 or data == [])
     side_effect = after['table_digest'] != before['table_digest']
     checks['response_and_side_effects'] = response_ok and not side_effect
     if disclosed or changed or side_effect:

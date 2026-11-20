@@ -38,6 +38,10 @@ class ApiKeyUnavailable(Exception):
     request goes out with an empty key (TK-DYN-004, TK-IDN-003; 〈定義：測試結果〉 受阻)."""
 
 
+def _reject_nonstandard_json_constant(token):
+    raise ValueError(f'non-RFC-8259 JSON constant: {token}')
+
+
 def closed_local_url():
     """A loopback URL on a port nothing listens on: connections to it are refused (api-unreachable)."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -92,8 +96,8 @@ class Operations:
         except UnicodeDecodeError as e:  # bytes that are not UTF-8 text: no readable reply
             raise RequestFailed(f'{method} {path}: response body is not text ({e.reason})') from e
         try:
-            return status, json.loads(text)
-        except json.JSONDecodeError:
+            return status, json.loads(text, parse_constant=_reject_nonstandard_json_constant)
+        except (json.JSONDecodeError, ValueError):
             return status, UnparsedBody(text)
 
     def observe(self, marker):
