@@ -97,7 +97,9 @@ class Operations:
             raise RequestFailed(f'{method} {path}: response body is not text ({e.reason})') from e
         try:
             return status, json.loads(text, parse_constant=_reject_nonstandard_json_constant)
-        except (json.JSONDecodeError, ValueError, RecursionError):
+        except RecursionError as e:  # TK-RUN-001, 〈定義：測試結果〉 執行錯誤: JSON too deep to parse never passes
+            raise RequestFailed(f'{method} {path}: response JSON exceeds parser nesting limit') from e
+        except (json.JSONDecodeError, ValueError):
             return status, UnparsedBody(text)
 
     def observe(self, marker):

@@ -386,7 +386,8 @@ class DisclosureInNonTargetRowsAndNonArrayBodies(unittest.TestCase):
                     self.assertEqual(rep['findings'][0]['status'], 'confirmed')
                     self.assertNotIn('RAW-SECRET-BODY', str(rep))
 
-        # Deeply nested JSON objects and ultra-deep raw JSON payloads carrying marker never hit Python's recursion limit.
+        # Deeply nested JSON objects exercise iterative _contains_marker(); ultra-deep raw JSON exceeding json.loads()
+        # recursion depth raises RequestFailed -> 'error' (never 'passed' and never crashing scan.run()).
         deep = f'leaked {marker}'
         for _ in range(400):
             deep = {'nested': deep}
@@ -394,10 +395,10 @@ class DisclosureInNonTargetRowsAndNonArrayBodies(unittest.TestCase):
         self.assertEqual(by_id['READ-same-tenant']['result'], 'failed')
         self.assertFalse(by_id['READ-same-tenant']['checks']['no_disclosure_or_change'])
 
-        ultra_deep = (b'{"n":' * 2000) + f'"leaked {marker}"'.encode() + (b'}' * 2000)
+        ultra_deep = (b'[' * 100000) + b'{"body":"secret"}' + (b']' * 100000)
         rep, by_id, _ = run(one_case('READ-same-tenant'), scripted.World(attempt=(403, ultra_deep)))
-        self.assertEqual(by_id['READ-same-tenant']['result'], 'failed')
-        self.assertFalse(by_id['READ-same-tenant']['checks']['no_disclosure_or_change'])
+        self.assertEqual(by_id['READ-same-tenant']['result'], 'error')
+        self.assertIn('nesting limit', by_id['READ-same-tenant']['error'])
 
         # Write denial case leaking marker in a 403 plain-text error without mutating state also fails item 3.
         rep, by_id, _ = run(one_case('UPDATE-same-tenant'),
