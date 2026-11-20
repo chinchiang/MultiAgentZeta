@@ -97,7 +97,7 @@ class Operations:
             raise RequestFailed(f'{method} {path}: response body is not text ({e.reason})') from e
         try:
             return status, json.loads(text, parse_constant=_reject_nonstandard_json_constant)
-        except (json.JSONDecodeError, ValueError):
+        except (json.JSONDecodeError, ValueError, RecursionError):
             return status, UnparsedBody(text)
 
     def observe(self, marker):

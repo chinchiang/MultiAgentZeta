@@ -386,11 +386,16 @@ class DisclosureInNonTargetRowsAndNonArrayBodies(unittest.TestCase):
                     self.assertEqual(rep['findings'][0]['status'], 'confirmed')
                     self.assertNotIn('RAW-SECRET-BODY', str(rep))
 
-        # Deeply nested JSON (2000 levels) carrying marker does not hit Python's recursion limit.
+        # Deeply nested JSON objects and ultra-deep raw JSON payloads carrying marker never hit Python's recursion limit.
         deep = f'leaked {marker}'
-        for _ in range(2000):
-            deep = [deep]
+        for _ in range(400):
+            deep = {'nested': deep}
         rep, by_id, _ = run(one_case('READ-same-tenant'), scripted.World(attempt=(403, deep)))
+        self.assertEqual(by_id['READ-same-tenant']['result'], 'failed')
+        self.assertFalse(by_id['READ-same-tenant']['checks']['no_disclosure_or_change'])
+
+        ultra_deep = (b'{"n":' * 2000) + f'"leaked {marker}"'.encode() + (b'}' * 2000)
+        rep, by_id, _ = run(one_case('READ-same-tenant'), scripted.World(attempt=(403, ultra_deep)))
         self.assertEqual(by_id['READ-same-tenant']['result'], 'failed')
         self.assertFalse(by_id['READ-same-tenant']['checks']['no_disclosure_or_change'])
 
