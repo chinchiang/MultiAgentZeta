@@ -1346,6 +1346,20 @@ class ConfirmationListInScan(unittest.TestCase):
         owner = next(i for i in doc['items'] if i['item_id'] == OWNER_ITEM)
         self.assertEqual((owner['out_of_scope'], owner['status']), (True, 'accepted'))
 
+    def test_prepared_update_preserves_a_newer_confirmation_list(self):
+        from toolkit import control
+        older = reviewed_list(self.tmp.name, resources=[{'name': 'documents', 'impact': ['confidential']}])
+        self.m['confirmation_list'] = older
+        prepared, problem = scan._load_confirmation_list(self.m, control.utc_time('2026-11-09T06:00:00Z'))
+        self.assertIsNone(problem)
+        path = Path(older['path'])
+        newer = json.loads(path.read_bytes())
+        newer['list_version'] += 1
+        digest = control.write(path, newer, self.tmp.name)
+        _, problem = prepared.write()
+        self.assertIn('digest', problem)
+        self.assertEqual(control.read(path, digest, self.tmp.name), newer)
+
     def test_a_list_from_an_older_scope_is_updated_and_its_new_items_are_pending(self):
         from toolkit import confirmation
         self.m['confirmation_list'] = reviewed_list(self.tmp.name, resources=[{'name': 'documents', 'impact': ['confidential']}])

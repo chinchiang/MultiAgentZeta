@@ -5,10 +5,13 @@ A record lives outside the sample source, where the code under test cannot write
 ScanManifest references it by path and content digest. A record whose file is gone is not used, and
 is never replaced by a new one: that would drop what people recorded in it (TK-REQ-004, TK-ENV-002).
 """
+import fcntl
 import hashlib
 import json
 import os
 import re
+import tempfile
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -26,19 +29,53 @@ def outside_source(path, source_root, what):
     return path
 
 
+def _digest(data):
+    return 'sha256:' + hashlib.sha256(data).hexdigest()
+
+
 def file_digest(path):
-    return 'sha256:' + hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    return _digest(Path(path).read_bytes())
+
+
+@contextmanager
+def writer(path, source_root, what):
+    """Serialize a whole read/modify/write operation, including any review checkpoints."""
+    path = outside_source(path, source_root, what)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Lock the stable directory inode. The record inode changes on every replacement.
+        lock = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    except OSError as e:
+        raise RecordUnusable(f'{path} cannot be written: {e}') from e
+
+    def save(doc):
+        data = (json.dumps(doc, ensure_ascii=False, indent=2) + '\n').encode('utf-8')
+        try:
+            tmp = tempfile.NamedTemporaryFile(dir=path.parent, delete=False)
+            partial = Path(tmp.name)
+            try:
+                with tmp:
+                    tmp.write(data)
+                os.replace(partial, path)
+            finally:
+                partial.unlink(missing_ok=True)
+        except OSError as e:
+            raise RecordUnusable(f'{path} cannot be written: {e}') from e
+        return _digest(data)
+
+    try:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+        except OSError as e:
+            raise RecordUnusable(f'{path} cannot be locked: {e}') from e
+        yield save
+    finally:
+        os.close(lock)
 
 
 def write(path, doc, source_root, what='record'):
-    """Write the record to the control zone and return its digest, for the ScanManifest to reference.
-    what names the record in errors."""
-    path = outside_source(path, source_root, what)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    partial = path.with_name(path.name + '.partial')  # written whole, then renamed: never half a record
-    partial.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-    os.replace(partial, path)
-    return file_digest(path)
+    with writer(path, source_root, what) as save:
+        return save(doc)
 
 
 def read(path, digest, source_root, what='record'):
@@ -49,8 +86,9 @@ def read(path, digest, source_root, what='record'):
         # Not "no record yet": a new one would drop what people recorded in it (TK-REQ-004).
         raise RecordUnusable(f'{path} is referenced with digest {digest} but does not exist; restore the file')
     try:
-        actual = file_digest(path)
-        doc = json.loads(path.read_text(encoding='utf-8'))
+        data = path.read_bytes()
+        actual = _digest(data)
+        doc = json.loads(data.decode('utf-8'))
     except (OSError, ValueError) as e:
         raise RecordUnusable(f'{path} cannot be read: {e}') from e
     if actual != digest:

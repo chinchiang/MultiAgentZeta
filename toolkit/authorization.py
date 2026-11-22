@@ -3,8 +3,8 @@
 The app owner authorizes what a run may test: targets, environment, period, resource × method
 operations and the people responsible. The record lives in the control zone (toolkit.control), so
 nothing the tested code, its data, its responses or a model writes can authorize or approve anything.
-An operation the record does not list runs only with an extra approval covering it. The names in
-the record are declared, not verified (TK-HRV-004 is later); the report says so.
+An operation the record does not list runs only with an extra approval covering it. The issuer and approver names are declarations in this record. TK-HRV-004 applies to
+review decisions, where the platform account and the review roles determine who may decide.
 """
 import json
 from collections import Counter

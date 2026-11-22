@@ -39,7 +39,13 @@ STAGES = ('preflight', 'static_analysis', 'model_review', 'threat_planning', 'dy
 
 def _cross_record_problems(doc):
     problems = []
-    listed = {s.get('stage') for s in _list(doc, 'stages') if isinstance(s, dict)}
+    listed = set()
+    for stage in _list(doc, 'stages'):
+        name = stage.get('stage') if isinstance(stage, dict) else None
+        if isinstance(name, str):
+            if name in listed:
+                problems.append(f'stages: duplicate stage {name!r}')
+            listed.add(name)
     if isinstance(doc, dict) and 'stages' in doc:
         problems += [f'stages: stage {s!r} of 〈定義：工作階段〉 is not listed' for s in STAGES if s not in listed]
     if isinstance(doc, dict):
@@ -320,7 +326,7 @@ def _authorization_section(doc):
             used.setdefault(e['approval_id'], []).append(e.get('test_id', e['id']))
     for ap in a['extra_approvals']:
         tests = '、'.join(f'`{t}`' for t in used.get(ap['approval_id'], [])) or '（本次未使用）'
-        lines.append(f'- **額外核准** `{ap["approval_id"]}`：{ap["by"]} {ap["at"]}，至 {ap["valid_until"]}；'
+        lines.append(f'- **額外核准** `{ap["approval_id"]}`：{ap["by"]}（核准者姓名由授權紀錄宣告，身分未經驗證） {ap["at"]}，至 {ap["valid_until"]}；'
                      + _operations(ap['operations'])
                      + f'；理由：{ap["reason"]}；用於 {tests}')
     lines.append('- 測試用原始碼變更：無（受測原始碼即 `source_digest` 釘選的版本）')

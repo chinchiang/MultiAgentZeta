@@ -565,7 +565,12 @@ def _load_confirmation_list(manifest, now):
         if not updated:
             return on_disk, None
         try:
-            digest = confirmation.write(path, doc, source)
+            with control.writer(path, source, 'confirmation list') as save:
+                if ref.get('digest'):
+                    control.read(path, ref['digest'], source, 'confirmation list')
+                elif Path(path).exists():
+                    raise control.RecordUnusable(f'{path} was created during preflight')
+                digest = save(doc)
         except (confirmation.ConfirmationListUnusable, OSError) as e:
             return None, f'confirmation list unusable: {e}'
         return _listed_from(path, digest, doc, True), None

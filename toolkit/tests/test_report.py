@@ -22,6 +22,14 @@ class Validate(unittest.TestCase):
     def test_valid_report_has_no_problems(self):
         self.assertEqual(report.validate(valid_report()), [])
 
+    def test_each_stage_is_listed_only_once_even_with_a_different_status(self):
+        for status in ('completed', 'blocked'):
+            with self.subTest(status=status):
+                doc = valid_report()
+                doc['stages'].append({**doc['stages'][0], 'status': status, 'reason': 'regression test'})
+                problems = report.validate(doc)
+                self.assertTrue(any('preflight' in p and 'duplicate' in p for p in problems), problems)
+
     # 〈定義：共用欄位〉: schema_version, run_id, a unique id, creation time, source id;
     # TK-DAT-001 adds the commit the record is bound to.
     COMMON = ['schema_version', 'run_id', 'id', 'created_at', 'source_id', 'commit']
@@ -444,7 +452,7 @@ class RenderMarkdown(unittest.TestCase):
         self.assertIn('2026-11-01T00:00:00Z 至 2026-12-01T00:00:00Z', md)
         self.assertIn('身分未經驗證', md)
         self.assertIn('`APR-001`', md)
-        self.assertIn('security-lead', md)
+        self.assertIn('security-lead（核准者姓名由授權紀錄宣告，身分未經驗證）', md)
         self.assertIn('`AUTHZ-001-same-tenant`', md.split('## 測試授權')[1].split('\n## ')[0])
         self.assertIn('測試用原始碼變更：無', md)
 

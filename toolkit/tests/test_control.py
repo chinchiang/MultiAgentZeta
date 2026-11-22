@@ -2,12 +2,33 @@
 
 Fast tests only.
 """
+import fcntl
+import multiprocessing
+import os
 import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from toolkit import control
+
+
+def _append_in_child(path, source, begin, contended):
+    if not begin.wait(10):
+        raise TimeoutError('parent did not start its update')
+    flock = fcntl.flock
+
+    def observe_lock(fd, mode):
+        try:
+            flock(fd, mode | fcntl.LOCK_NB)
+        except BlockingIOError:
+            contended.set()
+            flock(fd, mode)
+
+    with patch.object(fcntl, 'flock', observe_lock):
+        with control.writer(path, source, 'record') as save:
+            save(control.current(path, source, 'record') + ['child'])
 
 
 class ReadWrite(unittest.TestCase):
@@ -26,6 +47,60 @@ class ReadWrite(unittest.TestCase):
         self.assertRegex(digest, r'^sha256:[0-9a-f]{64}$')
         self.assertEqual(digest, control.file_digest(self.path))
         self.assertEqual(control.read(self.path, digest, self.source), self.doc)
+
+    def test_read_uses_the_bytes_that_were_verified(self):
+        digest = control.write(self.path, self.doc, self.source)
+        original = Path.read_bytes
+
+        def replace_after_read(path):
+            data = original(path)
+            path.write_bytes(b'{"new": true}')
+            return data
+
+        with patch.object(Path, 'read_bytes', replace_after_read):
+            self.assertEqual(control.read(self.path, digest, self.source), self.doc)
+
+    def test_writer_returns_the_digest_of_its_own_bytes(self):
+        expected = control.write(self.path, self.doc, self.source)
+        replace = os.replace
+
+        def update_after_replace(src, dst):
+            replace(src, dst)
+            Path(dst).write_bytes(b'{"new": true}')
+
+        with patch.object(os, 'replace', update_after_replace):
+            self.assertEqual(control.write(self.path, self.doc, self.source), expected)
+
+    def test_child_process_waits_then_updates_the_committed_version(self):
+        control.write(self.path, [], self.source)
+        ctx = multiprocessing.get_context('fork')
+        begin, contended = ctx.Event(), ctx.Event()
+        child = ctx.Process(target=_append_in_child, args=(self.path, self.source, begin, contended))
+        child.start()
+        try:
+            with control.writer(self.path, self.source, 'record') as save:
+                begin.set()
+                self.assertTrue(contended.wait(10), 'child did not encounter the held lock')
+                save(['parent'])
+            child.join(10)
+            self.assertEqual(child.exitcode, 0)
+            self.assertEqual(control.current(self.path, self.source, 'record'), ['parent', 'child'])
+        finally:
+            if child.is_alive():
+                child.kill()
+                child.join()
+            child.close()
+
+    def test_failed_replace_preserves_the_record_and_allows_retry(self):
+        original = control.write(self.path, self.doc, self.source)
+        revised = {**self.doc, 'note': '核准'}
+        with patch.object(os, 'replace', side_effect=OSError('replace failed')):
+            with self.assertRaisesRegex(control.RecordUnusable, 'replace failed'):
+                control.write(self.path, revised, self.source)
+        self.assertEqual(control.read(self.path, original, self.source), self.doc)
+        self.assertEqual(list(self.path.parent.iterdir()), [self.path])
+        updated = control.write(self.path, revised, self.source)
+        self.assertEqual(control.read(self.path, updated, self.source), revised)
 
     def test_a_path_inside_the_sample_source_is_refused(self):
         for path in (self.source / 'record.json', self.source / 'sub' / '..' / 'record.json'):

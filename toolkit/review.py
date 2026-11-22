@@ -43,14 +43,6 @@ def _roles(path, digest, source_root):
     return roles
 
 
-def _write(path, record, source_root):
-    """control.write() of the review record; a file system that refuses it makes the record unusable."""
-    try:
-        return control.write(path, record, source_root, 'review record')
-    except OSError as e:
-        raise control.RecordUnusable(f'{path} cannot be written: {e}') from e
-
-
 def _current(path, source_root):
     """The review record at path as it is now, checked like a referenced one (〈定義：覆核紀錄〉)."""
     record = control.current(path, source_root, 'review record')
@@ -220,16 +212,17 @@ def sync_file(path, roles_path, roles_digest, platform, now, source_root):
     records outside source_root. Each item is written whole as soon as it is read; a sync that fails part-way
     keeps what it wrote (〈定義：覆核紀錄〉 同步失敗). Returns the digest of the record written."""
     roles = _roles(roles_path, roles_digest, source_root)
-    record = _current(path, source_root)
-    for item in record['items']:
-        try:
-            _sync_item(item, roles, platform)
-        except PlatformError as e:
-            raise SyncFailed(f'sync stopped at issue {item["issue"]}: {e}; the items before it are written, '
-                             f'the last complete sync is {record.get("synced_at") or "none"}') from e
-        _write(path, record, source_root)  # each item whole, as soon as it is read
-    record['synced_at'] = now
-    return _write(path, record, source_root)
+    with control.writer(path, source_root, 'review record') as save:
+        record = _current(path, source_root)
+        for item in record['items']:
+            try:
+                _sync_item(item, roles, platform)
+            except PlatformError as e:
+                raise SyncFailed(f'sync stopped at issue {item["issue"]}: {e}; the items before it are written, '
+                                 f'the last complete sync is {record.get("synced_at") or "none"}') from e
+            save(record)  # each item whole, as soon as it is read
+        record['synced_at'] = now
+        return save(record)
 
 
 def publish_file(path, report_doc, platform, now, source_root, new=None):
@@ -237,29 +230,29 @@ def publish_file(path, report_doc, platform, now, source_root, new=None):
     ({'platform', 'repo'}) starts a record; without it the record must exist (〈定義：覆核紀錄〉 建立與遺失).
     Each opened issue is written at once, so a publish that fails part-way loses none (同步失敗). Returns
     its digest."""
-    if new:
-        control.outside_source(path, source_root, 'review record')  # before any issue is opened
-        if Path(path).exists():
-            raise control.RecordUnusable(f'{path} exists; a new review record never replaces one, which would '
-                                         f'drop the decisions in it')
-        record = {'schema_version': '1', 'platform': new['platform'], 'repo': new['repo'], 'items': []}
-    else:
-        record = _current(path, source_root)
-    _checked(report_doc)
-    digest = _write(path, record, source_root)  # before any issue is opened: the record can be written
-    for finding in report_doc['findings']:
-        opened = len(record['items'])
-        try:
-            _publish_finding(record, finding, report_doc, platform, now)
-        except PlatformError as e:
-            raise PublishFailed(f'publish stopped at {finding["id"]}: {e}; the issues opened before it are in '
-                                f'the record, run publish again for the rest') from e
-        try:
-            digest = _write(path, record, source_root)  # an opened issue is never lost
-        except control.RecordUnusable as e:
-            numbers = [i['issue'] for i in record['items'][opened:]]
-            raise PublishFailed(f'issue {numbers} was opened but {e}; add it to the record by hand') from e
-    return digest
+    with control.writer(path, source_root, 'review record') as save:
+        if new:
+            if Path(path).exists():
+                raise control.RecordUnusable(f'{path} exists; a new review record never replaces one, which would '
+                                             f'drop the decisions in it')
+            record = {'schema_version': '1', 'platform': new['platform'], 'repo': new['repo'], 'items': []}
+        else:
+            record = _current(path, source_root)
+        _checked(report_doc)
+        digest = save(record)  # before any issue is opened: the record can be written
+        for finding in report_doc['findings']:
+            opened = len(record['items'])
+            try:
+                _publish_finding(record, finding, report_doc, platform, now)
+            except PlatformError as e:
+                raise PublishFailed(f'publish stopped at {finding["id"]}: {e}; the issues opened before it are in '
+                                    f'the record, run publish again for the rest') from e
+            try:
+                digest = save(record)  # an opened issue is never lost
+            except control.RecordUnusable as e:
+                numbers = [i['issue'] for i in record['items'][opened:]]
+                raise PublishFailed(f'issue {numbers} was opened but {e}; add it to the record by hand') from e
+        return digest
 
 
 def _review_of(item, now):

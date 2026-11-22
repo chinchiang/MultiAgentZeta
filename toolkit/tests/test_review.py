@@ -305,6 +305,24 @@ class RecordFiles(ControlZone):
             self.assertIn('not a valid review record', str(caught.exception))
         self.assertEqual((self.path.read_bytes(), platform.created), (before, []))
 
+    def test_concurrent_publications_keep_one_issue_for_the_same_finding(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Barrier
+
+        control.write(self.path, empty_record(), self.source)
+        platform = FakePlatform()
+        ready = Barrier(2)
+
+        def publish():
+            ready.wait(timeout=5)
+            return review.publish_file(self.path, valid_report(), platform, self.NOW, self.source)
+
+        with ThreadPoolExecutor(max_workers=2) as workers:
+            futures = [workers.submit(publish) for _ in range(2)]
+            digests = [future.result(timeout=10) for future in futures]
+        self.assertEqual(len(platform.created), 1)
+        self.assertEqual(digests, [control.file_digest(self.path)] * 2)
+
     def test_publish_creates_a_record_only_when_asked_to(self):
         platform = FakePlatform()
         digest = review.publish_file(self.path, valid_report(), platform, self.NOW, self.source,
