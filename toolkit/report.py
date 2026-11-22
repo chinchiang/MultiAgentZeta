@@ -54,16 +54,22 @@ def _cross_record_problems(doc):
                 if isinstance(r, dict) and field in r and field in doc and r[field] != doc[field]:
                     problems.append(f'{label}: {field} {r[field]!r} differs from the report ({doc[field]!r}); '
                                     'every record belongs to this run and its tested commit')
-    results = {r.get('id'): r.get('result') for r in _list(doc, 'execution_records') if isinstance(r, dict)}
-    for i, f in enumerate(_list(doc, 'findings')):
-        if not isinstance(f, dict) or f.get('status') != 'confirmed':
-            continue
-        ids = f.get('execution_record_ids') or []
-        if not any(results.get(x) == 'failed' for x in ids):
+    results = {}
+    for index, record in enumerate(doc['execution_records']):
+        record_id = record['id']
+        if record_id in results:
+            problems.append(f'execution_records/{index}/id: duplicate execution record {record_id!r}')
+        results[record_id] = record.get('result')
+    for i, f in enumerate(doc['findings']):
+        ids = f.get('execution_record_ids', [])
+        for index, record_id in enumerate(ids):
+            if record_id not in results:
+                problems.append(f'findings/{i}/execution_record_ids/{index}: unknown execution record {record_id!r}')
+        if f.get('status') == 'confirmed' and not any(results.get(x) == 'failed' for x in ids):
             problems.append(f'findings/{i}: a confirmed finding needs a failed execution record; '
                             f'execution_record_ids {ids} do not include one')
     return (problems + _requirement_problems(doc) + _approval_problems(doc)
-            + _review_problems(doc) + _environment_problems(doc) + _coverage_problems(doc))
+            + _review_problems(doc) + _coverage_problems(doc))
 
 
 def _environment_problems(doc):
@@ -75,7 +81,8 @@ def _environment_problems(doc):
     appear in coverage.unsupported_items."""
     if not isinstance(doc, dict):
         return []
-    stages = {s.get('stage'): s.get('status') for s in _list(doc, 'stages') if isinstance(s, dict)}
+    stages = {s['stage']: s.get('status') for s in _list(doc, 'stages')
+              if isinstance(s, dict) and isinstance(s.get('stage'), str)}
     has_env = 'environment' in doc
     problems = []
     if not has_env and (doc.get('status') in ('completed', 'partial')
@@ -104,7 +111,8 @@ def _environment_problems(doc):
     if cov.get('claim') == 'whole_scope':
         problems.append("coverage: claim cannot be 'whole_scope' when environment.unsupported is non-empty "
                         "(TK-SCP-001, TK-EVD-009)")
-    scopes = {i.get('scope') for i in _list(cov, 'unsupported_items') if isinstance(i, dict)}
+    scopes = {i['scope'] for i in _list(cov, 'unsupported_items')
+              if isinstance(i, dict) and isinstance(i.get('scope'), str)}
     problems += [f"coverage: unsupported_items lacks 'environment:{u}' from environment.unsupported "
                  f"(TK-SCP-001, TK-EVD-008)"
                  for u in dict.fromkeys(u for u in unsupported if isinstance(u, str))
@@ -269,7 +277,9 @@ def _requirement_problems(doc):
 
 def validate(doc):
     """Problems with a report, as human-readable strings; [] means valid."""
-    return _schema_problems(doc) + _cross_record_problems(doc)
+    problems = _schema_problems(doc)
+    # Environment diagnostics also explain blocked runs with incomplete records.
+    return (problems or _cross_record_problems(doc)) + _environment_problems(doc)
 
 
 # Spec names for the codes used in the JSON report.

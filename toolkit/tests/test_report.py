@@ -19,6 +19,26 @@ def valid_report():
 
 
 class Validate(unittest.TestCase):
+    def test_two_passed_records_must_have_distinct_ids(self):
+        doc = valid_report()
+        records = doc['execution_records']
+        records[2]['id'] = records[1]['id']
+        self.assertTrue(any('execution_records/2/id' in p for p in report.validate(doc)))
+
+    def test_every_evidence_reference_must_resolve(self):
+        for status in ('confirmed', 'evidence_pending'):
+            with self.subTest(status=status):
+                doc = valid_report()
+                finding = doc['findings'][0]
+                finding['status'] = status
+                finding['execution_record_ids'].append('missing-record')
+                self.assertTrue(any('findings/0/execution_record_ids/1' in p for p in report.validate(doc)))
+
+    def test_evidence_references_have_a_declared_type(self):
+        doc = valid_report()
+        doc['findings'][0]['execution_record_ids'] = [{}]
+        self.assertTrue(any('findings/0/execution_record_ids/0' in p for p in report.validate(doc)))
+
     def test_valid_report_has_no_problems(self):
         self.assertEqual(report.validate(valid_report()), [])
 

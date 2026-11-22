@@ -214,9 +214,14 @@ def sync_file(path, roles_path, roles_digest, platform, now, source_root):
     roles = _roles(roles_path, roles_digest, source_root)
     with control.writer(path, source_root, 'review record') as save:
         record = _current(path, source_root)
+        if control.utc_time(now) is None:
+            raise SyncFailed(f'invalid sync completion time: {now!r}')
         for item in record['items']:
             try:
                 _sync_item(item, roles, platform)
+                problems = validate(record)
+                if problems:
+                    raise PlatformError('; '.join(problems))
             except PlatformError as e:
                 raise SyncFailed(f'sync stopped at issue {item["issue"]}: {e}; the items before it are written, '
                                  f'the last complete sync is {record.get("synced_at") or "none"}') from e

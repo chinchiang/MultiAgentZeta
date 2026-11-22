@@ -267,6 +267,39 @@ class RecordFiles(ControlZone):
         self.assertNotIn('synced_at', saved)  # the last complete sync is still the one before
         self.assertEqual(sorted(p.name for p in self.control.iterdir()), ['review-record.json', 'review-roles.json'])
 
+    def test_invalid_platform_checkpoint_keeps_last_complete_sync_and_can_retry(self):
+        from dataclasses import replace
+
+        original = record(issue=7)
+        original['synced_at'] = '2026-11-07T00:00:00Z'
+        original['items'].append({**copy.deepcopy(original['items'][0]), 'fingerprint': 'sha256:f2', 'issue': 8})
+        control.write(self.path, original, self.source)
+        first, first_notes = self.reasoned_reject(7, 9001)
+        second, second_notes = self.reasoned_reject(8, 9002)
+        platform = FakePlatform(first | second, first_notes | second_notes)
+        good = platform.notes[8][0]
+        platform.notes[8][0] = replace(good, updated_at='invalid')
+        args = self.path, self.roles_path, self.roles_digest, platform, self.NOW, self.source
+        with self.assertRaisesRegex(review.SyncFailed, 'issue 8.*updated_at'):
+            review.sync_file(*args)
+        saved = json.loads(self.path.read_bytes())
+        self.assertEqual(review.validate(saved), [])
+        self.assertEqual(saved['synced_at'], original['synced_at'])
+        self.assertEqual([[d['event_id'] for d in i['decisions']] for i in saved['items']], [[9001], []])
+        platform.notes[8][0] = good
+        saved = control.read(self.path, review.sync_file(*args), self.source)
+        self.assertEqual(saved['synced_at'], self.NOW)
+        self.assertEqual([[d['event_id'] for d in i['decisions']] for i in saved['items']], [[9001], [9002]])
+
+    def test_malformed_stage_reports_the_field_without_opening_an_issue(self):
+        doc, platform = valid_report(), FakePlatform()
+        doc['stages'][0]['stage'] = []
+        self.assertTrue(any('stages/0/stage' in p for p in report.validate(doc)))
+        with self.assertRaisesRegex(review.ReportUnusable, 'stages/0/stage'):
+            review.publish_file(self.path, doc, platform, self.NOW, self.source, new=empty_record())
+        self.assertEqual(platform.created, [])
+        self.assertFalse(self.path.exists())
+
     def test_roles_with_another_digest_are_not_used(self):
         control.write(self.path, record(issue=7), self.source)
         before = self.path.read_bytes()
