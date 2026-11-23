@@ -30,6 +30,7 @@ Create a GitHub issue in this repo's ticket format:
 - Before publishing, read the spec text of every requirement listed in `## 對應條文`, and check each acceptance criterion against it: a criterion is stricter, looser or different from its requirement only when the ticket says why. Drafts from earlier sessions or handoffs are the usual source of a mismatch.
 - Write the body in 正體中文, using `GLOSSARY.md` terms.
 - Link the ticket to its parent as a sub-issue and add its blockers as native dependencies.
+- Add the stage label `v0.1a` or `v0.1b` (see `triage-labels.md`). `gh issue create --label` fails on a label that does not exist yet; both labels exist.
 
 ## When a skill says "fetch the relevant ticket"
 
