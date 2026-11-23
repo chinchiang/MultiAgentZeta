@@ -63,6 +63,38 @@ class JudgementOnTheResponseAndTheState(unittest.TestCase):
         self.assertEqual(cases['UPDATE-other-tenant']['result'], 'passed')
 
 
+class AnAllowedCaseWithoutAJudgeableAnswer(unittest.TestCase):
+    """〈定義：測試結果〉 允許案例: the access is granted (passed), refused by the application (failed), or the
+    reply cannot be judged (execution error); only a real refusal is a failed test."""
+    TEST = 'PUBLIC-READ-same-tenant'
+    GRANTED = [{'title': 'MARK-PUBLIC-ANNOUNCEMENT'}]
+
+    def result(self, attempt):
+        _, by_id, _ = run(one_case(self.TEST), scripted.World(attempt=attempt))
+        record = by_id[self.TEST]
+        self.assertEqual(record['case_kind'], 'allowed')
+        return record['result'], record['checks']
+
+    def test_the_row_the_requirement_allows_is_a_pass(self):
+        self.assertEqual(self.result((200, self.GRANTED)), ('passed', {'access_granted': True}))
+
+    def test_a_refusal_by_the_application_is_a_failure(self):
+        for attempt in ((403, {'message': 'permission denied'}), (401, None), (200, []), (404, None),
+                        (500, {'message': 'internal error'})):
+            with self.subTest(attempt=attempt):
+                self.assertEqual(self.result(attempt), ('failed', {'access_granted': False}))
+
+    def test_a_backend_the_gateway_reports_unavailable_is_an_execution_error(self):
+        for status in (502, 503, 504):
+            with self.subTest(status=status):
+                self.assertEqual(self.result((status, None)), ('error', {'access_granted': False}))
+
+    def test_a_200_whose_body_is_no_collection_is_an_execution_error(self):
+        for body in ({'message': 'ok'}, b'<html>ok</html>', None):
+            with self.subTest(body=body):
+                self.assertEqual(self.result((200, body)), ('error', {'access_granted': False}))
+
+
 class WhenTheObserverCannotRead(unittest.TestCase):
     """TK-IDN-009: a read that failed or cannot be trusted is no read; the case is blocked, never passed on the
     actor's refusal alone."""

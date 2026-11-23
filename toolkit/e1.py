@@ -17,6 +17,7 @@ or PATH and must match the support matrix's binary digest.
 import hashlib
 import json
 import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -85,6 +86,20 @@ class _Stop(Exception):
         self.blocked = blocked
 
 
+class _CommandFailed(Exception):
+    """A database or container command did not complete: it failed, timed out or could not be started."""
+
+
+def _step(name, action, *args):
+    """Run one BuildRecipe step. A command that does not complete blocks that step (TK-ENV-004,
+    〈定義：建置配方最低內容〉 失敗時處理) instead of leaving prepare() or reset() as an exception."""
+    try:
+        return action(*args)
+    except _CommandFailed as e:
+        raise _Stop(Blocked(name, f'a command of this step did not complete: {type(e.__cause__ or e).__name__}',
+                            str(e))) from e
+
+
 # --- recipe and source ----------------------------------------------------------
 
 def recipe_problems(recipe):
@@ -98,6 +113,39 @@ def recipe_problems(recipe):
             continue
         problems += [f'{step}.{s}' for s in settings if s not in recipe[step]]
     return problems
+
+
+# 〈定義：建置配方最低內容〉 資料庫命令中的配方值: the only recipe values that reach SQL the provisioning
+# identity runs. A table is a plain identifier, optionally schema-qualified; an email has no quote,
+# backslash, space or control character.
+_SQL_IDENTIFIER = r'[A-Za-z_][A-Za-z0-9_]*'
+_NAME = re.compile(_SQL_IDENTIFIER)
+_TABLE = re.compile(rf'{_SQL_IDENTIFIER}(\.{_SQL_IDENTIFIER})?')
+_EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+")
+
+
+def _is_list_of(pattern, values):
+    return isinstance(values, list) and all(isinstance(v, str) and pattern.fullmatch(v) for v in values)
+
+
+def sql_value_problem(recipe):
+    """(step, reason) for the first recipe value that would reach a database command without being a plain
+    table name or email address (〈定義：建置配方最低內容〉, TK-ENV-004), or None. The values are never escaped
+    into shape: a recipe that needs escaping is refused."""
+    if not _is_list_of(_NAME, recipe['test_data']['related_resources']):
+        return 'test_data', ('related_resources must list plain table names of the public schema '
+                             '(letters, digits and underscores)')
+    observer = recipe.get('observer')
+    if observer is not None and not (isinstance(observer, dict) and _is_list_of(_TABLE, observer.get('select_on', []))):
+        return 'auth', 'observer.select_on must list plain table names, optionally schema-qualified'
+    identities = recipe['auth']['identities']
+    if not (isinstance(identities, list) and all(isinstance(i, dict) and isinstance(i.get('name'), str)
+                                                 for i in identities)):
+        return 'auth', 'identities must be a list of objects, each with a name'
+    emails = [i['email'] for i in identities if i.get('email')]
+    if not _is_list_of(_EMAIL, emails):
+        return 'auth', 'an identity email must be a plain email address without quotes or spaces'
+    return None
 
 
 MODE = 'E1'  # the environment mode this module provides (〈定義：測試授權紀錄〉 environment)
@@ -115,6 +163,9 @@ def load_recipe(project_dir):
     problems = recipe_problems(recipe)
     if problems:
         return None, Blocked('recipe', 'BuildRecipe is incomplete; missing: ' + ', '.join(problems))
+    problem = sql_value_problem(recipe)
+    if problem:
+        return None, Blocked(*problem)
     return recipe, None
 
 
@@ -180,7 +231,10 @@ def _check_source(project_dir, recipe, matrix):
 # --- processes and HTTP ---------------------------------------------------------
 
 def _run(cmd, timeout=900, stdin=None):
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, input=stdin)
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, input=stdin)
+    except (subprocess.TimeoutExpired, OSError, UnicodeDecodeError) as e:
+        raise _CommandFailed(f'{Path(cmd[0]).name} {cmd[1] if len(cmd) > 1 else ""}: {type(e).__name__}') from e
 
 
 def _tail(text, lines=40):
@@ -202,11 +256,14 @@ def _http(method, url, headers=None, body=None, timeout=15):
 
 def _psql(env, sql):
     """Run SQL as the provisioning identity (postgres, inside the db container)."""
-    r = transport.docker_exec(f'supabase_db_{env.project_id}',
-                              ['psql', '-U', 'postgres', '-d', 'postgres', '-At', '-v', 'ON_ERROR_STOP=1'],
-                              stdin=sql, timeout=60)
+    try:
+        r = transport.docker_exec(f'supabase_db_{env.project_id}',
+                                  ['psql', '-U', 'postgres', '-d', 'postgres', '-At', '-v', 'ON_ERROR_STOP=1'],
+                                  stdin=sql, timeout=60)
+    except (subprocess.TimeoutExpired, OSError, UnicodeDecodeError) as e:
+        raise _CommandFailed(f'psql: {type(e).__name__}') from e
     if r.returncode:
-        raise RuntimeError(_tail(r.stderr or r.stdout))
+        raise _CommandFailed(_tail(r.stderr or r.stdout))
     return r.stdout
 
 
@@ -272,7 +329,7 @@ def _read_status(env):
 
 
 def _seeded_markers(env):
-    return _psql(env, 'select title from public.documents order by title;').split()
+    return _psql(env, 'select title from public.documents order by title;').splitlines()  # one title a line: a title may hold spaces
 
 
 def _check_test_data(env):
@@ -313,8 +370,8 @@ do $$ begin
 end $$;
 create role {OBSERVER_ROLE} login password '{password}' bypassrls nosuperuser nocreatedb nocreaterole noinherit;
 {usage}{grants}""")
-    except RuntimeError as e:
-        raise _Stop(Blocked('auth', f'cannot create the observer role {OBSERVER_ROLE}', str(e)))
+    except _CommandFailed as e:
+        raise _Stop(Blocked('auth', f'cannot create the observer role {OBSERVER_ROLE}', str(e))) from e
     env.observer = {'role': OBSERVER_ROLE, 'password': password, 'select_on': list(tables),
                     'host': _db_address(env)}
 
@@ -475,19 +532,19 @@ def prepare(project_dir, matrix=None):
         tools = _check_source(project_dir, recipe, matrix)
         _check_migrations(project_dir, recipe)
         env = Environment(project_dir, _project_config(project_dir)['project_id'], recipe, tools['supabase-cli'])
-        _start(env)
-        _check_test_data(env)
-        _create_observer(env)
-        _check_auth(env)
-        health = _check_health(env)
-        return Ready(_profile(env, tools, matrix, health), env)
+        _step('service_init', _start, env)
+        _step('test_data', _check_test_data, env)
+        _step('auth', _create_observer, env)
+        _step('auth', _check_auth, env)
+        health = _step('health', _check_health, env)
+        return Ready(_step('health', _profile, env, tools, matrix, health), env)
     except _Stop as stop:
         if env is not None:
-            _stop_stack(env)
+            _stop_quietly(env)
         return stop.blocked
-    except Exception:
+    except BaseException:  # an interrupt (Ctrl-C) too: a started stack is never left running (TK-ENV-003)
         if env is not None:
-            _stop_stack(env)
+            _stop_quietly(env)
         raise
 
 
@@ -503,29 +560,46 @@ def reset(env, matrix=None):
         return Blocked('snapshot_reset', 'environment was isolated earlier and must not be reused')
     matrix = load_matrix(matrix)
     try:
-        r = _run([env.cli, 'db', 'reset', '--workdir', str(env.project_dir), '--network-id', env.network])
-        if r.returncode:
-            raise _Stop(Blocked('snapshot_reset', 'reset failed; environment isolated, later cases stop',
-                                _tail(r.stdout + r.stderr)))
-        expected = sorted(env.recipe['test_data']['markers'])
-        found = _seeded_markers(env)
-        if found != expected:
-            raise _Stop(Blocked('snapshot_reset', f'reset check failed: found {found}, expected {expected}; '
-                                                  'environment isolated'))
-        env.tokens.clear()
-        _create_observer(env)
-        _check_auth(env)
-        health = _check_health(env)
-        return Ready(_profile(env, {'supabase-cli': env.cli}, matrix, health), env)
-    except _Stop as stop:
-        _stop_stack(env)
+        return _step('snapshot_reset', _reset, env, matrix)
+    except _Stop as stop:  # TK-SBX-010: whatever failed, the environment is isolated and not reused
+        _stop_quietly(env)
         return Blocked('snapshot_reset', stop.blocked.reason, stop.blocked.detail)
+    except BaseException:
+        _stop_quietly(env)
+        raise
+
+
+def _reset(env, matrix):
+    r = _run([env.cli, 'db', 'reset', '--workdir', str(env.project_dir), '--network-id', env.network])
+    if r.returncode:
+        raise _Stop(Blocked('snapshot_reset', 'reset failed; environment isolated, later cases stop',
+                            _tail(r.stdout + r.stderr)))
+    expected = sorted(env.recipe['test_data']['markers'])
+    found = _seeded_markers(env)
+    if found != expected:
+        raise _Stop(Blocked('snapshot_reset', f'reset check failed: found {found}, expected {expected}; '
+                                              'environment isolated'))
+    env.tokens.clear()
+    _create_observer(env)
+    _check_auth(env)
+    health = _check_health(env)
+    return Ready(_profile(env, {'supabase-cli': env.cli}, matrix, health), env)
 
 
 def _stop_stack(env):
     env.usable = False
     _run([env.cli, 'stop', '--no-backup', '--workdir', str(env.project_dir)], timeout=300)
     _run(['docker', 'network', 'rm', env.network], timeout=60)
+
+
+def _stop_quietly(env):
+    """Stop the stack on a failure path. The environment is marked unusable first, and a stop command that
+    does not complete does not replace the failure being handled."""
+    env.usable = False
+    try:
+        _stop_stack(env)
+    except _CommandFailed:
+        pass
 
 
 def destroy(env):
