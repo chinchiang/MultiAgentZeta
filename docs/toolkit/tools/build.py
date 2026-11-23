@@ -83,7 +83,9 @@ VERSIONED_PATHS = ('docs/toolkit/', 'GLOSSARY.md', 'docs/adr/', 'CODING_STANDARD
                    'AGENTS.md', 'docs/agents/', '.claude/agents/')
 
 LEVELS = ('須', '不得', '宜', '可')
-V01 = ('必做', '可延後', '不適用')
+# 必做 names the stage of prototype v0.1 that accepts the requirement (spec.md §0.3).
+MUST_A, MUST_B = '必做（v0.1a）', '必做（v0.1b）'
+V01 = (MUST_A, MUST_B, '可延後', '不適用')
 FIELDS = ('等級', '條文', '驗收', 'v0.1', '理由', '來源')
 BLOCK = re.compile(r'^#### (TK-([A-Z]{3})-(\d{3})) (.+?)\n(.*?)(?=^#### |^## |^### |\Z)', re.M | re.S)
 FIELD = r'^- \*\*{}\*\*：(.*)$'
@@ -343,11 +345,10 @@ def scope_doc(reqs, cfg, spec):
         f'> **版本**：{version}（四份文件共用版本號）',
         f'> **修訂日期**：{date}（臺灣時間）',
         '> **文件狀態**：架構設計草案，非已實作或已驗證的聲明。',
-        '> **資訊分級**：機密／僅供英業達內部使用；未取得正式文件編號或發布核准',
         '> **文件組合**：規格 [`spec.md`](spec.md)、設計說明 [`design-notes.md`](design-notes.md)、'
         '審查處置紀錄 [`review-log.md`](review-log.md)、《v0.1 最小範圍》 [`v0.1-scope.md`](v0.1-scope.md)',
     ])
-    rows = ['| 領域 | 必做 | 可延後 | 不適用 |', '| :--- | :--- | :--- | :--- |']
+    rows = ['| 領域 | v0.1a 必做 | v0.1b 必做 | 可延後 | 不適用 |', '| :--- | :--- | :--- | :--- | :--- |']
     cnt = collections.Counter()
     for area, name in cfg['area_names'].items():
         rs = sorted((r for r in reqs if r['area'] == area), key=lambda r: r['id'])
@@ -357,7 +358,7 @@ def scope_doc(reqs, cfg, spec):
         def cell(v, rs=rs):
             return '、'.join(f"`{r['id'][3:]}`" for r in rs if r['v0'] == v) or '—'
 
-        rows.append(f"| `{area}` {name} | {cell('必做')} | {cell('可延後')} | {cell('不適用')} |")
+        rows.append(f"| `{area}` {name} | {cell(MUST_A)} | {cell(MUST_B)} | {cell('可延後')} | {cell('不適用')} |")
         cnt.update(r['v0'] for r in rs)
     table = '\n'.join(rows)
     return f'''# 《v0.1 最小範圍》
@@ -368,15 +369,22 @@ def scope_doc(reqs, cfg, spec):
 
 ## 範圍定義
 
-原型 v0.1 對應里程碑 M0、M1 及部分 M2：以政策、隔離、可靠判定與單模型，串成已知物件越權的最小流程（設計說明第 5.3 節）。
+原型 v0.1 對應里程碑 M0、M1 及部分 M2：以政策、隔離、可靠判定與單模型，串成已知物件越權的最小流程（設計說明第 5.3 節）。v0.1 分兩個階段交付與驗收：
 
-**判定原則：** v0.1 實際會執行到的功能，相關的安全控制就是必做。例如 v0.1 會呼叫模型，送出前的機密遮罩就是必做；v0.1 不做 E2 環境，E2 擁有權驗證就可延後；v0.1 只用單一模型，多模型相關條文不適用。
+| 階段 | 內容 | 對應里程碑 |
+| :--- | :--- | :--- |
+| v0.1a | 不呼叫模型的已知物件越權流程：必要輸入與前置檢查、需求確認、E1 環境與隔離、固定範本的動態執行、觀測者判定、證據與報告、覆核紀錄 | M0、M1 |
+| v0.1b | 單模型審查：模型適配、審查任務、送出前的機密遮罩、資料路由、費用預算、提示注入防護、威脅清單與受控轉換 | 部分 M2 |
+
+v0.1a 的必做條文全部通過驗收後，v0.1a 即可單獨驗收；v0.1 整體驗收須兩個階段都通過。v0.1a 不呼叫模型，其報告不得宣稱已涵蓋 v0.1b 條文的能力（`TK-EVD-014`）。
+
+**判定原則：** 該階段實際會執行到的功能，相關的安全控制就是該階段必做。例如 v0.1b 會呼叫模型，送出前的機密遮罩就是 v0.1b 必做；v0.1a 會啟動受測應用，對外連線阻擋就是 v0.1a 必做；v0.1 不做 E2 環境，E2 擁有權驗證就可延後；v0.1 只用單一模型，多模型相關條文不適用。條文的驗收需要模型或模型審查區才能完成時，歸 v0.1b。
 
 標為「可延後」的條文，在 v0.1 不實作也不驗收；但 v0.1 的報告不得宣稱已涵蓋這些條文的能力（`TK-SCP-006`、`TK-EVD-014`）。
 
 ## 條文清單
 
-共 {sum(cnt.values())} 條：必做 {cnt['必做']} 條、可延後 {cnt['可延後']} 條、不適用 {cnt['不適用']} 條。下表省略 `TK-` 前綴；各條標題見規格附錄 A。
+共 {sum(cnt.values())} 條：必做 {cnt[MUST_A] + cnt[MUST_B]} 條（v0.1a {cnt[MUST_A]} 條、v0.1b {cnt[MUST_B]} 條）、可延後 {cnt['可延後']} 條、不適用 {cnt['不適用']} 條。下表省略 `TK-` 前綴；各條標題見規格附錄 A。
 
 {table}
 '''
@@ -390,7 +398,7 @@ def check_docs(snapshot):
     snapshot: dict of repo-relative POSIX path -> text, with CR characters kept.
     problems: list of Problem; when non-empty, updates is empty and counts is None.
     updates: dict of path -> new text, for generated outputs that are stale.
-    counts: Counter of requirement v0.1 values, plus 'total'.
+    counts: Counter of requirement v0.1 values, plus 'total' and '必做' (both stages together).
     """
     try:
         if SPEC not in snapshot:
@@ -420,6 +428,7 @@ def check_docs(snapshot):
     updates = {p: t for p, t in outputs.items() if snapshot.get(p) != t}
     counts = collections.Counter(r['v0'] for r in reqs)
     counts['total'] = len(reqs)
+    counts['必做'] = counts[MUST_A] + counts[MUST_B]
     return Result([], updates, counts)
 
 
@@ -698,7 +707,7 @@ def main(argv, repo=REPO):
             print(format_problem(p), file=sys.stderr)
         return 2
     c = result.counts
-    summary = f"{c['total']} requirements (必做 {c['必做']} / 可延後 {c['可延後']} / 不適用 {c['不適用']})"
+    summary = f"{c['total']} requirements (必做 {c['必做']} = v0.1a {c[MUST_A]} + v0.1b {c[MUST_B]} / 可延後 {c['可延後']} / 不適用 {c['不適用']})"
     stale = [Path(p).name for p in result.updates]
     if check:
         if stale:
