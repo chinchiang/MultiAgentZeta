@@ -55,7 +55,7 @@ SPEC = '''# 規格
 '''
 
 DEFAULT_REQS = [
-    dict(rid='TK-AAA-001', title='第一條', level='須', accept='負向測試。', v0='必做'),
+    dict(rid='TK-AAA-001', title='第一條', level='須', accept='負向測試。', v0='必做（v0.1a）'),
     dict(rid='TK-AAA-002', title='第二條', level='宜', accept='—', v0='可延後'),
     dict(rid='TK-BBB-001', title='第三條', level='不得', accept='設定檢查。', v0='不適用'),
 ]
@@ -109,6 +109,7 @@ class CleanSnapshot(unittest.TestCase):
     def test_counts(self):
         c = build.check_docs(make()).counts
         self.assertEqual((c['total'], c['必做'], c['可延後'], c['不適用']), (3, 1, 1, 1))
+        self.assertEqual((c['必做（v0.1a）'], c['必做（v0.1b）']), (1, 0))
 
 
 class Generation(unittest.TestCase):
@@ -127,8 +128,8 @@ class Generation(unittest.TestCase):
     def test_scope_doc(self):
         scope = self.snap[build.SCOPE]
         self.assertIn('> **版本**：v9.9.9', scope)
-        self.assertIn('共 3 條：必做 1 條、可延後 1 條、不適用 1 條。', scope)
-        self.assertIn('| `AAA` 甲領域 | `AAA-001` | `AAA-002` | — |', scope)
+        self.assertIn('共 3 條：必做 1 條（v0.1a 1 條、v0.1b 0 條）、可延後 1 條、不適用 1 條。', scope)
+        self.assertIn('| `AAA` 甲領域 | `AAA-001` | — | `AAA-002` | — |', scope)
 
 
 class RequirementBlocks(unittest.TestCase):
@@ -153,6 +154,14 @@ class RequirementBlocks(unittest.TestCase):
 
     def test_invalid_v01(self):
         self.assertEqual(rules(self.with_req(v0='之後')), {('invalid-v01', build.SPEC)})
+
+    def test_must_do_names_its_stage(self):
+        # spec.md §0.3: a must-do requirement says which stage of v0.1 accepts it.
+        self.assertEqual(rules(self.with_req(v0='必做')), {('invalid-v01', build.SPEC)})
+        self.assertEqual(rules(self.with_req(v0='必做（v0.1c）')), {('invalid-v01', build.SPEC)})
+        for stage in ('必做（v0.1a）', '必做（v0.1b）'):
+            with self.subTest(stage=stage):
+                self.assertEqual(rules(self.with_req(v0=stage)), set())
 
     def test_must_requirement_needs_acceptance(self):
         self.assertEqual(rules(self.with_req(accept='—')), {('missing-acceptance', build.SPEC)})
