@@ -1,5 +1,6 @@
 # Multi-Agent Vibe Coding 測試工具包：方法論與系統架構規劃報告
 
+> **本檔已被取代，不再更新**：這是 v1.0 原稿，只保留作為審查歷史。部分宣稱已在後續審查中撤回（見 `docs/toolkit/review-log.md` 第 5 章）；現行設計以 `docs/toolkit/` 的四份文件為準。  
 > **報告版本**：v1.0 (2026-10)  
 > **研究依據**：基於 2024–2026 年最新學術實證（arXiv / USENIX / IEEE / ICML）、開源專案原始碼（GitHub）與官方 API 技術規範交叉核實。
 
