@@ -245,6 +245,45 @@ class OutsideSupportMatrixEnv(unittest.TestCase):
                 e1.destroy(result.env)
 
 
+class ServiceImagesAgainstTheMatrix(unittest.TestCase):
+    """TK-SCP-001, 〈定義：建置配方最低內容〉 服務初始化與版本核對: a service image is the pinned one when its
+    repository, tag and digest are; the registry it was pulled from is not compared."""
+    DIGEST = 'sha256:' + '1' * 64
+    PINNED = {'image': 'public.ecr.aws/supabase/postgrest:v16.5', 'digest': DIGEST}
+
+    def test_the_pinned_image_is_in_the_matrix(self):
+        self.assertTrue(e1.service_in_matrix(self.PINNED, 'public.ecr.aws/supabase/postgrest:v16.5', self.DIGEST))
+
+    def test_the_same_content_from_another_registry_is_in_the_matrix(self):
+        for image in ('ghcr.io/supabase/postgrest:v16.5', 'supabase/postgrest:v16.5',
+                      'localhost:5000/supabase/postgrest:v16.5'):
+            with self.subTest(image=image):
+                self.assertTrue(e1.service_in_matrix(self.PINNED, image, self.DIGEST))
+
+    def test_another_digest_tag_or_repository_is_outside_the_matrix(self):
+        other = 'sha256:' + '2' * 64
+        for image, digest in (('public.ecr.aws/supabase/postgrest:v16.5', other),
+                              ('ghcr.io/supabase/postgrest:v16.5', other),
+                              ('public.ecr.aws/supabase/postgrest:v16.6', self.DIGEST),
+                              ('public.ecr.aws/supabase/postgrest', self.DIGEST),
+                              ('public.ecr.aws/someone/postgrest:v16.5', self.DIGEST),
+                              ('public.ecr.aws/supabase/postgrest:v16.5', '')):
+            with self.subTest(image=image, digest=digest):
+                self.assertFalse(e1.service_in_matrix(self.PINNED, image, digest))
+
+    def test_a_service_the_matrix_does_not_pin_is_outside_it(self):
+        for pinned in (None, {}, {'image': 'supabase/postgrest:v16.5'}, {'digest': self.DIGEST},
+                       {'image': 'supabase/postgrest:v16.5', 'digest': ''}):
+            with self.subTest(pinned=pinned):
+                self.assertFalse(e1.service_in_matrix(pinned, 'supabase/postgrest:v16.5', pinned and pinned.get('digest') or ''))
+        self.assertFalse(e1.service_in_matrix({'digest': self.DIGEST}, 'supabase/postgrest:v16.5', self.DIGEST))
+
+    def test_every_service_of_the_support_matrix_pins_an_image_and_a_digest(self):
+        for name, pinned in e1.load_matrix()['services'].items():
+            with self.subTest(service=name):
+                self.assertTrue(e1.service_in_matrix(pinned, pinned['image'], pinned['digest']))
+
+
 class SampleVersions(unittest.TestCase):
     """TK-VAL-001: the sample versions differ only in their document policies."""
 

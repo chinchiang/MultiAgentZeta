@@ -472,6 +472,23 @@ def _image_digest(image):
     return digests[0].split('@', 1)[1] if digests else ''
 
 
+def _without_registry(image):
+    """An image reference without its registry host: 'ghcr.io/supabase/kong:2.8.1' -> 'supabase/kong:2.8.1'.
+    The first component is a host when it has a dot or a port, or is localhost."""
+    first, _, rest = image.partition('/')
+    return rest if rest and ('.' in first or ':' in first or first == 'localhost') else image
+
+
+def service_in_matrix(pinned, image, digest):
+    """Whether a running service image is the one the support matrix pins (TK-SCP-001, 〈定義：建置配方最低內容〉
+    服務初始化與版本核對): the same repository, tag and content digest. The registry host is not compared: the
+    CLI pulls from a mirror registry when its first one fails, and a digest names the same content wherever it
+    was pulled from. Without a digest on both sides nothing is known to be the same."""
+    pinned = pinned or {}
+    return bool(digest) and digest == pinned.get('digest') and isinstance(pinned.get('image'), str) and (
+        _without_registry(pinned['image']) == _without_registry(image))
+
+
 def _profile(env, tools, matrix, health):
     services = {}
     for svc, c in _containers(env).items():
@@ -494,7 +511,7 @@ def _profile(env, tools, matrix, health):
         unsupported.append(f'docker-engine {engine} (matrix {engine_entry.get("version")})')
     for svc, s in services.items():
         pinned = matrix.get('services', {}).get(svc) or {}
-        if (pinned.get('image'), pinned.get('digest')) != (s['image'], s['image_digest']):
+        if not service_in_matrix(pinned, s['image'], s['image_digest']):
             unsupported.append(f'service {svc} {s["image"]}@{s["image_digest"]} '
                                f'(matrix {pinned.get("image")}@{pinned.get("digest")})')
     return {
