@@ -69,7 +69,10 @@ def write_recipe(d, recipe):
 
 
 def full_recipe():
-    return {step: {field: 'x' for field in fields} for step, fields in STEPS.items()}
+    recipe = {step: {field: 'x' for field in fields} for step, fields in STEPS.items()}
+    recipe['test_data']['related_resources'] = []  # the values that reach database commands have a shape
+    recipe['auth']['identities'] = []
+    return recipe
 
 
 class RecipeRequired(unittest.TestCase):
@@ -510,6 +513,166 @@ class ResetWithoutRecovery(unittest.TestCase):
         result = e1.reset(env)
         self.assertEqual((type(result), result.step), (e1.Blocked, 'snapshot_reset'))
         self.assertIn('no reset', result.reason)
+
+
+class RecipeValuesInDatabaseCommands(unittest.TestCase):
+    """〈定義：建置配方最低內容〉 資料庫命令中的配方值 (TK-ENV-004): a table name or email of the recipe that is
+    not a plain one blocks its step when the recipe is read, before anything is started."""
+
+    def blocked(self, change):
+        recipe = full_recipe()
+        change(recipe)
+        with tempfile.TemporaryDirectory() as d:
+            write_recipe(d, recipe)
+            result = e1.prepare(Path(d))
+        self.assertIsInstance(result, e1.Blocked)
+        return result
+
+    def test_a_related_resource_that_is_no_plain_table_name_blocks_test_data(self):
+        for value in (['memberships; drop table public.documents'], ['public.memberships'], ['a b'], [''], [7],
+                      'memberships'):
+            with self.subTest(value=value):
+                result = self.blocked(lambda r: r['test_data'].update(related_resources=value))
+                self.assertEqual(result.step, 'test_data')
+                self.assertIn('related_resources', result.reason)
+
+    def test_an_observer_table_that_is_no_plain_table_name_blocks_auth(self):
+        for value in (['public.documents to public; --'], ['a.b.c'], ['"documents"'], 'public.documents'):
+            with self.subTest(value=value):
+                result = self.blocked(lambda r: r.update(observer={'select_on': value}))
+                self.assertEqual(result.step, 'auth')
+                self.assertIn('observer.select_on', result.reason)
+
+    def test_an_identity_email_with_a_quote_or_a_space_blocks_auth(self):
+        for email in ("alice@tenant-a.test' or '1'='1", 'alice @tenant-a.test', 'alice', 7):
+            with self.subTest(email=email):
+                result = self.blocked(lambda r: r['auth'].update(identities=[{'name': 'owner', 'email': email}]))
+                self.assertEqual(result.step, 'auth')
+                self.assertIn('email', result.reason)
+
+    def test_identities_that_are_not_named_objects_block_auth(self):
+        for value in ('x', ['owner'], [{'email': 'alice@tenant-a.test'}]):
+            with self.subTest(value=value):
+                result = self.blocked(lambda r: r['auth'].update(identities=value))
+                self.assertEqual(result.step, 'auth')
+                self.assertIn('identities', result.reason)
+
+    def test_the_recipes_of_the_samples_are_accepted(self):
+        for version in ('vulnerable', 'patched', 'legit', 'lax-update-policy'):
+            with self.subTest(version=version):
+                recipe, blocked = e1.load_recipe(SAMPLES / version)
+                self.assertIsNone(blocked)
+                self.assertTrue(recipe['observer']['select_on'])
+                self.assertTrue(recipe['test_data']['related_resources'])
+
+
+class ACommandThatDoesNotComplete(unittest.TestCase):
+    """TK-ENV-004 失敗時處理, TK-SBX-010, TK-ENV-003: a database or container command that fails, times out or
+    cannot be started blocks its step; a failed reset isolates the environment; an interrupt stops the stack.
+    The commands are replaced at subprocess.run, so no Docker is needed."""
+
+    def setUp(self):
+        import hashlib
+        from unittest import mock
+        self.mock = mock
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        bin_path = Path(self.tmp.name) / 'fake-supabase'
+        bin_path.write_bytes(b'#!/bin/sh\n')
+        self.matrix = {'tools': {'supabase-cli': {'version': '2.122.0',
+                                                  'binary_sha256': hashlib.sha256(bin_path.read_bytes()).hexdigest()}}}
+        patcher = mock.patch.dict(os.environ, {'MAZ_SUPABASE_BIN': str(bin_path)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.commands = []
+
+    def run_commands(self, answer):
+        """Replace subprocess.run: `answer(argv)` returns (returncode, stdout, stderr) or raises."""
+        import subprocess
+
+        def fake(cmd, **kwargs):
+            self.commands.append(list(cmd))
+            code, out, err = answer(cmd)
+            return subprocess.CompletedProcess(cmd, code, out, err)
+        patcher = self.mock.patch('subprocess.run', side_effect=fake)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def stopped(self):
+        return any(c[1:2] == ['stop'] for c in self.commands)
+
+    def started_env(self):
+        recipe = json.loads((SAMPLES / 'patched' / e1.RECIPE_FILE).read_text(encoding='utf-8'))
+        return e1.Environment(SAMPLES / 'patched', 'maz-never-started', recipe, cli='/nonexistent/supabase')
+
+    def test_a_failing_database_command_blocks_its_step_and_stops_the_stack(self):
+        def answer(cmd):
+            if 'psql' in cmd:
+                return 1, '', 'ERROR:  relation "pg_extension" does not exist'
+            if cmd[1:2] == ['status']:
+                return 0, '{"API_URL": "http://127.0.0.1:1", "ANON_KEY": "k"}', ''
+            return 0, '', ''
+        self.run_commands(answer)
+        result = e1.prepare(failing_copy(self.tmp.name), matrix=self.matrix)
+        self.assertEqual((type(result), result.step), (e1.Blocked, 'service_init'))
+        self.assertIn('pg_extension', result.detail)
+        self.assertTrue(self.stopped())
+
+    def test_a_command_that_times_out_blocks_its_step(self):
+        import subprocess
+
+        def answer(cmd):
+            if cmd[1:2] == ['start']:
+                raise subprocess.TimeoutExpired(cmd, 900)
+            return 0, '', ''
+        self.run_commands(answer)
+        result = e1.prepare(failing_copy(self.tmp.name), matrix=self.matrix)
+        self.assertEqual((type(result), result.step), (e1.Blocked, 'service_init'))
+        self.assertIn('TimeoutExpired', result.reason)
+        self.assertTrue(self.stopped())
+
+    def test_an_interrupt_while_starting_stops_the_stack_and_is_not_swallowed(self):
+        def answer(cmd):
+            if cmd[1:2] == ['start']:
+                raise KeyboardInterrupt
+            return 0, '', ''
+        self.run_commands(answer)
+        with self.assertRaises(KeyboardInterrupt):
+            e1.prepare(failing_copy(self.tmp.name), matrix=self.matrix)
+        self.assertTrue(self.stopped())
+
+    def test_a_reset_whose_database_command_fails_isolates_the_environment(self):
+        def answer(cmd):
+            if 'psql' in cmd:
+                return 2, '', 'psql: error: connection to server failed'
+            return 0, '', ''
+        self.run_commands(answer)
+        env = self.started_env()
+        result = e1.reset(env, matrix=self.matrix)
+        self.assertEqual((type(result), result.step), (e1.Blocked, 'snapshot_reset'))
+        self.assertIn('connection to server failed', result.detail)
+        self.assertFalse(env.usable)
+        self.assertTrue(self.stopped())
+        again = e1.reset(env, matrix=self.matrix)  # TK-SBX-010: not reused
+        self.assertEqual((type(again), again.step), (e1.Blocked, 'snapshot_reset'))
+        self.assertIn('isolated earlier', again.reason)
+
+    def test_a_reset_that_cannot_stop_the_stack_is_still_blocked_and_isolated(self):
+        import subprocess
+
+        def answer(cmd):
+            if cmd[1:2] in (['db'], ['stop']):
+                raise subprocess.TimeoutExpired(cmd, 300)
+            return 0, '', ''
+        self.run_commands(answer)
+        env = self.started_env()
+        result = e1.reset(env, matrix=self.matrix)
+        self.assertEqual((type(result), result.step), (e1.Blocked, 'snapshot_reset'))
+        self.assertFalse(env.usable)
+
+    def test_seeded_titles_are_read_one_a_line(self):
+        self.run_commands(lambda cmd: (0, 'MARK A\nMARK-B\n', ''))
+        self.assertEqual(e1._seeded_markers(self.started_env()), ['MARK A', 'MARK-B'])
 
 
 class SourceBuildFastChecks(unittest.TestCase):

@@ -305,6 +305,10 @@ ALLOWED_TEMPLATES = {'public-read-v1': {'method': 'GET', 'table': 'announcements
                      'shared-read-v1': {'method': 'GET', 'table': 'documents'}}
 
 
+# 〈定義：測試結果〉 允許案例: the gateway reports that the backend behind it is unavailable.
+BACKEND_UNAVAILABLE = {502, 503, 504}
+
+
 def _allowed_case(ops, test, evidence):
     """An allowed-case template: public-read-v1 (e.g. USING (true) on public data, TK-DYN-004) or
     shared-read-v1 (a document shared with the actor's tenant, TK-DYN-003). Returns (result, checks)."""
@@ -317,6 +321,9 @@ def _allowed_case(ops, test, evidence):
                      'request': {'method': template['method'], 'path': path},
                      'response': {'status': status, 'rows': len(rows) if rows is not None else None}})
     granted = status == 200 and rows == [{'title': marker}]
+    if not granted and (status in BACKEND_UNAVAILABLE or (status == 200 and rows is None)):
+        # 〈定義：測試結果〉 允許案例: no answer the contract can judge is an execution error, not a refusal.
+        return 'error', {'access_granted': False}
     return ('passed' if granted else 'failed'), {'access_granted': granted}
 
 

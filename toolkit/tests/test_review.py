@@ -506,6 +506,8 @@ class CommandLine(ControlZone):
 
     def test_a_record_that_cannot_be_written_opens_no_issue(self):
         import os
+        if os.geteuid() == 0:
+            self.skipTest('root writes to a read-only directory, so the failure cannot be produced')
         locked = self.control / 'locked'
         locked.mkdir()
         os.chmod(locked, 0o500)  # readable, not writable
