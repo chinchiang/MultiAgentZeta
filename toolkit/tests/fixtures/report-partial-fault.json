@@ -6,6 +6,7 @@
   "source_id": "toolkit.scan",
   "commit": "a89be51",
   "status": "partial",
+  "limits": {"max_requests": 500, "requests": 8, "max_duration_seconds": 3600, "elapsed_seconds": 9.25, "max_concurrency": 1, "concurrency": 1},
   "source_changes": [],
   "review_record": null,
   "review_summary": {"pending": 1, "overdue": 0, "approved": 0, "rejected": 0, "evidence_pending": 0},

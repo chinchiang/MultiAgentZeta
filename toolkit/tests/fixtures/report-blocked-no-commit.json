@@ -6,6 +6,7 @@
   "source_id": "toolkit.scan",
   "commit": null,
   "status": "blocked",
+  "limits": {"max_requests": 500, "requests": 0, "max_duration_seconds": 3600, "elapsed_seconds": 0.01, "max_concurrency": 1, "concurrency": 1},
   "source_changes": [],
   "review_record": null,
   "review_summary": {"pending": 0, "overdue": 0, "approved": 0, "rejected": 0, "evidence_pending": 0},

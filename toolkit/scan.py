@@ -10,6 +10,7 @@ import json
 import re
 import secrets
 import string
+import time
 from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -107,6 +108,12 @@ class _RunState:
     prechecks: list = field(default_factory=list)  # one _Precheck per planned test, in plan order
     reviewed: _Reviewed = field(default_factory=_Reviewed)
     gaps: list = field(default_factory=list)  # 測試身分 the BuildRecipe cannot provide
+    clock: object = time.monotonic  # seconds; the run's time limit is measured with it
+    started: float = 0.0  # clock() when the run began
+    requests: int = 0  # actor requests and observer reads the run's cases made (執行限制 max_requests)
+
+    def elapsed(self):
+        return max(0.0, self.clock() - self.started)
 
 
 API_KEY_FORMATS = ('anon-jwt', 'publishable')
@@ -343,6 +350,46 @@ def _record_finding(state, findings, test, ex):
                                       root_cause='object-ownership-not-enforced',
                                       status=item_rule.finding_cap(state.listed.item(test)),
                                       evidence_type='dynamic', execution_record_ids=[ex['id']]))
+
+
+# 〈定義：執行限制的執行〉: the most requests a case makes, actor requests and observer reads together, so that a
+# case is dispatched only when the run can afford all of it. A denial case: the owner's control operation,
+# the identity check, the attempt, and the observer's reads before and after. An allowed case: the read.
+CASE_REQUESTS = {item_rule.DENIAL: 5, item_rule.ALLOWED: 1}
+FAULT_REQUESTS = {'session-revoked': 1}  # the logout that revokes the session
+CONCURRENCY = 1  # cases run one after another
+
+
+def _case_requests(test):
+    return CASE_REQUESTS[_case_kind(test)] + FAULT_REQUESTS.get(test.get('fault'), 0)
+
+
+def _limit_reached(state, test):
+    """Why the run's limits leave no room for this case, or None (TK-BUD-003, 〈定義：執行限制的執行〉). Checked
+    before the case is dispatched: a case is run whole or not at all."""
+    limits = state.manifest['limits']
+    need, used = _case_requests(test), state.requests
+    if used + need > limits['max_requests']:
+        return (f'request limit: the case needs up to {need} requests and {used} of max_requests '
+                f'{limits["max_requests"]} are used')
+    elapsed, seconds = state.elapsed(), need * _timeout(test)
+    if elapsed + seconds > limits['max_duration_seconds']:
+        return (f'time limit: the case may take {seconds:g} s and {elapsed:.0f} s of max_duration_seconds '
+                f'{limits["max_duration_seconds"]} have passed')
+    return None
+
+
+def _limits_report(state):
+    """The run's limits as stated and what the run used of them (〈定義：執行限制的執行〉). A limit that is not a
+    positive integer, which blocks the run in preflight, is reported as null."""
+    stated = state.manifest.get('limits')
+    stated = stated if isinstance(stated, dict) else {}
+
+    def limit(name):
+        return stated[name] if _is_positive_int(stated.get(name)) else None
+    return {'max_requests': limit('max_requests'), 'requests': state.requests,
+            'max_duration_seconds': limit('max_duration_seconds'), 'elapsed_seconds': round(state.elapsed(), 3),
+            'max_concurrency': limit('max_concurrency'), 'concurrency': CONCURRENCY}
 
 
 def _authorization_matrix(prepared):
@@ -929,15 +976,16 @@ def _environment_report(profile):
     }
 
 
-def run(manifest, prepare=environment.prepare):
+def run(manifest, prepare=environment.prepare, clock=time.monotonic):
     """Run the manifest's tests against its project and return the report and its Markdown.
 
     A run that cannot start (source digest mismatch, BuildRecipe step blocked) is
     reported with status blocked and the reason; every planned test is blocked.
+    clock() gives seconds; the run's time limit is measured with it, from here on.
     """
     run_start = datetime.now(timezone.utc)
     run_id = f'run-{run_start:%Y%m%d%H%M%S}-{secrets.token_hex(3)}'
-    state = _RunState(manifest, _Records(run_id, _commit(manifest)))
+    state = _RunState(manifest, _Records(run_id, _commit(manifest)), clock=clock, started=clock())
     problem = _preflight(state, run_start)
     if problem:
         return _blocked(state, problem, stage='preflight')
@@ -947,8 +995,10 @@ def run(manifest, prepare=environment.prepare):
         return _blocked(state, f'environment blocked at BuildRecipe step {prepared.step}: '
                                f'{prepared.reason}', stage='dynamic_execution')
     ops = prepared.env  # the operations on the stack (toolkit.environment), not its handles
+    ops.request_limit = manifest['limits']['max_requests']
     executions, findings = [], []
     stopped = None  # reason the remaining tests cannot run
+    undispatched = 0  # cases the run's limits left no room for
     try:
         env_report = _environment_report(prepared.profile)
         if not env_report['unsupported']:
@@ -956,6 +1006,11 @@ def run(manifest, prepare=environment.prepare):
                 started, evidence = _now(), []
                 if not precheck.runnable or stopped:
                     executions.append(_execution(state, test, started, *precheck.outcome(stopped)))
+                    continue
+                short = _limit_reached(state, test)
+                if short:  # TK-BUD-003: limited before dispatch; the case stays in the denominator, untested
+                    executions.append(_execution(state, test, started, 'untested', f'not dispatched: {short}'))
+                    undispatched += 1
                     continue
                 denial = _case_kind(test) == item_rule.DENIAL
                 undo = None
@@ -977,9 +1032,12 @@ def run(manifest, prepare=environment.prepare):
                     result, checks, error = 'error', None, f'request failed: {e}'
                 except environment.ApiKeyUnavailable as e:
                     result, checks, error = 'blocked', None, f'API key unavailable: {e}'
+                except environment.LimitReached as e:  # the count before dispatch should have held the case back
+                    result, checks, error = 'error', None, f'request limit reached inside the case: {e}'
                 finally:
                     if undo:
                         undo()
+                    state.requests = ops.requests
                 ex = _execution(state, test, started, result, error,
                                 approval_id=precheck.approval_id)  # it ran under this approval
                 if test.get('fault'):
@@ -1011,9 +1069,12 @@ def run(manifest, prepare=environment.prepare):
     definite = all(e['result'] in ('passed', 'failed') for e in executions)
     dynamic = ({'status': 'failed', 'reason': f'stopped, environment isolated: {stopped}'} if stopped
                else {'status': 'completed'})
+    indefinite = 'some tests have no definite result'
+    if undispatched:
+        indefinite += f'; {undispatched} not dispatched because an execution limit was reached (TK-BUD-003)'
     return _finish(state, executions, findings,
                    status='completed' if definite else 'partial',
-                   reason='' if definite else 'some tests have no definite result',
+                   reason='' if definite else indefinite,
                    stages=_stages(preflight={'status': 'completed'}, dynamic_execution=dynamic),
                    environment=env_report,
                    matrix=_authorization_matrix(prepared))
@@ -1140,6 +1201,7 @@ def _finish(state, executions, findings, status, reason, stages, environment, ma
            'manifest': {'id': manifest.get('id'), 'digest': _digest(manifest)},
            'stages': stages, 'requirements': _requirements(manifest, listed), 'authorization_matrix': matrix,
            'execution_records': executions, 'findings': findings, 'coverage': cov_record,
+           'limits': _limits_report(state),
            'source_changes': []}  # TK-ENV-006: the source under test is the pinned one (source_digest); v0.1 changes none
     if reason:  # status_reason says why the run is not completed, and what the owner has to do about it
         doc['status_reason'] = reason + _handover_note(listed)

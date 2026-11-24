@@ -398,6 +398,48 @@ class TheWholeReportIsTyped(unittest.TestCase):
         self.assertFalse(any('one finding' in p for p in self.problems(revised)))
 
 
+class TheLimitsRecord(unittest.TestCase):
+    """〈定義：執行限制的執行〉 (TK-BUD-003): the limits as stated and what the run used."""
+
+    def problems(self, **changes):
+        doc = valid_report()
+        doc['limits'].update(changes)
+        return report.validate(doc)
+
+    def test_the_example_is_valid_and_its_use_is_shown(self):
+        self.assertEqual(self.problems(), [])
+        md = report.render_markdown(valid_report())
+        self.assertIn('請求數：已用 11，上限 500', md)  # written here by hand
+        self.assertIn('時間：已用 12 秒，上限 3600 秒', md)
+        self.assertIn('並行數：實際 1，上限 1', md)
+
+    def test_more_requests_than_the_limit_is_refused(self):
+        self.assertEqual(self.problems(requests=500), [])
+        self.assertTrue(any('max_requests' in p for p in self.problems(requests=501)))
+
+    def test_a_run_whose_cases_ran_states_every_limit(self):
+        for name in ('max_requests', 'max_duration_seconds', 'max_concurrency'):
+            with self.subTest(limit=name):
+                self.assertTrue(any('not stated' in p for p in self.problems(**{name: None})))
+
+    def test_a_run_blocked_before_any_case_may_leave_a_limit_unstated(self):
+        doc = fixture('report-blocked-no-commit')
+        doc['limits'].update(max_requests=None, max_duration_seconds=None)
+        self.assertEqual(report.validate(doc), [])
+
+    def test_the_record_and_its_fields_are_required_and_typed(self):
+        doc = valid_report()
+        del doc['limits']
+        self.assertNotEqual(report.validate(doc), [])
+        for change in ({'requests': -1}, {'max_requests': 0}, {'concurrency': 2}, {'elapsed_seconds': -0.5},
+                       {'max_cost_usd': 0}):
+            with self.subTest(change=change):
+                self.assertNotEqual(self.problems(**change), [])
+        doc = valid_report()
+        del doc['limits']['elapsed_seconds']
+        self.assertNotEqual(report.validate(doc), [])
+
+
 class ACancelledCase(unittest.TestCase):
     """〈定義：覆蓋面向〉 取消與未執行: a cancelled case is a result of its own, counted apart and shown by name."""
 

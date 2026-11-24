@@ -24,9 +24,22 @@
     }
   ],
   "required": ["status", "manifest", "stages", "requirements", "authorization_matrix", "execution_records", "findings",
-               "coverage", "source_changes", "review_record", "review_summary"],
+               "coverage", "limits", "source_changes", "review_record", "review_summary"],
   "unevaluatedProperties": false,
   "properties": {
+    "limits": {
+      "description": "〈定義：執行限制的執行〉 (TK-BUD-003): the run's limits on requests, time and concurrency as the ScanManifest states them, and what the run used. A stated limit is null when it was missing or no positive integer, which blocks the run in preflight. requests counts the actor requests and observer reads of the run's cases; elapsed_seconds is the time from the start of the run to its report; cases run one at a time.",
+      "type": "object", "additionalProperties": false,
+      "required": ["max_requests", "requests", "max_duration_seconds", "elapsed_seconds", "max_concurrency", "concurrency"],
+      "properties": {
+        "max_requests": {"type": ["integer", "null"], "minimum": 1},
+        "requests": {"type": "integer", "minimum": 0},
+        "max_duration_seconds": {"type": ["integer", "null"], "minimum": 1},
+        "elapsed_seconds": {"type": "number", "minimum": 0},
+        "max_concurrency": {"type": ["integer", "null"], "minimum": 1},
+        "concurrency": {"const": 1}
+      }
+    },
     "manifest": {
       "description": "The ScanManifest the run was given: its identifier as given (any JSON value when the run was blocked for it, 〈定義：必要輸入〉) and the digest of its content.",
       "type": "object", "required": ["id", "digest"], "additionalProperties": false,
