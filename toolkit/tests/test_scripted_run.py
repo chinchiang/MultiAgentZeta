@@ -304,6 +304,76 @@ class TheCoverageComesFromTheInventory(unittest.TestCase):
         self.assertEqual(cov['inventory']['unresolved'][0]['file'], '(project)')
 
 
+class ExclusionsComeFromTheScanManifest(unittest.TestCase):
+    """〈定義：覆蓋面向〉 排除項, TK-EVD-009: scope.exclusions of the ScanManifest reach the coverage record."""
+    ROUTES = {'ref': 'nextjs-routes', 'reason': 'the project has no Next.js application', 'confirmed_by': 'owner',
+              'version': 'v1'}
+    # What READ-other-tenant exercises on the vulnerable sample: the table and its policies for select.
+    DOCUMENT_READ = ('public.documents', 'public.documents: members read documents shared with their tenant',
+                     'public.documents: tenant members read documents')
+
+    def coverage_with(self, exclusions):
+        m, world = passing_read()
+        m['scope']['exclusions'] = exclusions
+        rep = run(m, world)[0]
+        return rep, rep['coverage']
+
+    def test_a_complete_exclusion_takes_its_item_out_of_the_denominator_and_is_reported(self):
+        rep, cov = self.coverage_with([self.ROUTES])
+        self.assertEqual((cov['denominator'], cov['unsupported']), (5, 4))
+        self.assertEqual((cov['excluded'], cov['rejected_exclusions'], cov['excluded_record_ids']), ([self.ROUTES], [], []))
+        self.assertIn('nextjs-routes', {u['scope'] for u in cov['unsupported_items']})  # still listed, not hidden
+        self.assertIn('排除：`nextjs-routes`', report.render_markdown(rep))
+
+    def test_an_incomplete_or_unknown_exclusion_is_rejected_and_the_item_stays(self):
+        for field in ('reason', 'confirmed_by', 'version'):
+            for incomplete in ({k: v for k, v in self.ROUTES.items() if k != field}, {**self.ROUTES, field: '  '}):
+                with self.subTest(field=field, given=field in incomplete):
+                    _, cov = self.coverage_with([incomplete])
+                    self.assertEqual((cov['denominator'], cov['excluded']), (6, []))
+                    self.assertEqual(cov['rejected_exclusions'], [{'ref': 'nextjs-routes', 'problem': f'missing {field}'}])
+        _, cov = self.coverage_with([{**self.ROUTES, 'ref': 'public.no_such_table'}])
+        self.assertEqual((cov['denominator'], cov['excluded']), (6, []))
+        self.assertEqual(cov['rejected_exclusions'], [{'ref': 'public.no_such_table', 'problem': 'not in the inventory'}])
+
+    def test_excluding_everything_a_test_exercises_leaves_its_record_out_and_names_it(self):
+        rep, cov = self.coverage_with([{**self.ROUTES, 'ref': ref} for ref in self.DOCUMENT_READ])
+        self.assertEqual(cov['excluded_record_ids'], [rep['execution_records'][0]['id']])
+        self.assertEqual((cov['denominator'], cov['executed']), (5, 0))
+        self.assertIsNone(cov['required_test_completion_rate'])
+        self.assertEqual(cov['states']['required_test_completion_rate'], 'not_applicable')
+        self.assertEqual(rep['execution_records'][0]['result'], 'passed')  # the test still ran and is still reported
+        self.assertIn('隨排除項移出分母的執行紀錄', report.render_markdown(rep))
+
+    def test_excluding_only_part_of_what_a_test_exercises_keeps_its_record(self):
+        _, cov = self.coverage_with([{**self.ROUTES, 'ref': 'public.documents'}])
+        self.assertEqual((cov['excluded_record_ids'], cov['denominator'], cov['executed']), ([], 6, 1))
+
+    def test_exclusions_of_the_wrong_shape_block_the_run_in_preflight(self):
+        for wrong, said in (('nextjs-routes', 'must be a list'),
+                            (['nextjs-routes'], 'scope.exclusions/0 must be an object'),
+                            ([{**self.ROUTES, 'ref': ''}], 'scope.exclusions/0.ref'),
+                            ([{k: v for k, v in self.ROUTES.items() if k != 'ref'}], 'scope.exclusions/0.ref'),
+                            ([{**self.ROUTES, 'reason': 7}], 'reason must be text'),
+                            ([{**self.ROUTES, 'approved': True}], 'fields other than')):
+            with self.subTest(wrong=wrong):
+                m, world = passing_read()
+                m['scope']['exclusions'] = wrong
+                rep = run(m, world)[0]
+                self.assertEqual((rep['status'], rep['stages'][0]['status']), ('blocked', 'blocked'))
+                self.assertIn(said, rep['status_reason'])
+                self.assertEqual((rep['coverage']['excluded'], world.http_calls), ([], []))
+
+    def test_without_exclusions_nothing_changes(self):
+        for exclusions in ([], None):
+            with self.subTest(exclusions=exclusions):
+                m, world = passing_read()
+                if exclusions is not None:
+                    m['scope']['exclusions'] = exclusions
+                cov = run(m, world)[0]['coverage']
+                self.assertEqual((cov['denominator'], cov['excluded'], cov['excluded_record_ids']), (6, [], []))
+
+
 class DuplicateTestIdsAreRefusedInPreflight(unittest.TestCase):
     """TK-ENV-001, TK-RUN-001: each test in ScanManifest.tests has its own test_id; a second test with the
     same test_id blocks preflight instead of overwriting an earlier test's precheck."""

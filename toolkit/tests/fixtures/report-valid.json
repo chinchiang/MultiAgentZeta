@@ -172,6 +172,7 @@
       "judged": 3
     },
     "excluded": [],
+    "excluded_record_ids": [],
     "rejected_exclusions": []
   }
 }

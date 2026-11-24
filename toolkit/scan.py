@@ -652,6 +652,42 @@ def _commit(manifest):
     return commit if _nonempty_str(commit) else None
 
 
+EXCLUSION_KEYS = ('ref', *coverage.EXCLUSION_FIELDS)
+
+
+def _exclusion_problems(scope):
+    """〈定義：覆蓋面向〉 排除項 as the ScanManifest gives them (受測範圍 scope.exclusions, optional): a list of
+    objects of ref, reason, confirmed_by and version, each a string when given. A wrong shape blocks the run;
+    a missing or blank reason, confirmer or version does not, and the item then stays in the denominator
+    (TK-EVD-009)."""
+    if 'exclusions' not in scope:
+        return []
+    exclusions = scope['exclusions']
+    if not isinstance(exclusions, list):
+        return ['scope.exclusions (受測範圍) must be a list']
+    problems = []
+    for i, e in enumerate(exclusions):
+        where = f'scope.exclusions/{i}'
+        if not isinstance(e, dict):
+            problems.append(f'{where} must be an object')
+        elif not _nonempty_str(e.get('ref')):
+            problems.append(f'{where}.ref must be a non-empty string naming an inventory item')
+        elif unknown := sorted(set(e) - set(EXCLUSION_KEYS), key=str):
+            problems.append(f'{where} has fields other than {", ".join(EXCLUSION_KEYS)}: {unknown}')
+        elif wrong := [f for f in coverage.EXCLUSION_FIELDS if e.get(f) is not None and not isinstance(e[f], str)]:
+            problems.append(f'{where}: {", ".join(wrong)} must be text')
+    return problems
+
+
+def _exclusions(manifest):
+    """The exclusions of a ScanManifest whose shape is right, else none: a run blocked for their shape excludes
+    nothing."""
+    scope = manifest.get('scope')
+    if not isinstance(scope, dict) or 'exclusions' not in scope or _exclusion_problems(scope):
+        return []
+    return scope['exclusions']
+
+
 def _input_problems(manifest):
     """Missing or invalid required inputs (〈定義：必要輸入〉, TK-SCP-002) of the ScanManifest; each one blocks the run."""
     problems = []
@@ -676,6 +712,7 @@ def _input_problems(manifest):
             problems.append('scope.resources (受測範圍) must be a list')
         elif resources:
             problems += _resource_problems(resources)
+        problems += _exclusion_problems(scope)
         ops = scope.get('allowed_operations')
         if ops and (not isinstance(ops, list) or any(o not in authorization.METHODS for o in ops)):
             problems.append(f'scope.allowed_operations (受測範圍) must list HTTP methods of {list(authorization.METHODS)}')
@@ -1068,7 +1105,7 @@ def _cases(state, executions, inv):
         resources = [item['resource']] if item and item.get('resource') else list((item or {}).get('resources', []))
         command = _command(test)
         # passed and failed are only given when the precondition and the control held (everything else is blocked)
-        cases.append({'id': ex['test_id'], 'result': ex['result'], 'valid': True, 'module': MODULE,
+        cases.append({'id': ex['test_id'], 'record': ex['id'], 'result': ex['result'], 'valid': True, 'module': MODULE,
                       'covers': inventory.covers(inv, resources, command) if command else []})
     return cases
 
@@ -1077,7 +1114,8 @@ def _finish(state, executions, findings, status, reason, stages, environment, ma
     manifest, records, listed = state.manifest, state.records, state.listed
     inv = _inventory(state, stages)
     env_supported = not (environment and environment['unsupported'])
-    numbers = coverage.coverage(inv, _cases(state, executions, inv), environment_supported=env_supported)
+    numbers = coverage.coverage(inv, _cases(state, executions, inv), _exclusions(manifest),
+                                environment_supported=env_supported)
     read = not any(u['file'] == '(project)' for u in inv['unresolved'])
     cov_record = records.new(
         'coverage', inventory_source=(f"{inv['rule']} extraction of supabase/migrations/*.sql" if read

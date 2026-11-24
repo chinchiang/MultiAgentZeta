@@ -839,6 +839,71 @@ class CoverageRecord(unittest.TestCase):
             every['coverage']['states'][name] = 'not_applicable'
         self.assertEqual(self.problems(every), [])
 
+    EXCLUDED_SCOPE = {'ref': 'rls-views', 'reason': 'no views', 'confirmed_by': 'owner', 'version': 'v1'}
+
+    def with_a_scope_and_a_record_excluded(self):
+        """report-valid with one unsupported scope excluded and its first execution record left out with it."""
+        doc = valid_report()
+        cov, first = doc['coverage'], doc['execution_records'][0]
+        self.assertIn(first['result'], ('passed', 'failed'))
+        cov['excluded'] = [self.EXCLUDED_SCOPE]
+        cov['excluded_record_ids'] = [first['id']]
+        cov['denominator'] -= 2
+        cov['unsupported'] -= 1
+        cov['executed'] -= 1
+        cov['valid_judgements'] -= 1
+        cases = len(doc['execution_records']) - 1
+        cov['effective_judgement_rate'] = cov['valid_judgements'] / cov['denominator']
+        cov['tool_support_rate'] = (cov['denominator'] - cov['unsupported']) / cov['denominator']
+        cov['required_test_completion_rate'] = cov['executed'] / cases
+        return doc
+
+    def test_with_exclusions_the_denominator_and_the_completion_rate_are_still_counted(self):
+        self.assertEqual(self.problems(self.with_a_scope_and_a_record_excluded()), [])
+
+    def test_with_exclusions_a_wrong_denominator_is_refused(self):
+        for change in (1, -1):
+            with self.subTest(change=change):
+                doc = self.with_a_scope_and_a_record_excluded()
+                doc['coverage']['denominator'] += change
+                self.assertTrue(any('denominator' in p for p in self.problems(doc)), self.problems(doc))
+
+    def test_with_exclusions_a_wrong_completion_rate_is_refused(self):
+        for wrong in (1.0, 0.0):
+            doc = self.with_a_scope_and_a_record_excluded()
+            if doc['coverage']['required_test_completion_rate'] == wrong:
+                continue
+            with self.subTest(wrong=wrong):
+                doc['coverage']['required_test_completion_rate'] = wrong
+                self.assertTrue(any('required_test_completion_rate' in p for p in self.problems(doc)), self.problems(doc))
+
+    def test_a_record_left_out_must_be_a_record_of_the_report_named_once_and_rest_on_an_exclusion(self):
+        doc = self.with_a_scope_and_a_record_excluded()
+        doc['coverage']['excluded_record_ids'] = ['exec-9999']
+        self.assertTrue(any('no execution record' in p for p in self.problems(doc)), self.problems(doc))
+        doc = self.with_a_scope_and_a_record_excluded()
+        doc['coverage']['excluded_record_ids'] *= 2
+        self.assertTrue(any('more than once' in p for p in self.problems(doc)), self.problems(doc))
+        doc = valid_report()
+        doc['coverage']['excluded_record_ids'] = [doc['execution_records'][0]['id']]
+        self.assertTrue(any('nothing is excluded' in p for p in self.problems(doc)), self.problems(doc))
+
+    def test_when_every_record_is_left_out_the_completion_rate_is_not_applicable_and_has_no_number(self):
+        doc = valid_report()
+        cov = doc['coverage']
+        cov['excluded'] = [{**self.EXCLUDED_SCOPE, 'ref': 'public.documents'}]  # an inventoried item, no scope
+        cov['excluded_record_ids'] = [e['id'] for e in doc['execution_records']]
+        left = len(cov['unsupported_items'])
+        self.assertGreater(left, 0)
+        cov.update(denominator=left, executed=0, valid_judgements=0, blocked=0, errors=0, untested=0, cancelled=0,
+                   unsupported=left, effective_judgement_rate=0.0, tool_support_rate=0.0,
+                   required_test_completion_rate=None)
+        cov['states']['required_test_completion_rate'] = 'not_applicable'
+        self.assertEqual(self.problems(doc), [])
+        cov['required_test_completion_rate'] = 1.0
+        cov['states']['required_test_completion_rate'] = 'measured'
+        self.assertTrue(any('required_test_completion_rate' in p for p in self.problems(doc)), self.problems(doc))
+
     def test_with_exclusions_the_denominator_may_be_smaller_than_the_records_say(self):
         doc = valid_report()
         doc['coverage']['excluded'] = [{'ref': 'rls-views', 'reason': 'no views', 'confirmed_by': 'owner', 'version': 'v1'}]
