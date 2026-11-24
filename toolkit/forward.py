@@ -25,7 +25,8 @@ class Relay:
         except OSError:
             self._server.close()
             raise
-        threading.Thread(target=self._accept, daemon=True).start()
+        self._acceptor = threading.Thread(target=self._accept, daemon=True)
+        self._acceptor.start()
 
     def _accept(self):
         while True:
@@ -79,6 +80,8 @@ class Relay:
             except OSError:
                 pass
         self._server.close()
+        # The kernel keeps the listening socket, and so the port, until the thread has left accept().
+        self._acceptor.join(timeout=5)
 
 
 def _pump(source, sink):
