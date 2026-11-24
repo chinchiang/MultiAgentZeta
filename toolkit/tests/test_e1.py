@@ -284,6 +284,73 @@ class ServiceImagesAgainstTheMatrix(unittest.TestCase):
                 self.assertTrue(e1.service_in_matrix(pinned, pinned['image'], pinned['digest']))
 
 
+def _probe(container):
+    """What a container can reach, from inside it: an outside address by IP, and an outside name."""
+    import subprocess
+
+    def inside(script):
+        r = subprocess.run(['docker', 'exec', container, 'bash', '-c', script], capture_output=True, text=True, timeout=60)
+        return (r.stdout + r.stderr).strip().replace('\n', ' | ')[:200] or f'exit {r.returncode}'
+    return {'outbound_ip': inside('timeout 8 bash -c "</dev/tcp/1.1.1.1/443" && echo OPEN || echo CLOSED'),
+            'dns': inside('getent hosts example.com && echo RESOLVED || echo UNRESOLVED'),
+            'default_route': inside('(ip route 2>/dev/null || cat /proc/net/route) | head -3')}
+
+
+@needs_env
+class NetworkIsolationMeasurementEnv(unittest.TestCase):
+    """Measurement for #6, not yet a requirement: what each way of creating the stack's network does on the
+    Docker engine of the support matrix. Docker's documentation does not say whether a port is published on
+    an --internal network, nor what a container still reaches without masquerading, and the Supabase CLI
+    connects to the published database port to apply migrations. Each candidate is tried with a real stack
+    and the outcome is printed as a `MEASURE` line; only the control is asserted (a stack on today's network
+    reaches the outside, or the probe proves nothing). TK-SBX-004 is implemented from these lines."""
+
+    CANDIDATES = {'control': [],
+                  'internal': ['--internal'],
+                  'no_masquerade': ['-o', 'com.docker.network.bridge.enable_ip_masquerade=false']}
+
+    def measure(self, name):
+        import sys
+        from unittest import mock
+        extra = self.CANDIDATES[name]
+
+        def create(env):
+            e1._run(['docker', 'network', 'rm', env.network], timeout=60)
+            r = e1._run(['docker', 'network', 'create', '--driver', 'bridge', '--ipv6=false',
+                         '-o', f'{e1.LOOPBACK_OPTION}=127.0.0.1', *extra, env.network], timeout=60)
+            if r.returncode:
+                raise e1._Stop(e1.Blocked('service_init', 'cannot create the network', (r.stdout + r.stderr)[-500:]))
+        found = {'candidate': name}
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(e1, '_create_network', create):
+            result = e1.prepare(failing_copy(d, version='vulnerable'))
+            try:
+                found['prepare'] = type(result).__name__
+                if isinstance(result, e1.Blocked):
+                    found.update(step=result.step, reason=result.reason, detail=result.detail[-600:].replace('\n', ' | '))
+                else:
+                    env = result.env
+                    found.update(_probe(f'supabase_db_{env.project_id}'))
+                    found['published'] = sorted(published_bindings(env.project_id))
+                    status, _ = e1._http('GET', env.api_url + '/rest/v1/', {'apikey': env.anon_key})
+                    found['api_from_host'] = status
+            finally:
+                if isinstance(result, e1.Ready):
+                    e1.destroy(result.env)
+        print('MEASURE ' + json.dumps(found, ensure_ascii=False, sort_keys=True), file=sys.stderr, flush=True)
+        return found
+
+    def test_the_control_reaches_the_outside_so_the_probe_means_something(self):
+        found = self.measure('control')
+        self.assertEqual(found['prepare'], 'Ready', found)
+        self.assertIn('OPEN', found['outbound_ip'], found)
+
+    def test_measure_an_internal_network(self):
+        self.measure('internal')
+
+    def test_measure_a_network_without_masquerading(self):
+        self.measure('no_masquerade')
+
+
 class SampleVersions(unittest.TestCase):
     """TK-VAL-001: the sample versions differ only in their document policies."""
 
