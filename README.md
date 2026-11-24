@@ -7,7 +7,7 @@
 - **設計文件是草案。** 規格、設計說明與審查紀錄都標示為架構設計草案，不是已實作或已驗證的聲明。
 - **原型只涵蓋 v0.1 的最小流程**：對 Next.js 加 Supabase 專案做已知的物件越權測試，環境是本機的 Supabase 堆疊（E1）。v0.1 分兩階段驗收：v0.1a 是不呼叫模型的流程（目前在做的部分），v0.1b 是單模型審查（尚未動工）。範圍見 [`docs/toolkit/v0.1-scope.md`](docs/toolkit/v0.1-scope.md)。
 - **已實作的工作階段**：前置檢查、動態執行、判定與報告。靜態與架構分析、模型審查、威脅與測試規劃三個階段尚未實作，報告裡標為 `not_run`。
-- **還沒有的部分**：沒有命令列入口，一次執行目前只能從 Python 呼叫 `toolkit.scan.run()`（測試就是這樣跑的）。《v0.1 最小範圍》的必做條文中，模型適配、機密遮罩、資料路由、預算、提示注入防護、沙盒與對外連線阻擋、中止都還沒有程式；`ScanManifest` 的執行限制（請求數、時間、並行數、費用、網路允許清單）只檢查有沒有填，還不會實際限制執行。進度見 [#1](https://github.com/chinchiang/MultiAgentZeta/issues/1) 的子議題。
+- **還沒有的部分**：《v0.1 最小範圍》的必做條文中，模型適配、機密遮罩、資料路由、預算、提示注入防護、沙盒與對外連線阻擋、中止都還沒有程式；`ScanManifest` 的執行限制（請求數、時間、並行數、費用、網路允許清單）只檢查有沒有填，還不會實際限制執行。進度見 [#1](https://github.com/chinchiang/MultiAgentZeta/issues/1) 的子議題。
 - **已有的部分**：從 `ScanManifest` 到 JSON 報告與 Markdown 的一次執行；S2 預設政策範本；確認清單；測試授權紀錄；覆核紀錄（決定者取自平台帳號）；報告驗證；觀測者與行為者兩條取得通道的分離。
 
 ## 目錄
@@ -45,6 +45,17 @@ export MAZ_SUPABASE_BIN="$(toolkit/tools/fetch-supabase-cli.sh)"   # 取得並�
 toolkit/tools/run-env-tests.sh NAME                                # 啟動；記錄在 scratch/logs/NAME.log
 toolkit/tools/run-env-tests.sh --status NAME                       # 查進度與失敗
 ```
+
+## 執行一次掃描
+
+需要 Docker 與支援矩陣固定的 Supabase CLI。輸入是一份 `ScanManifest`（JSON），格式見規格〈定義：必要輸入〉；它引用的確認清單與測試授權紀錄要放在受測專案以外的控制區。
+
+```sh
+export MAZ_SUPABASE_BIN="$(toolkit/tools/fetch-supabase-cli.sh)"
+.venv/bin/python -I toolkit/tools/scan_run.py --manifest MANIFEST.json --out REPORT_DIR
+```
+
+`REPORT_DIR` 須在受測專案以外，而且裡面沒有先前的報告；執行後會有 `report.json` 與 `report.md`。結束碼 0 表示寫出了報告，不論執行是完整完成、部分完成或受阻，狀態請看輸出的狀態行；2 表示輸入被拒絕、什麼都沒有開始；3 表示工具本身失敗。目前還沒有產生 `ScanManifest`、確認清單與測試授權紀錄的指令，要自己準備這三份檔案；`toolkit/tests/test_scan.py` 的 `manifest()` 是一個完整的例子。
 
 ## 修改文件
 
