@@ -129,24 +129,36 @@ def _coverage_problems(doc):
         problems.append(f'coverage: valid_judgements {valid} is more than executed {executed}')
     if den is not None and None not in classes and sum(classes) != den:
         problems.append(f'coverage: {", ".join(COVERAGE_CLASSES)} add up to {sum(classes)}, not the denominator {den}')
+    # 〈定義：覆蓋面向〉 排除項: what an exclusion took out is named, so the denominator is counted, not bounded.
+    left_ids = cov.get('excluded_record_ids')
+    record_ids = [r.get('id') for r in records if isinstance(r, dict)]
+    cases = len(records)
+    if isinstance(left_ids, list):
+        if len(set(map(str, left_ids))) != len(left_ids):
+            problems.append('coverage: excluded_record_ids names an execution record more than once')
+        problems += [f'coverage: excluded_record_ids names {i!r}, which is no execution record of this report'
+                     for i in left_ids if i not in record_ids]
+        if left_ids and not excluded:
+            problems.append('coverage: execution records are left out of the denominator but nothing is excluded')
+        cases -= len({i for i in left_ids if isinstance(i, str)} & set(record_ids))
     if den is not None and isinstance(items, list) and isinstance(excluded, list):
-        expected = len(records) + len(items)  # an exclusion can only take items out
-        if (not excluded and den != expected) or den > expected:
-            problems.append(f'coverage: denominator {den} is not the {len(records)} execution records plus the '
-                            f'{len(items)} unsupported scopes ({"at most " if excluded else ""}{expected})')
+        left_refs = {e.get('ref') for e in excluded if isinstance(e, dict)}
+        scopes = sum(not (isinstance(u, dict) and u.get('scope') in left_refs) for u in items)
+        if den != cases + scopes:
+            problems.append(f'coverage: denominator {den} is not the {cases} execution records plus the {scopes} '
+                            f'unsupported scopes that are not excluded ({cases + scopes})')
     states = cov.get('states') if isinstance(cov.get('states'), dict) else {}
     unsupported = _count(cov, 'unsupported')
     wanted = {  # what each rate is, when it can be told: None means the report does not say
         'effective_judgement_rate': valid / den if den and valid is not None else None,
         'tool_support_rate': (den - unsupported) / den if den and unsupported is not None else None,
-        'required_test_completion_rate': (executed / len(records) if records and executed is not None and excluded == []
-                                          else None)}
+        'required_test_completion_rate': executed / cases if cases > 0 and executed is not None else None}
     # A rate with nothing to divide by has no number, and says why (TK-EVD-009): not applicable when something was
-    # excluded, insufficient data when not. The completion rate has no cases to divide by when no record exists
-    # and nothing was excluded.
+    # excluded, insufficient data when not. The completion rate has no cases to divide by when every execution
+    # record was left out with its items, or none exists.
     has_excluded = isinstance(excluded, list) and bool(excluded)
     zero = {name: den == 0 for name in wanted}
-    zero['required_test_completion_rate'] = den == 0 or (excluded == [] and not records)
+    zero['required_test_completion_rate'] = den == 0 or cases <= 0
     for name, number in wanted.items():
         rate, state = cov.get(name), states.get(name)
         if zero[name]:
@@ -447,6 +459,8 @@ def _coverage_lines(c):
               f'{"；需補充觀測" if u.get("needs_supplement") else ""}）'
               for u in c['unsupported_items']]
     lines += [f'  - 排除：`{e["ref"]}`（{e["reason"]}；確認者 {e["confirmed_by"]}、版本 {e["version"]}）' for e in c['excluded']]
+    if c['excluded_record_ids']:
+        lines.append('  - 隨排除項移出分母的執行紀錄：' + '、'.join(_code(i) for i in c['excluded_record_ids']))
     lines += [f'  - 被拒絕的排除：`{r["ref"]}`（{r["problem"]}）' for r in c['rejected_exclusions']]
     return lines
 

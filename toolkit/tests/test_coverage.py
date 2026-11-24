@@ -109,6 +109,18 @@ class ExclusionsNeedAReasonAConfirmerAndAVersion(unittest.TestCase):
                        case('c6', 'passed', covers=['public.announcements', 'public.documents'])]
         c = coverage.coverage(INVENTORY, cases, [exclusion(ref='public.announcements')])
         self.assertEqual((c['denominator'], c['valid_judgements']), (4 + 1 + 5, 4))  # c5 is out, c6 stays
+        self.assertEqual(c['excluded_record_ids'], ['c5'])
+
+    def test_a_case_left_out_is_named_by_its_execution_record(self):
+        cases = RUN + [{**case('c5', 'passed', covers=['public.announcements']), 'record': 'exec-0005'}]
+        c = coverage.coverage(INVENTORY, cases, [exclusion(ref='public.announcements')])
+        self.assertEqual(c['excluded_record_ids'], ['exec-0005'])
+        self.assertEqual(coverage.coverage(INVENTORY, cases)['excluded_record_ids'], [])
+
+    def test_an_item_excluded_twice_is_excluded_once_and_the_repeat_is_rejected(self):
+        c = coverage.coverage(INVENTORY, RUN, [exclusion(), exclusion(reason='again')])
+        self.assertEqual((c['denominator'], c['excluded']), (8, [exclusion()]))
+        self.assertEqual(c['rejected_exclusions'], [{'ref': 'nextjs-routes', 'problem': 'listed more than once'}])
 
 
 class ZeroDenominatorsAreNeverFullCoverage(unittest.TestCase):

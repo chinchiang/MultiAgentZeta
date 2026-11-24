@@ -163,6 +163,7 @@
       "judged": 0
     },
     "excluded": [],
+    "excluded_record_ids": [],
     "rejected_exclusions": []
   },
   "status_reason": "required inputs missing; nothing was started: commit (受測範圍: the source commit under test) is missing: dynamic testing is not started"

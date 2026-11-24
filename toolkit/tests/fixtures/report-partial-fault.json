@@ -317,6 +317,7 @@
       "judged": 3
     },
     "excluded": [],
+    "excluded_record_ids": [],
     "rejected_exclusions": []
   },
   "status_reason": "self-validation: 2 cases were undeterminable (session revoked, API key missing) and are blocked, not counted as passed"

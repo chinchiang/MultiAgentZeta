@@ -414,7 +414,7 @@
       "required": ["inventory_source", "inventory", "denominator", "executed", "valid_judgements", "blocked", "errors",
                    "untested", "cancelled", "unsupported", "unsupported_items", "effective_judgement_rate",
                    "tool_support_rate", "required_test_completion_rate", "states", "claim", "tables_and_policies",
-                   "excluded", "rejected_exclusions"],
+                   "excluded", "excluded_record_ids", "rejected_exclusions"],
       "unevaluatedProperties": false,
       "properties": {
         "inventory_source": {"$ref": "#/$defs/text"},
@@ -478,6 +478,10 @@
           "items": {"type": "object", "additionalProperties": false, "required": ["ref", "reason", "confirmed_by", "version"],
                     "properties": {"ref": {"$ref": "#/$defs/text"}, "reason": {"$ref": "#/$defs/text"},
                                    "confirmed_by": {"$ref": "#/$defs/text"}, "version": {"$ref": "#/$defs/text"}}}
+        },
+        "excluded_record_ids": {
+          "description": "〈定義：覆蓋面向〉 排除項: the execution records left out of the denominator because every item they exercise is excluded. report.validate() counts the denominator and the completion rate with them (TK-EVD-009).",
+          "type": "array", "items": {"$ref": "#/$defs/text"}
         },
         "rejected_exclusions": {
           "type": "array",

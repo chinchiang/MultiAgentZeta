@@ -27,8 +27,10 @@ def _exclusions(items, exclusions):
             refused.append({'ref': e['ref'], 'problem': 'not in the inventory'})
         elif missing:
             refused.append({'ref': e['ref'], 'problem': 'missing ' + ', '.join(missing)})
+        elif any(a['ref'] == e['ref'] for a in accepted):
+            refused.append({'ref': e['ref'], 'problem': 'listed more than once'})
         else:
-            accepted.append(e)
+            accepted.append({'ref': e['ref'], **{f: e[f] for f in EXCLUSION_FIELDS}})
     return accepted, refused
 
 
@@ -39,7 +41,7 @@ def _state(denominator, any_excluded):
 def coverage(inventory, cases, exclusions=(), *, environment_supported=True):
     """The coverage record's numbers for the scheduled cases against the inventory.
 
-    A case is {'id', 'result', 'valid', 'module', 'covers'}: its result (passed, failed, blocked, error,
+    A case is {'id', 'result', 'valid', 'module', 'covers'}, and 'record' when it has an execution record: its result (passed, failed, blocked, error,
     untested, cancelled or unsupported), whether its precondition and control held, the framework module whose
     judge it needs, and the inventory items it exercises. The denominator is the scheduled cases plus the
     unsupported scopes of the inventory; a case whose module is not loaded is counted as unsupported and never
@@ -55,6 +57,8 @@ def coverage(inventory, cases, exclusions=(), *, environment_supported=True):
     accepted, refused = _exclusions(inventory['items'], exclusions)
     left_out = {e['ref'] for e in accepted}
     unsupported_scopes = [i for i in inventory['items'] if i['state'] == 'unsupported' and _key(i) not in left_out]
+    # 〈定義：覆蓋面向〉 排除項: a case that exercises excluded items only leaves the denominator with them.
+    left_with_items = [c for c in cases if c['covers'] and set(c['covers']) <= left_out]
     cases = [c for c in cases if not (c['covers'] and set(c['covers']) <= left_out)]
     judged = [c for c in cases if c['module'] in loaded]
     unjudged = [c for c in cases if c['module'] not in loaded]
@@ -83,6 +87,7 @@ def coverage(inventory, cases, exclusions=(), *, environment_supported=True):
                   else 'known_scope_only'),
         'tables_and_policies': _tables_and_policies(inventory, valid),
         'excluded': accepted,
+        'excluded_record_ids': [c.get('record', c['id']) for c in left_with_items],
         'rejected_exclusions': refused,
     }
 
