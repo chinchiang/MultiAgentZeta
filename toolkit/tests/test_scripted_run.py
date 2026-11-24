@@ -95,6 +95,23 @@ class AnAllowedCaseWithoutAJudgeableAnswer(unittest.TestCase):
                 self.assertEqual(self.result((200, body)), ('error', {'access_granted': False}))
 
 
+class ARedirectIsJudgedAsTheAnswer(unittest.TestCase):
+    """〈定義：測試結果〉 重新導向: a 3xx is the reply of the request; no case passes on it."""
+
+    def test_a_denial_case_answered_with_a_redirect_does_not_pass(self):
+        for status in (301, 302, 303, 307, 308):
+            with self.subTest(status=status):
+                _, by_id, _ = run(one_case('READ-other-tenant'), scripted.World(attempt=(status, None)))
+                record = by_id['READ-other-tenant']
+                self.assertNotEqual(record['result'], 'passed')
+                self.assertFalse(record['checks']['response_and_side_effects'])
+
+    def test_an_allowed_case_answered_with_a_redirect_is_a_failure(self):
+        _, by_id, _ = run(one_case('PUBLIC-READ-same-tenant'), scripted.World(attempt=(302, None)))
+        record = by_id['PUBLIC-READ-same-tenant']
+        self.assertEqual((record['result'], record['checks']), ('failed', {'access_granted': False}))
+
+
 class WhenTheObserverCannotRead(unittest.TestCase):
     """TK-IDN-009: a read that failed or cannot be trusted is no read; the case is blocked, never passed on the
     actor's refusal alone."""
