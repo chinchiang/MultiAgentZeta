@@ -7,6 +7,7 @@ Interface of an adapter: http(method, url, headers, body, timeout) and docker_ex
 stdin, timeout), as the two functions below.
 """
 import json
+import os
 import socket
 import subprocess
 import urllib.error
@@ -30,9 +31,22 @@ def _path(url):
     return parts.path + ('?' + parts.query if parts.query else '')
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A 3xx is answered as it is (〈定義：測試結果〉 重新導向, TK-SBX-004). Following it would send the API key
+    and the identity's token to wherever the application under test points, and would report the target's
+    answer as the answer of the request that was made."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
 def http(method, url, headers=None, body=None, timeout=15):
     """(status, reply bytes) of one HTTP exchange; body is a JSON value or None. An error status is an answer,
-    not an exception. Raises RequestTimeout, or RequestFailed when there is no reply that can be read."""
+    not an exception, and so is a redirect, which is never followed. Raises RequestTimeout, or RequestFailed
+    when there is no reply that can be read."""
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, method=method, headers=dict(headers or {}))
     if data is not None:
@@ -41,7 +55,7 @@ def http(method, url, headers=None, body=None, timeout=15):
     try:
         # Reading an error reply's body can fail too, so it sits inside the same handling.
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
+            with _OPENER.open(req, timeout=timeout) as r:
                 return r.status, r.read()
         except urllib.error.HTTPError as e:
             with e:
@@ -59,9 +73,13 @@ def http(method, url, headers=None, body=None, timeout=15):
 def docker_exec(container, command, env=None, stdin=None, timeout=60):
     """The CompletedProcess (text) of `docker exec` of command in container; env maps variable names to values
     passed in, stdin is text to feed it. Raises subprocess.TimeoutExpired, OSError or UnicodeDecodeError, as
-    subprocess.run does."""
+    subprocess.run does.
+
+    A value of env never appears among the arguments, which any process on the host can read: the command
+    line names the variable only (`-e NAME`) and docker takes its value from this process's environment
+    (TK-IDN-005: the observer's password stays inside the control area)."""
     flags = ['-i'] if stdin is not None else []
-    for name, value in (env or {}).items():
-        flags += ['-e', f'{name}={value}']
+    for name in (env or {}):
+        flags += ['-e', name]
     return subprocess.run(['docker', 'exec', *flags, container, *command], capture_output=True, text=True,
-                          timeout=timeout, input=stdin)
+                          timeout=timeout, input=stdin, env={**os.environ, **env} if env else None)
