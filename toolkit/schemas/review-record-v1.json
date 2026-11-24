@@ -10,6 +10,16 @@
     "schema_version": {"const": "1"},
     "platform": {"$ref": "#/$defs/text"},
     "repo": {"$ref": "#/$defs/text"},
+    "pending_publication": {
+      "type": "object", "additionalProperties": false,
+      "required": ["token", "report_digest", "index", "opened_at"],
+      "properties": {
+        "token": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+        "report_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "index": {"type": "integer", "minimum": 0},
+        "opened_at": {"$ref": "#/$defs/text"}
+      }
+    },
     "synced_at": {"$ref": "#/$defs/text"},
     "items": {"type": "array", "items": {"$ref": "#/$defs/item"}}
   },

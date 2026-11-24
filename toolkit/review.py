@@ -6,10 +6,12 @@ free text is kept as the reason and never read as a decision (TK-HRV-003, TK-HRV
 """
 import argparse
 import copy
+import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from uuid import uuid4
 
 import jsonschema
 
@@ -59,6 +61,8 @@ def validate(record):
     if problems:
         return problems
     times = [('synced_at', record['synced_at'])] if 'synced_at' in record else []
+    if 'pending_publication' in record:
+        times.append(('pending_publication/opened_at', record['pending_publication']['opened_at']))
     for i, item in enumerate(record['items']):
         times.append((f'items/{i}/opened_at', item['opened_at']))
         for kind in ('decisions', 'rejected'):
@@ -76,6 +80,10 @@ class ReportUnusable(Exception):
 
 class PlatformError(Exception):
     """The platform could not be reached or did not answer as expected."""
+
+
+class IssueNotCreated(PlatformError):
+    """The platform definitively refused the creation request."""
 
 
 class PublishFailed(Exception):
@@ -131,29 +139,39 @@ def _sync_item(item, roles, platform):
     last decision belongs to that one
     (〈定義：覆核紀錄〉 選項, 身分, 角色, 理由)."""
     role = ROLE_FOR[item['review_type']]
-    comments = [(_platform_time(c.created_at), c) for c in platform.comments(item['issue'])]
     events = sorted(platform.label_events(item['issue']), key=lambda e: (_platform_time(e.at), e.id))
-    since = control.utc_time(item['decisions'][-1]['at']) if item['decisions'] else None
-    seen = {e['event_id'] for e in item['decisions'] + item['rejected']}
+    comments = [(_platform_time(c.created_at), c) for c in platform.comments(item['issue'])]
+    seen = {d['event_id'] for d in item['decisions']}
+    rejected = {r['event_id']: r['problem'] for r in item['rejected']}
+    used = {c['id'] for d in item['decisions'] for c in d['reason_comments']}
     for event in events:
         option = OPTION_OF_LABEL.get(event.label)
         if event.action != 'labeled' or option is None:
             continue  # only adding a decision label is a decision; removing one is not
-        if event.id in seen:
+        if event.id in seen or rejected.get(event.id) == 'no_role':
             continue  # recorded by an earlier sync; the record only grows
         entry = {'event_id': event.id, 'option': option,
                  'by': {'id': event.actor_id, 'login': event.actor_login}, 'at': event.at}
         if role not in _roles_of(roles, event.actor_id):
-            item['rejected'].append({**entry, 'problem': 'no_role'})
+            if event.id not in rejected:
+                item['rejected'].append({**entry, 'problem': 'no_role'})
+                rejected[event.id] = 'no_role'
             continue
         at = _platform_time(event.at)
-        reasons = [c for t, c in comments if c.author_id == event.actor_id and (since is None or t > since) and t <= at]
+        prior = [control.utc_time(d['at']) for d in item['decisions']
+                 if (control.utc_time(d['at']), d['event_id']) < (at, event.id)]
+        since = max(prior, default=None)
+        reasons = [c for t, c in comments if c.author_id == event.actor_id and c.id not in used
+                   and (since is None or t > since) and t <= at]
         if not reasons:
-            item['rejected'].append({**entry, 'problem': 'no_reason'})
+            if event.id not in rejected:
+                item['rejected'].append({**entry, 'problem': 'no_reason'})
+                rejected[event.id] = 'no_reason'
             continue
         item['decisions'].append({**entry, 'reason': '\n\n'.join(c.body for c in reasons),
                                   'reason_comments': [{'id': c.id, 'updated_at': c.updated_at} for c in reasons]})
-        since = at
+        used.update(c.id for c in reasons)
+        seen.add(event.id)
 
 
 def sync(record, roles, platform):
@@ -183,12 +201,7 @@ def _checked(report_doc):
     return report_doc
 
 
-def _publish_finding(record, finding, report_doc, platform, now):
-    """Open the issue and add the item of a finding the record has no item for (〈定義：覆核紀錄〉 項目, 工單)."""
-    if _item_for(record, finding):
-        return  # already under review; its item and issue carry on
-    title, body = report.render_review_issue(finding, report_doc, OPTION_OF_LABEL)
-    number = platform.create_issue(title, body)
+def _record_issue(record, finding, report_doc, now, number):
     record['items'].append({
         'review_type': 'candidate_finding', 'fingerprint': finding['fingerprint'],
         'fingerprint_version': finding['fingerprint_version'], 'issue': number, 'opened_at': now,
@@ -198,13 +211,24 @@ def _publish_finding(record, finding, report_doc, platform, now):
         'decisions': [], 'rejected': []})
 
 
-def publish(record, report_doc, platform, now):
-    """The record with an item, and an issue on the platform, for each finding of the report that has
-    none; now is when the review starts."""
-    record = copy.deepcopy(record)
-    for finding in _checked(report_doc)['findings']:
-        _publish_finding(record, finding, report_doc, platform, now)
-    return record
+def publish(record, report_doc, platform, now, recover_issue=None):
+    """Publish against an in-memory record. Keep the last checkpoint on failure for a retry
+    with this record. Use publish_file when checkpoints must survive a process restart."""
+    working = copy.deepcopy(record)
+
+    def checkpoint(current):
+        nonlocal last_saved
+        last_saved = copy.deepcopy(current)
+
+    last_saved = None
+    try:
+        _publish_record(working, report_doc, platform, now, recover_issue, checkpoint)
+    except (PlatformError, PublishFailed):
+        if last_saved is not None:
+            record.clear()
+            record.update(last_saved)
+        raise
+    return working
 
 
 def sync_file(path, roles_path, roles_digest, platform, now, source_root):
@@ -230,7 +254,11 @@ def sync_file(path, roles_path, roles_digest, platform, now, source_root):
         return save(record)
 
 
-def publish_file(path, report_doc, platform, now, source_root, new=None):
+def publication_marker(token):
+    return f'<!-- maz-publication:{token} -->'
+
+
+def publish_file(path, report_doc, platform, now, source_root, new=None, recover_issue=None):
     """publish() on the review record at path, a control-zone record outside source_root. new
     ({'platform', 'repo'}) starts a record; without it the record must exist (〈定義：覆核紀錄〉 建立與遺失).
     Each opened issue is written at once, so a publish that fails part-way loses none (同步失敗). Returns
@@ -243,21 +271,55 @@ def publish_file(path, report_doc, platform, now, source_root, new=None):
             record = {'schema_version': '1', 'platform': new['platform'], 'repo': new['repo'], 'items': []}
         else:
             record = _current(path, source_root)
-        _checked(report_doc)
-        digest = save(record)  # before any issue is opened: the record can be written
-        for finding in report_doc['findings']:
-            opened = len(record['items'])
-            try:
-                _publish_finding(record, finding, report_doc, platform, now)
-            except PlatformError as e:
-                raise PublishFailed(f'publish stopped at {finding["id"]}: {e}; the issues opened before it are in '
-                                    f'the record, run publish again for the rest') from e
-            try:
-                digest = save(record)  # an opened issue is never lost
-            except control.RecordUnusable as e:
-                numbers = [i['issue'] for i in record['items'][opened:]]
-                raise PublishFailed(f'issue {numbers} was opened but {e}; add it to the record by hand') from e
-        return digest
+        return _publish_record(record, report_doc, platform, now, recover_issue, save)
+
+
+def _publish_record(record, report_doc, platform, now, recover_issue, save):
+    _checked(report_doc)
+    if control.utc_time(now) is None:
+        raise PublishFailed(f'invalid publication time: {now!r}')
+    if report_doc['findings'] and not report_doc['commit']:
+        raise ReportUnusable('commit is required for publishing findings')
+    digest_of_report = hashlib.sha256(json.dumps(report_doc, sort_keys=True).encode()).hexdigest()
+    pending = record.get('pending_publication')
+    if pending:
+        if recover_issue is None or pending['report_digest'] != digest_of_report:
+            raise PublishFailed('publication outcome unknown; use the original report and --recover-issue NUMBER')
+        if type(recover_issue) is not int or recover_issue < 1 or pending['index'] >= len(report_doc['findings']):
+            raise PublishFailed('invalid issue number or pending finding index')
+        if any(item['issue'] == recover_issue for item in record['items']):
+            raise PublishFailed(f'issue {recover_issue} already belongs to another finding')
+        platform.verify_issue(recover_issue, pending['token'])
+        finding = report_doc['findings'][pending['index']]
+        _record_issue(record, finding, report_doc, pending['opened_at'], recover_issue)
+        del record['pending_publication']
+    elif recover_issue is not None:
+        raise PublishFailed('there is no pending publication to recover')
+    digest = save(record)
+    for index, finding in enumerate(report_doc['findings']):
+        if _item_for(record, finding):
+            continue
+        title, body = report.render_review_issue(finding, report_doc, OPTION_OF_LABEL)
+        token = uuid4().hex
+        record['pending_publication'] = {'token': token, 'report_digest': digest_of_report,
+                                         'index': index, 'opened_at': now}
+        save(record)
+        try:
+            number = platform.create_issue(title, body + '\n\n' + publication_marker(token))
+        except IssueNotCreated as e:
+            del record['pending_publication']
+            save(record)
+            raise PublishFailed(f'publish stopped at {finding["id"]}: {e}; creation was refused') from e
+        except PlatformError as e:
+            raise PublishFailed(f'publish stopped at {finding["id"]}: {e}; outcome unknown, '
+                                'verify the issue number and use --recover-issue NUMBER') from e
+        _record_issue(record, finding, report_doc, now, number)
+        del record['pending_publication']
+        try:
+            digest = save(record)
+        except control.RecordUnusable as e:
+            raise PublishFailed(f'issue {number} was opened; use --recover-issue {number}: {e}') from e
+    return digest
 
 
 def _review_of(item, now):
@@ -269,7 +331,7 @@ def _review_of(item, now):
     if not item['decisions']:
         late = control.utc_time(now) > control.utc_time(item['opened_at']) + DEADLINES[item['review_type']]
         return {'state': 'overdue' if late else 'pending', **shown}
-    d = item['decisions'][-1]
+    d = max(item['decisions'], key=lambda entry: (control.utc_time(entry['at']), entry['event_id']))
     return {'state': report.DECISION_STATES[d['option']], **shown,
             'decision': {'option': d['option'], 'by': d['by'], 'at': d['at'], 'reason': d['reason']}}
 
@@ -305,6 +367,7 @@ def _parser():
         p.add_argument('--project', required=True, help='the sample source, which the records must stay out of')
     publish = actions.choices['publish']
     publish.add_argument('--report', required=True, help='the JSON report whose findings get an issue')
+    publish.add_argument('--recover-issue', type=int, help='verify this issue number for an unanswered creation')
     publish.add_argument('--new', action='store_true', help='start a new review record; never replaces one')
     sync = actions.choices['sync']
     sync.add_argument('--roles', required=True, help='the review roles record, in the control zone')
@@ -342,8 +405,9 @@ def main(argv, environ, platform_factory, out):
             digest = sync_file(args.record, args.roles, args.roles_digest, platform, now, args.project)
         else:
             new = {'platform': 'github', 'repo': args.repo} if args.new else None
-            digest = publish_file(args.record, _report(args.report), platform, now, args.project, new=new)
-    except (SyncFailed, PublishFailed, control.RecordUnusable, ReportUnusable) as e:
+            digest = publish_file(args.record, _report(args.report), platform, now, args.project, new=new,
+                                  recover_issue=args.recover_issue)
+    except (SyncFailed, PublishFailed, PlatformError, control.RecordUnusable, ReportUnusable) as e:
         print(f'{args.action} failed: {e}', file=out)
         return 1
     print(f'review record {args.record}: {digest}', file=out)

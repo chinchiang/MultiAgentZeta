@@ -61,7 +61,7 @@ class FakePlatform:
 
     def create_issue(self, title, body):
         if self.opens is not None and len(self.created) >= self.opens:
-            raise review.PlatformError('the platform did not answer')
+            raise review.IssueNotCreated('platform refused creation')
         number = 100 + len(self.created)
         self.created.append((number, title, body))
         return number
@@ -115,6 +115,23 @@ class SyncAcceptsOnlyVerifiedReasonedDecisions(unittest.TestCase):
         twice = review.sync(once, ROLES, platform)
         self.assertEqual(twice, once)
         self.assertEqual((len(twice['items'][0]['decisions']), len(twice['items'][0]['rejected'])), (1, 1))
+
+    def test_delayed_reason_is_rechecked_once_with_original_time_and_role(self):
+        events = {7: [labeled(1, SECURITY, 'review:reject', '2026-11-09T02:00:00Z'),
+                      labeled(2, SECURITY, 'review:approve', '2026-11-09T03:00:00Z')]}
+        platform = FakePlatform(events, {7: [comment(20, SECURITY, 'second', '2026-11-09T02:30:00Z')]})
+        before = review.sync(record(), ROLES, platform)
+        self.assertEqual(review.sync(before, ROLES, platform), before)
+        platform.notes[7].append(comment(23, SECURITY, 'written later', '2026-11-09T04:00:00Z'))
+        platform.notes[7].append(comment(21, OTHER, 'wrong account', '2026-11-09T01:00:00Z'))
+        self.assertEqual(review.sync(before, ROLES, platform), before)
+        platform.notes[7].append(comment(22, SECURITY, 'first', '2026-11-09T01:30:00Z'))
+        after = review.sync(before, ROLES, platform)
+        item = after['items'][0]
+        self.assertEqual(item['rejected'], before['items'][0]['rejected'])
+        self.assertEqual([(d['event_id'], d['reason']) for d in item['decisions']], [(2, 'second'), (1, 'first')])
+        self.assertEqual(review._review_of(item, events[7][-1].at)['state'], 'approved')
+        self.assertEqual(review.sync(after, ROLES, platform), after)
 
     def test_times_are_compared_as_times_not_as_text(self):
         # 03:00:00.5Z is after 03:00:00Z, although '.' sorts before 'Z' as text.
@@ -300,6 +317,48 @@ class RecordFiles(ControlZone):
         self.assertEqual(platform.created, [])
         self.assertFalse(self.path.exists())
 
+    def test_bad_last_finding_leaves_existing_record_and_platform_untouched(self):
+        existing = control.write(self.path, empty_record(), self.source)
+        for field in ('fingerprint', 'fingerprint_version', 'requirement_id'):
+            with self.subTest(field=field):
+                doc, platform = valid_report(), FakePlatform()
+                last = copy.deepcopy(doc['findings'][0])
+                del last[field]
+                doc['findings'].append(last)
+                doc['review_summary']['approved'] += 1
+                with self.assertRaisesRegex(review.ReportUnusable, f'findings/1.*{field}'):
+                    review.publish_file(self.path, doc, platform, self.NOW, self.source)
+                self.assertEqual(platform.created, [])
+                self.assertEqual(control.file_digest(self.path), existing)
+
+    def test_lost_reply_is_recovered_by_number_without_another_post(self):
+        class LostReply(FakePlatform):
+            def create_issue(self, title, body):
+                super().create_issue(title, body)
+                raise review.PlatformError('reply lost')
+
+            def verify_issue(self, number, token):
+                if not any(n == number and review.publication_marker(token) in body.splitlines()
+                           for n, _, body in self.created):
+                    raise review.PlatformError('issue mismatch')
+
+        platform = LostReply()
+        args = self.path, valid_report(), platform, self.NOW, self.source
+        with self.assertRaisesRegex(review.PublishFailed, 'outcome unknown'):
+            review.publish_file(*args, new=empty_record())
+        pending = self.path.read_bytes()
+        with self.assertRaisesRegex(review.PublishFailed, 'outcome unknown'):
+            review.publish_file(*args)
+        with self.assertRaisesRegex(review.PlatformError, 'mismatch'):
+            review.publish_file(*args, recover_issue=101)
+        self.assertEqual(self.path.read_bytes(), pending)
+        recovered = review.publish_file(*args, recover_issue=100)
+        self.assertEqual(recovered, review.publish_file(*args))
+        saved = control.read(self.path, recovered, self.source)
+        self.assertNotIn('pending_publication', saved)
+        self.assertEqual([i['issue'] for i in saved['items']], [100])
+        self.assertEqual(len(platform.created), 1)
+
     def test_roles_with_another_digest_are_not_used(self):
         control.write(self.path, record(issue=7), self.source)
         before = self.path.read_bytes()
@@ -400,7 +459,8 @@ class RecordFiles(ControlZone):
         saved = json.loads(self.path.read_text(encoding='utf-8'))
         first = doc['findings'][0]['fingerprint']
         self.assertEqual([(i['fingerprint'], i['issue']) for i in saved['items']], [(first, 100)])
-        retry = review.publish_file(self.path, doc, FakePlatform(), self.NOW, self.source)  # opens only the second
+        platform.opens = None  # the same platform now accepts the remaining issue
+        retry = review.publish_file(self.path, doc, platform, self.NOW, self.source)
         self.assertEqual(len(json.loads(self.path.read_text(encoding='utf-8'))['items']), 2)
         self.assertEqual(retry, control.file_digest(self.path))
 
@@ -531,6 +591,28 @@ class CommandLine(ControlZone):
         self.assertEqual((saved['platform'], saved['repo'], [i['issue'] for i in saved['items']]),
                          ('github', 'owner/reviews', [100]))
         self.assertIn(control.file_digest(self.path), out)
+
+    def test_cli_recovers_a_lost_reply_using_the_recorded_repo_and_exact_number(self):
+        from unittest.mock import patch
+        platform = FakePlatform()
+        create = platform.create_issue
+
+        def lost(title, body):
+            create(title, body)
+            raise review.PlatformError('reply lost')
+
+        with patch.object(platform, 'create_issue', lost):
+            code, out, _ = self.run_main(*self.publish_args('--new'), platform=platform)
+        self.assertNotEqual(code, 0)
+        self.assertIn('--recover-issue', out)
+        number, _, body = platform.created[0]
+        pending = json.loads(self.path.read_bytes())['pending_publication']
+        self.assertIn(review.publication_marker(pending['token']), body.splitlines())
+        with patch.object(platform, 'verify_issue', create=True) as verify:
+            code, out, _ = self.run_main(*self.publish_args('--recover-issue', str(number)), platform=platform)
+            verify.assert_called_once_with(number, pending['token'])
+        self.assertEqual(code, 0, out)
+        self.assertEqual(len(platform.created), 1)
 
     def test_each_failure_ends_with_its_reason_and_a_nonzero_status(self):
         control.write(self.path, self.kept(), self.source)

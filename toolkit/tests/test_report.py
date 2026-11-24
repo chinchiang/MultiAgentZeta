@@ -321,6 +321,10 @@ class Validate(unittest.TestCase):
                 doc = valid_report()
                 doc['status'] = 'partial'
                 doc['execution_records'][1]['result'] = result
+                c = doc['coverage']
+                c['errors' if result == 'error' else result] += 1
+                c.update(executed=2, valid_judgements=2, effective_judgement_rate=0.5,
+                         required_test_completion_rate=2/3, tool_support_rate=(4-c['unsupported'])/4)
                 self.assertEqual(report.validate(doc), [])
 
     def test_record_from_another_run_or_commit_is_rejected(self):
@@ -790,6 +794,13 @@ class CoverageRecord(unittest.TestCase):
         doc['coverage']['valid_judgements'] = doc['coverage']['executed'] + 1
         self.assertTrue(any('valid_judgements' in p for p in self.problems(doc)), self.problems(doc))
 
+    def test_consistent_rates_cannot_hide_a_result_class_absent_from_the_records(self):
+        doc = valid_report()
+        doc['coverage'].update(executed=2, blocked=1, valid_judgements=2,
+                               effective_judgement_rate=0.5, required_test_completion_rate=2 / 3)
+        for field in ('executed', 'blocked'):
+            self.assertTrue(any(f'coverage/{field}' in p for p in self.problems(doc)))
+
     def test_the_effective_rate_is_valid_judgements_over_the_denominator(self):
         doc = valid_report()
         doc['coverage']['effective_judgement_rate'] = 0.9
@@ -875,6 +886,8 @@ class CoverageRecord(unittest.TestCase):
         doc['coverage']['effective_judgement_rate'] = doc['coverage']['valid_judgements'] / doc['coverage']['denominator']
         doc['coverage']['tool_support_rate'] = 1.0
         self.assertEqual(self.problems(doc), [])
+        doc['coverage']['required_test_completion_rate'] = 0.5
+        self.assertTrue(any('required_test_completion_rate' in p for p in self.problems(doc)))
 
 
 class RenderCoverage(unittest.TestCase):

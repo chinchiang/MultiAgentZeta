@@ -4,6 +4,7 @@ The JSON report is the native format (TK-EVD-003); its structure is the versione
 JSON Schema in schemas/report-v1.json. validate() also checks the conditions that
 span records, which JSON Schema cannot express.
 """
+from collections import Counter
 import json
 import re
 from pathlib import Path
@@ -148,19 +149,39 @@ def _coverage_problems(doc):
         if (not excluded and den != expected) or den > expected:
             problems.append(f'coverage: denominator {den} is not the {len(records)} execution records plus the '
                             f'{len(items)} unsupported scopes ({"at most " if excluded else ""}{expected})')
+    # Exclusions may remove cases, but cannot add cases in any result class.
+    loaded = cov['inventory']['loaded']
+    counts = Counter(r['result'] for r in records)
+    excluded_refs = {entry['ref'] for entry in excluded}
+    remaining_scopes = sum(entry['scope'] not in excluded_refs for entry in items)
+    may_exclude_cases = bool(excluded_refs - {entry['scope'] for entry in items})
+    expected_counts = {
+        'executed': counts['passed'] + counts['failed'], 'blocked': counts['blocked'],
+        'errors': counts['error'], 'untested': counts['untested'], 'cancelled': counts['cancelled'],
+        'unsupported': counts['unsupported'] + remaining_scopes,
+    }
+    if 'supabase-rls' not in loaded:
+        expected_counts = dict.fromkeys(expected_counts, 0)
+        expected_counts['unsupported'] = len(records) + remaining_scopes
+    for name, maximum in expected_counts.items():
+        if cov[name] > maximum or (not may_exclude_cases and cov[name] != maximum):
+            problems.append(f'coverage/{name}: {cov[name]} disagrees with the execution records '
+                            f'and unsupported scopes ({"at most " if may_exclude_cases else ""}{maximum})')
+    if cov['unsupported'] < remaining_scopes:
+        problems.append('coverage/unsupported: missing included unsupported scopes')
     states = cov.get('states') if isinstance(cov.get('states'), dict) else {}
     unsupported = _count(cov, 'unsupported')
+    included_cases = den - remaining_scopes
     wanted = {  # what each rate is, when it can be told: None means the report does not say
         'effective_judgement_rate': valid / den if den and valid is not None else None,
         'tool_support_rate': (den - unsupported) / den if den and unsupported is not None else None,
-        'required_test_completion_rate': (executed / len(records) if records and executed is not None and excluded == []
-                                          else None)}
+        'required_test_completion_rate': executed / included_cases if included_cases > 0 else None}
     # A rate with nothing to divide by has no number, and says why (TK-EVD-009): not applicable when something was
     # excluded, insufficient data when not. The completion rate has no cases to divide by when no record exists
     # and nothing was excluded.
     has_excluded = isinstance(excluded, list) and bool(excluded)
     zero = {name: den == 0 for name in wanted}
-    zero['required_test_completion_rate'] = den == 0 or (excluded == [] and not records)
+    zero['required_test_completion_rate'] = included_cases == 0
     for name, number in wanted.items():
         rate, state = cov.get(name), states.get(name)
         if zero[name]:

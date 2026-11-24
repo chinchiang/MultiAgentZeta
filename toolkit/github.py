@@ -3,11 +3,12 @@
 It reports what GitHub's REST API reports (design notes [R61]) as toolkit.review's LabelEvent and
 Comment, and decides nothing: which events are decisions is toolkit.review's to say.
 """
+import http.client
 import json
 import urllib.error
 import urllib.request
 
-from toolkit.review import Comment, LabelEvent, PlatformError
+from toolkit.review import Comment, IssueNotCreated, LabelEvent, PlatformError, publication_marker
 
 API = 'https://api.github.com'
 API_VERSION = '2022-11-28'  # the REST API version [R61] describes
@@ -66,8 +67,10 @@ class GitHub:
                    'X-GitHub-Api-Version': API_VERSION}
         try:
             status, answer_headers, answer = self.transport(method, url, headers, body)
-        except OSError as e:
+        except (OSError, http.client.HTTPException) as e:
             raise PlatformError(f'{method} {url}: no answer from GitHub ({e})') from e
+        if method == 'POST' and status in (400, 401, 403, 404, 410, 422, 429):
+            raise IssueNotCreated(f'{method} {url}: GitHub refused creation ({status})')
         if not 200 <= status < 300:
             raise PlatformError(f'{method} {url}: GitHub answered {status}: {answer[:200]!r}')
         try:
@@ -105,10 +108,18 @@ class GitHub:
         except (KeyError, TypeError) as e:
             raise PlatformError(f'issue {number}: a comment lacks {e}') from e
 
+    def verify_issue(self, number, token):
+        url = f'{API}/repos/{self.repo}/issues/{number}'
+        _, issue = self._send('GET', url)
+        if (not isinstance(issue, dict) or issue.get('url') != url or issue.get('number') != number
+                or 'pull_request' in issue or not isinstance(issue.get('body'), str)
+                or publication_marker(token) not in issue['body'].splitlines()):
+            raise PlatformError(f'issue {number} does not match the pending publication')
+
     def create_issue(self, title, body):
         """Open an issue and return its number, which the review record keeps (〈定義：覆核紀錄〉 工單)."""
         url = f'{API}/repos/{self.repo}/issues'
         _, created = self._send('POST', url, json.dumps({'title': title, 'body': body}).encode())
-        if not (isinstance(created, dict) and isinstance(created.get('number'), int)):
+        if not (isinstance(created, dict) and type(created.get('number')) is int and created['number'] > 0):
             raise PlatformError(f'POST {url}: GitHub answered no issue number')
         return created['number']

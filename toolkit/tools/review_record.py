@@ -5,6 +5,9 @@
     python3 -I toolkit/tools/review_record.py sync --record PATH --roles PATH --roles-digest DIGEST \
         --repo OWNER/NAME --project SAMPLE
 
+After an unanswered creation, repeat publish with the original report and --recover-issue NUMBER
+(without --new). The saved marker must match the numbered issue on the recorded repository.
+
 The GitHub token comes from MAZ_REVIEW_GITHUB_TOKEN; it is never printed or written. Both print the new
 digest of the record, for the ScanManifest's review_record. The work is toolkit.review.main(); this file
 only puts the repository on the path (-I leaves the working directory off it) and hands it GitHub.

@@ -76,6 +76,21 @@ class CreateIssue(unittest.TestCase):
         self.assertEqual(json.loads(sent), {'title': 'a title', 'body': 'a body'})
 
 
+    def test_recovery_verifies_the_repository_number_kind_and_marker(self):
+        url = f'{API}/issues/12'
+        issue = {'url': url, 'number': 12, 'body': review.publication_marker('abc')}
+        for changes in ({}, {'url': url + '0'}, {'number': 13}, {'pull_request': {}}, {'body': 'other'}):
+            with self.subTest(changes=changes):
+                replay = Replay({('GET', url): (200, {}, json.dumps(issue | changes).encode())})
+                platform = github.GitHub('owner/reviews', 'token-x', transport=replay)
+                if changes:
+                    with self.assertRaises(review.PlatformError):
+                        platform.verify_issue(12, 'abc')
+                else:
+                    platform.verify_issue(12, 'abc')
+                self.assertEqual(len(replay.asked), 1)
+
+
 class Requests(unittest.TestCase):
     """What the adapter sends: the token and the API version it was written for ([R61])."""
 

@@ -372,8 +372,11 @@
     },
     "finding": {
       "allOf": [{"$ref": "#/$defs/common"}],
-      "required": ["requirement_version", "review"],
+      "required": ["fingerprint", "fingerprint_version", "requirement_id", "requirement_version", "review"],
       "properties": {
+        "fingerprint": {"$ref": "#/$defs/text"},
+        "fingerprint_version": {"$ref": "#/$defs/text"},
+        "requirement_id": {"$ref": "#/$defs/text"},
         "execution_record_ids": {"type": "array", "items": {"$ref": "#/$defs/text"}},
         "requirement_version": {
           "description": "TK-REQ-004: the version of the confirmation item the finding was judged on.",
