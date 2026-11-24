@@ -1,8 +1,13 @@
 """toolkit/tools/env_tests.py, the environment test runner behind run-env-tests.sh: reading its log,
 counting the planned tests, the lock that lets one run at a time, and spotting other test runs."""
+import hashlib
+import io
+import json
 import os
 import shutil
 import subprocess
+import sys
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -96,22 +101,111 @@ class CountTests(unittest.TestCase):
 
 
 class Lock(unittest.TestCase):
+    """The lock is held by open descriptors, not by what the file says: a start is refused exactly while a
+    process holding it lives."""
+
     def setUp(self):
         d = tempfile.TemporaryDirectory()
         self.addCleanup(d.cleanup)
         self.lock = Path(d.name) / 'env-tests.lock'
 
-    def test_a_live_run_refuses_a_second_start(self):
-        env_tests.acquire_lock(self.lock, os.getpid(), 'first')
-        with self.assertRaisesRegex(env_tests.Busy, f'{os.getpid()}.*first'):
-            env_tests.acquire_lock(self.lock, os.getpid(), 'second')
+    def take(self, name):
+        fd = env_tests.acquire_lock(self.lock, name)
+        self.addCleanup(self.close, fd)
+        return fd
 
-    def test_a_lock_left_by_a_run_that_is_gone_is_replaced(self):
-        gone = subprocess.Popen(['true'])
-        gone.wait()
-        env_tests.acquire_lock(self.lock, gone.pid, 'old')
-        env_tests.acquire_lock(self.lock, os.getpid(), 'new')
-        self.assertEqual(env_tests.read_lock(self.lock), (os.getpid(), 'new'))
+    @staticmethod
+    def close(fd):
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+    def holder(self, fd, seconds):
+        """A child process that inherits the lock descriptor, as a run does, and lives for a while."""
+        child = subprocess.Popen([sys.executable, '-c', f'import time; time.sleep({seconds})'], pass_fds=(fd,))
+        self.addCleanup(child.wait)
+        self.addCleanup(child.kill)
+        return child
+
+    def test_a_live_run_refuses_a_second_start_and_says_who_holds_it(self):
+        self.take('first')
+        self.assertTrue(env_tests.lock_held(self.lock))
+        with self.assertRaisesRegex(env_tests.Busy, f'{os.getpid()}.*first'):
+            env_tests.acquire_lock(self.lock, 'second')
+        self.assertEqual(env_tests.read_lock(self.lock), (os.getpid(), 'first'))  # the refusal changed nothing
+
+    def test_no_lock_file_and_a_released_lock_are_both_free(self):
+        self.assertFalse(env_tests.lock_held(self.lock))
+        os.close(self.take('first'))
+        self.assertFalse(env_tests.lock_held(self.lock))
+        self.take('second')
+        self.assertEqual(env_tests.read_lock(self.lock), (os.getpid(), 'second'))
+
+    def test_a_lock_file_naming_a_live_process_that_does_not_hold_it_is_free(self):
+        # What the file says is not the lock: a process id reused by something else locks nothing.
+        self.lock.write_text(f'{os.getpid()} stale\n', encoding='utf-8')
+        self.assertFalse(env_tests.lock_held(self.lock))
+        self.take('new')
+
+    def test_the_run_keeps_the_lock_after_the_starter_let_go(self):
+        # The starter is interrupted, or simply returns, right after starting the run.
+        fd = self.take('run')
+        child = self.holder(fd, 30)
+        os.close(fd)
+        self.assertTrue(env_tests.lock_held(self.lock))
+        with self.assertRaises(env_tests.Busy):
+            env_tests.acquire_lock(self.lock, 'second')
+        child.kill()
+        child.wait()
+        self.assertFalse(env_tests.lock_held(self.lock))
+
+    def test_a_run_that_ends_at_once_leaves_no_lock_behind(self):
+        fd = self.take('run')
+        child = subprocess.Popen([sys.executable, '-c', 'pass'], pass_fds=(fd,))
+        child.wait()  # gone before the starter did anything else
+        self.assertTrue(env_tests.lock_held(self.lock))  # the starter still holds its own copy
+        os.close(fd)
+        self.assertFalse(env_tests.lock_held(self.lock))
+        self.take('next')
+
+    def test_asking_whether_it_is_held_does_not_take_it(self):
+        self.assertFalse(env_tests.lock_held(self.lock))
+        self.lock.write_text('', encoding='utf-8')
+        for _ in range(3):
+            self.assertFalse(env_tests.lock_held(self.lock))
+        self.take('first')
+
+
+class SupabaseCli(unittest.TestCase):
+    """The run uses the CLI MAZ_SUPABASE_BIN names when that file exists, and fetches one only otherwise."""
+
+    def setUp(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        self.given = Path(d.name) / 'supabase'
+        self.fetched = []
+
+    def fetch(self):
+        self.fetched.append(True)
+        return '/fetched/supabase', None
+
+    def test_a_cli_that_is_already_given_is_kept(self):
+        self.given.write_bytes(b'cli')
+        self.assertEqual(env_tests.supabase_cli({'MAZ_SUPABASE_BIN': str(self.given)}, self.fetch),
+                         (str(self.given), None))
+        self.assertEqual(self.fetched, [])
+
+    def test_without_one_or_with_a_path_that_is_no_file_it_is_fetched(self):
+        for environ in ({}, {'MAZ_SUPABASE_BIN': ''}, {'MAZ_SUPABASE_BIN': str(self.given)},
+                        {'MAZ_SUPABASE_BIN': str(self.given.parent)}):
+            with self.subTest(environ=environ):
+                self.fetched.clear()
+                self.assertEqual(env_tests.supabase_cli(environ, self.fetch), ('/fetched/supabase', None))
+                self.assertEqual(self.fetched, [True])
+
+    def test_a_fetch_that_fails_is_passed_on(self):
+        self.assertEqual(env_tests.supabase_cli({}, lambda: (None, 'no network')), (None, 'no network'))
 
 
 class OtherTestRuns(unittest.TestCase):
@@ -127,6 +221,122 @@ class OtherTestRuns(unittest.TestCase):
         self.assertEqual(env_tests.other_test_runs(self.PS, exclude={102}), [
             '101 /usr/bin/python3 -I -m unittest discover -v -s toolkit/tests -t .'])
         self.assertEqual(env_tests.other_test_runs('  104 python3 -m pytest tests\n', exclude=set()), [])
+
+    def test_a_test_run_is_found_however_it_was_started(self):
+        for command in ('python3 -I toolkit/tests/test_e1.py',
+                        '/repo/.venv/bin/python -I -m unittest toolkit/tests/test_scan.py',
+                        'python3.12 -I -m unittest discover -s ./toolkit/tests -t .',
+                        'python3 -m unittest discover -s /home/me/clone/toolkit/tests -t /home/me/clone',
+                        'python3 -m unittest toolkit.tests.test_scan.VulnerableRunEnv',
+                        'python -I -m unittest -v toolkit/tests/test_e1.py -k Reset',
+                        '/other/clone/.venv/bin/python -I /other/clone/toolkit/tools/env_tests.py _run nightly -p test_e1.py'):
+            with self.subTest(command=command):
+                self.assertEqual(env_tests.other_test_runs(f'  201 {command}\n', exclude=set()), [f'201 {command}'])
+
+    def test_what_only_mentions_the_tests_or_tests_something_else_is_not_a_test_run(self):
+        for command in ('vim toolkit/tests/test_e1.py', 'grep -rn needs_env toolkit/tests',
+                        '/bin/sh toolkit/tools/run-env-tests.sh --status demo',
+                        'python3 -I -m unittest discover -s docs/toolkit/tools',
+                        'python3 -I docs/toolkit/tools/build.py --check', 'python3 -I toolkit/tools/env_tests.py --status x'):
+            with self.subTest(command=command):
+                self.assertEqual(env_tests.other_test_runs(f'  301 {command}\n', exclude=set()), [])
+
+    def test_the_asking_process_is_left_out(self):
+        self.assertEqual(env_tests.other_test_runs('  401 python3 -I toolkit/tests/test_e1.py\n', exclude={401}), [])
+
+
+@unittest.skipUnless(all(shutil.which(t) for t in ('sh', 'tar', 'sha256sum', 'mktemp')), 'needs sh, tar, sha256sum, mktemp')
+class FetchSupabaseCli(unittest.TestCase):
+    """fetch-supabase-cli.sh in a throwaway copy of the layout, with its own support matrix, a curl that
+    serves a local archive and a uname the test sets: nothing is downloaded."""
+
+    SCRIPT = Path(__file__).resolve().parents[1] / 'tools' / 'fetch-supabase-cli.sh'
+    BINARY = b'#!/bin/sh\necho pinned supabase\n'
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        root = Path(self.dir.name).resolve()
+        self.repo, self.bin, self.dest = root / 'repo', root / 'bin', root / 'dest'
+        (self.repo / 'toolkit' / 'tools').mkdir(parents=True)
+        self.bin.mkdir()
+        shutil.copy(self.SCRIPT, self.repo / 'toolkit' / 'tools' / 'fetch-supabase-cli.sh')
+        self.archive = root / 'served.tar.gz'
+        self.pack(self.BINARY)
+        self.tool('curl', f'out=; while [ $# -gt 0 ]; do [ "$1" = -o ] && out=$2; shift; done; cp "{self.archive}" "$out"')
+        self.machine('Linux', 'x86_64')
+        self.matrix(binary=self.BINARY)
+
+    def tool(self, name, body):
+        (self.bin / name).write_text(f'#!/bin/sh\n{body}\n', encoding='utf-8')
+        (self.bin / name).chmod(0o755)
+
+    def machine(self, system, arch):
+        self.tool('uname', f'case "$1" in -s) echo {system};; -m) echo {arch};; esac')
+
+    def pack(self, content):
+        with tarfile.open(self.archive, 'w:gz') as tar:
+            info = tarfile.TarInfo('supabase')
+            info.size, info.mode = len(content), 0o755
+            tar.addfile(info, io.BytesIO(content))
+
+    def matrix(self, binary, archive=None):
+        digest = lambda data: hashlib.sha256(data).hexdigest()
+        entry = {'version': '9.9.9', 'archive_sha256': digest(self.archive.read_bytes() if archive is None else archive),
+                 'binary_sha256': digest(binary)}
+        (self.repo / 'toolkit' / 'support-matrix.json').write_text(json.dumps({'tools': {'supabase-cli': entry}}),
+                                                                 encoding='utf-8')
+
+    def fetch(self):
+        run = subprocess.run(['sh', str(self.repo / 'toolkit' / 'tools' / 'fetch-supabase-cli.sh'), str(self.dest)],
+                             env={'PATH': f'{self.bin}:{os.environ["PATH"]}'}, capture_output=True, text=True)
+        return run.returncode, run.stdout.strip(), run.stderr
+
+    def left_in_dest(self):
+        return sorted(p.name for p in self.dest.iterdir()) if self.dest.exists() else []
+
+    def test_a_verified_binary_is_put_in_place_and_its_path_printed(self):
+        code, out, err = self.fetch()
+        self.assertEqual((code, out), (0, str(self.dest / 'supabase')), err)
+        self.assertEqual((self.dest / 'supabase').read_bytes(), self.BINARY)
+        self.assertEqual(self.left_in_dest(), ['supabase'])  # no archive and no temporary directory left
+
+    def test_a_binary_already_there_with_the_pinned_digest_is_reused_without_fetching(self):
+        self.fetch()
+        self.tool('curl', 'echo "curl must not run" >&2; exit 9')
+        code, out, err = self.fetch()
+        self.assertEqual((code, out), (0, str(self.dest / 'supabase')), err)
+
+    def test_an_archive_with_another_digest_leaves_no_binary(self):
+        self.matrix(binary=self.BINARY, archive=b'another archive')
+        code, out, _ = self.fetch()
+        self.assertNotEqual(code, 0)
+        self.assertEqual((out, self.left_in_dest()), ('', []))
+
+    def test_a_binary_with_another_digest_leaves_no_binary(self):
+        self.matrix(binary=b'what the matrix pins')
+        code, out, _ = self.fetch()
+        self.assertNotEqual(code, 0)
+        self.assertEqual((out, self.left_in_dest()), ('', []))
+
+    def test_a_download_that_fails_removes_a_stale_binary_and_leaves_none(self):
+        self.dest.mkdir()
+        (self.dest / 'supabase').write_bytes(b'an old or tampered binary')
+        self.tool('curl', 'exit 22')
+        code, out, _ = self.fetch()
+        self.assertNotEqual(code, 0)
+        self.assertEqual((out, self.left_in_dest()), ('', []))
+
+    def test_another_system_or_architecture_is_refused_before_anything_is_fetched(self):
+        self.tool('curl', 'echo "curl must not run" >&2; exit 9')
+        for system, arch in (('Darwin', 'arm64'), ('Linux', 'aarch64'), ('Darwin', 'x86_64')):
+            with self.subTest(system=system, arch=arch):
+                self.machine(system, arch)
+                code, out, err = self.fetch()
+                self.assertNotEqual(code, 0)
+                self.assertIn(f'{system} {arch}', err)
+                self.assertNotIn('curl must not run', err)
+                self.assertEqual((out, self.left_in_dest()), ('', []))
 
 
 @unittest.skipUnless(shutil.which('sh'), 'sh is not installed')
