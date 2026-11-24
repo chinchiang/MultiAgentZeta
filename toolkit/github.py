@@ -40,6 +40,12 @@ def urllib_transport(method, url, headers, body):
             return e.code, dict(e.headers), e.read()
 
 
+def _header(headers, name):
+    """A header's value whatever case it arrived in (HTTP header names are case-insensitive, and a proxy or
+    HTTP/2 gives them in lower case), or ''."""
+    return next((str(v) for k, v in headers.items() if str(k).lower() == name.lower()), '')
+
+
 def _next_page(link):
     """The URL of rel="next" in a Link header, or None."""
     for part in link.split(','):
@@ -83,7 +89,7 @@ class GitHub:
             if not isinstance(page, list):
                 raise PlatformError(f'GET {url}: GitHub answered no list')
             items += page
-            url = _next_page(headers.get('Link', ''))
+            url = _next_page(_header(headers, 'Link'))
         return items
 
     def label_events(self, number):
@@ -109,6 +115,7 @@ class GitHub:
         """Open an issue and return its number, which the review record keeps (〈定義：覆核紀錄〉 工單)."""
         url = f'{API}/repos/{self.repo}/issues'
         _, created = self._send('POST', url, json.dumps({'title': title, 'body': body}).encode())
-        if not (isinstance(created, dict) and isinstance(created.get('number'), int)):
+        number = created.get('number') if isinstance(created, dict) else None
+        if not isinstance(number, int) or isinstance(number, bool):  # True is an int in Python, not an issue number
             raise PlatformError(f'POST {url}: GitHub answered no issue number')
-        return created['number']
+        return number

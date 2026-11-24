@@ -106,6 +106,41 @@ class SyncAcceptsOnlyVerifiedReasonedDecisions(unittest.TestCase):
             (9001, 'approve', OTHER, '2026-11-09T02:00:00Z', 'no_role'),
             (9003, 'approve', SECURITY, '2026-11-09T04:00:00Z', 'no_reason')])
 
+    def test_a_comment_of_nothing_but_white_space_gives_no_reason(self):
+        # 〈定義：覆核紀錄〉 理由: the account wrote, but said nothing.
+        for body in ('', '   ', '\n\t \n', '\u3000'):
+            with self.subTest(body=body):
+                platform = FakePlatform(
+                    events={7: [labeled(9002, SECURITY, 'review:reject', '2026-11-09T03:00:00Z')]},
+                    comments={7: [comment(2, SECURITY, body, '2026-11-09T02:30:00Z')]})
+                synced = review.sync(record(), ROLES, platform)
+                item = synced['items'][0]
+                self.assertEqual(item['decisions'], [])
+                self.assertEqual([(r['event_id'], r['problem']) for r in item['rejected']], [(9002, 'no_reason')])
+                self.assertEqual(review.validate(synced), [])
+
+    def test_a_blank_comment_next_to_one_that_says_something_is_left_out_of_the_reason(self):
+        platform = FakePlatform(
+            events={7: [labeled(9002, SECURITY, 'review:reject', '2026-11-09T03:00:00Z')]},
+            comments={7: [comment(1, SECURITY, '   ', '2026-11-09T02:10:00Z'),
+                          comment(2, SECURITY, 'the leak is a test artefact', '2026-11-09T02:30:00Z')]})
+        synced = review.sync(record(), ROLES, platform)
+        (decision,) = synced['items'][0]['decisions']
+        self.assertEqual(decision['reason'], 'the leak is a test artefact')
+        self.assertEqual([c['id'] for c in decision['reason_comments']], [2])
+        self.assertEqual(review.validate(synced), [])
+
+    def test_a_comment_whose_edit_time_is_no_utc_time_is_the_platforms_error(self):
+        for bad in ('2026-11-09T02:30:00+08:00', '2026-11-09 02:30:00', '', None):
+            with self.subTest(updated_at=bad):
+                edited = review.Comment(id=2, author_id=SECURITY['id'], author_login=SECURITY['login'],
+                                        body='the leak is a test artefact', created_at='2026-11-09T02:30:00Z',
+                                        updated_at=bad)
+                platform = FakePlatform(events={7: [labeled(9002, SECURITY, 'review:reject', '2026-11-09T03:00:00Z')]},
+                                        comments={7: [edited]})
+                with self.assertRaises(review.PlatformError):
+                    review.sync(record(), ROLES, platform)
+
     def test_syncing_again_records_each_event_once(self):
         platform = FakePlatform(
             events={7: [labeled(9001, OTHER, 'review:approve', '2026-11-09T02:00:00Z'),
@@ -287,6 +322,18 @@ class RecordFiles(ControlZone):
         self.assertNotIn('synced_at', saved)  # the last complete sync is still the one before
         self.assertEqual(sorted(p.name for p in self.control.iterdir()), ['review-record.json', 'review-roles.json'])
 
+    def test_an_edit_time_that_is_no_utc_time_fails_the_sync_and_writes_no_decision(self):
+        control.write(self.path, record(issue=7), self.source)
+        before = self.path.read_bytes()
+        events, _ = self.reasoned_reject(7, 9001)
+        edited = review.Comment(id=2, author_id=SECURITY['id'], author_login=SECURITY['login'], body='a reason',
+                                created_at='2026-11-09T02:30:00Z', updated_at='yesterday')
+        with self.assertRaises(review.SyncFailed):
+            review.sync_file(self.path, self.roles_path, self.roles_digest, FakePlatform(events, {7: [edited]}),
+                             self.NOW, self.source)
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(review.validate(json.loads(before)), [])
+
     def test_roles_with_another_digest_are_not_used(self):
         control.write(self.path, record(issue=7), self.source)
         before = self.path.read_bytes()
@@ -449,6 +496,25 @@ class CommandLine(ControlZone):
 
     TOKEN = {'MAZ_REVIEW_GITHUB_TOKEN': 'token-for-tests'}
 
+    def run_split(self, *argv, environ=None, platform=None):
+        """main() with standard output and standard error apart: (status, out, err)."""
+        out, err = io.StringIO(), io.StringIO()
+        code = review.main(list(argv), self.TOKEN if environ is None else environ,
+                           lambda repo, token: platform or FakePlatform(), out, err)
+        return code, out.getvalue(), err.getvalue()
+
+    def test_the_digest_goes_to_standard_output_and_a_failure_to_standard_error(self):
+        control.write(self.path, self.kept(), self.source)
+        code, out, err = self.run_split(*self.sync_args(), platform=FakePlatform())
+        self.assertEqual((code, err), (0, ''))
+        self.assertIn(control.file_digest(self.path), out)
+        code, out, err = self.run_split(*self.sync_args(), platform=FakePlatform(failing={7}))
+        self.assertEqual((code, out), (1, ''))
+        self.assertIn('sync failed', err)
+        code, out, err = self.run_split(*self.sync_args(), environ={})
+        self.assertEqual((code, out), (2, ''))
+        self.assertIn('is not set', err)
+
     def run_main(self, *argv, environ=None, platform=None):
         made, out = [], io.StringIO()
 
@@ -579,7 +645,8 @@ class RunAsAScript(ControlZone):
                                '--repo', 'owner/reviews', '--project', str(self.source)],
                               cwd=repo_root, env=env, capture_output=True, text=True, timeout=60)
         self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
-        self.assertIn('MAZ_REVIEW_GITHUB_TOKEN is not set', done.stdout)
+        self.assertIn('MAZ_REVIEW_GITHUB_TOKEN is not set', done.stderr)  # why nothing was done: standard error
+        self.assertEqual(done.stdout, '')
 
 
 class StatesAndOptionsAgreeWithSchemas(unittest.TestCase):

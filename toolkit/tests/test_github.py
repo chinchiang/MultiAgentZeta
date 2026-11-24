@@ -53,6 +53,18 @@ class LabelEvents(unittest.TestCase):
         self.assertEqual([e.id for e in events], [9001, 9003, 9004])
         self.assertEqual(len(replay.asked), 2)
 
+    def test_the_link_header_is_read_whatever_case_its_name_arrives_in(self):
+        # Header names are case-insensitive; HTTP/2 and some proxies give them in lower case.
+        page2 = 'https://api.github.com/repositories/42/issues/7/events?per_page=100&page=2'
+        for name in ('Link', 'link', 'LINK'):
+            with self.subTest(header=name):
+                replay = Replay({('GET', f'{API}/issues/7/events?per_page=100'):
+                                 (200, {'Content-Type': 'application/json', name: f'<{page2}>; rel="next"'},
+                                  recorded('issue-7-events-page-1.json')),
+                                 ('GET', page2): (200, {}, recorded('issue-7-events-page-2.json'))})
+                events = github.GitHub('owner/reviews', 'token-x', transport=replay).label_events(7)
+                self.assertEqual([e.id for e in events], [9001, 9003, 9004])
+
 
 
 class Comments(unittest.TestCase):
@@ -74,6 +86,13 @@ class CreateIssue(unittest.TestCase):
         self.assertEqual(number, 12)
         (_, _, _, sent), = replay.asked
         self.assertEqual(json.loads(sent), {'title': 'a title', 'body': 'a body'})
+
+    def test_an_answer_whose_number_is_no_integer_is_the_platforms_error(self):
+        for number in (True, False, '12', None, 12.0):
+            with self.subTest(number=number):
+                replay = Replay({('POST', f'{API}/issues'): (201, {}, json.dumps({'number': number}).encode())})
+                with self.assertRaises(review.PlatformError):
+                    github.GitHub('owner/reviews', 'token-x', transport=replay).create_issue('a title', 'a body')
 
 
 class Requests(unittest.TestCase):
