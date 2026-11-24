@@ -18,7 +18,8 @@ Usage (from anywhere):
       # (the version rule needs that row; without --note you add it yourself)
 
   python3 -I docs/toolkit/tools/build.py --check-staged
-      # pre-commit: the staged changes against HEAD must bump the version if they touch
+      # pre-commit: what is staged, not the working directory, must pass every check and
+      # hold up-to-date outputs; and against HEAD it must bump the version if it touches
       # a VERSIONED_PATHS path (README 版本規則)
   python3 -I docs/toolkit/tools/build.py --check-commits BASE [--fallback REF]
       # CI: every non-merge commit in BASE..HEAD, each against its first parent; when BASE
@@ -27,7 +28,10 @@ Usage (from anywhere):
 Every mode works on the repository that contains this script; --repo PATH names another
 one (a clone, a throwaway repository) for any mode.
 
-Exit codes: 0 ok; 1 outputs stale (--check only); 2 validation problems.
+An option this script does not know, a second mode, or an option of another mode is an error:
+nothing is read or written (a mistyped --check must not fall through to the mode that writes).
+
+Exit codes: 0 ok; 1 outputs stale (--check only); 2 validation problems or a wrong command line.
 Nothing is written while any problem is reported.
 
 Structure: ``check_docs(snapshot)`` is the whole check. It takes a snapshot
@@ -57,7 +61,8 @@ and all its problems are reported together. Checks:
   * the shared version: the header of all four documents and the version
     sentence in spec.md §0.4 must agree (v0.1-scope.md is covered by the
     staleness check, since it is generated from spec.md)
-  * line endings: no CR characters in tracked text files of the docs tooling
+  * line endings: no CR characters in the text files of the docs tooling and the repository's
+    own instructions and scripts (see lf_files)
   * generated outputs: exactly one BEGIN/END marker pair per generated region
 """
 import collections
@@ -131,14 +136,16 @@ def def_ref_files(paths):
 
 def lf_files(paths):
     """Text files that must use LF line endings."""
-    root = {'GLOSSARY.md', 'AGENTS.md', 'CLAUDE.md', 'CODING_STANDARDS.md', '.gitattributes', '.gitignore',
-            '.claude/settings.json'}
+    root = {'README.md', 'GLOSSARY.md', 'AGENTS.md', 'CLAUDE.md', 'CODING_STANDARDS.md', '.gitattributes',
+            '.gitignore', '.claude/settings.json'}
     dirs = ('docs/adr', 'docs/research', 'docs/agents', '.github/workflows', '.githooks', 'docs/toolkit/tools')
+    by_suffix = (('docs/toolkit', '.md'), ('.claude/agents', '.md'),
+                 ('toolkit/tools', '.sh'))  # a shell script with CR line endings does not run
 
     def wanted(p):
         if p in root or any(_in_dir(p, d) for d in dirs):
             return True
-        return _in_dir(p, 'docs/toolkit') and p.endswith('.md')
+        return any(_in_dir(p, d) and p.endswith(suffix) for d, suffix in by_suffix)
 
     return sorted(p for p in paths if wanted(p) and not p.endswith('.pdf'))
 
@@ -560,21 +567,67 @@ def taiwan_today():
 
 # --- disk adapter and command line --------------------------------------------
 
-SKIP_DIRS = {'.git', '__pycache__'}
+# Outside a git clone every file is read, except these: git's own, caches, and where tools keep their state
+# (the virtual environment, the environment tests' logs and downloads, vendored agent skills).
+SKIP_DIRS = {'.git', '__pycache__', '.venv', 'scratch', '.agents'}
 
 
-def load_snapshot(repo=REPO):
-    """Read every UTF-8 text file under repo; files that do not decode are skipped."""
-    snapshot = {}
+def _tracked(repo):
+    """The paths git tracks in the clone at repo (the index: a newly added file counts, an untracked draft does
+    not), or None when repo is no clone or git cannot say."""
+    if not (Path(repo) / '.git').exists():
+        return None
+    run = _run_git(repo, 'ls-files', '-z')
+    if run.returncode != 0:
+        return None
+    return [p for p in run.stdout.decode('utf-8', 'replace').split('\0') if p]
+
+
+def _walked(repo):
     for dirpath, dirnames, filenames in os.walk(repo):
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
         for name in filenames:
-            path = Path(dirpath) / name
-            try:
-                with open(path, encoding='utf-8', newline='') as f:
-                    snapshot[path.relative_to(repo).as_posix()] = f.read()
-            except (UnicodeDecodeError, OSError):
-                continue
+            yield (Path(dirpath) / name).relative_to(repo).as_posix()
+
+
+def load_snapshot(repo=REPO):
+    """Read the UTF-8 text files of repo as they are in the working directory: the files git tracks when repo
+    is a clone, else every file outside SKIP_DIRS. Files that do not decode, or are gone, are skipped."""
+    tracked = _tracked(repo)
+    snapshot = {}
+    for rel in (_walked(repo) if tracked is None else tracked):
+        try:
+            with open(Path(repo) / rel, encoding='utf-8', newline='') as f:
+                snapshot[rel] = f.read()
+        except (UnicodeDecodeError, OSError):
+            continue
+    return snapshot
+
+
+def load_staged_snapshot(repo):
+    """Read the UTF-8 text files of repo as the index has them: what the next commit will hold. Blobs that
+    do not decode, and entries that are no files (a submodule), are skipped."""
+    entries = []
+    for entry in _git_bytes(repo, 'ls-files', '-s', '-z').split(b'\0'):
+        if not entry:
+            continue
+        meta, _, path = entry.partition(b'\t')
+        mode, blob, stage = meta.split()
+        if stage == b'0' and not mode.startswith(b'16'):  # unmerged entries and gitlinks hold no text to check
+            entries.append((blob, path.decode('utf-8', 'replace')))
+    run = subprocess.run(['git', '-C', str(repo), 'cat-file', '--batch'], capture_output=True,
+                         input=b''.join(blob + b'\n' for blob, _ in entries))
+    if run.returncode != 0:
+        raise Invalid('git', '', f'git cat-file --batch failed: {run.stderr.decode("utf-8", "replace").strip()}')
+    snapshot, out, at = {}, run.stdout, 0
+    for _, path in entries:
+        end = out.index(b'\n', at)
+        size = int(out[at:end].split()[2])
+        try:
+            snapshot[path] = out[end + 1:end + 1 + size].decode('utf-8')
+        except UnicodeDecodeError:
+            pass
+        at = end + 1 + size + 1
     return snapshot
 
 
@@ -587,12 +640,17 @@ def _run_git(repo, *args):
     return subprocess.run(['git', '-C', str(repo), *args], capture_output=True)
 
 
-def _git(repo, *args):
-    """Run git in repo and return its stdout; Invalid('git') when it fails."""
+def _git_bytes(repo, *args):
+    """Run git in repo and return its stdout as bytes; Invalid('git') when it fails."""
     run = _run_git(repo, *args)
     if run.returncode != 0:
         raise Invalid('git', '', f'git {" ".join(args)} failed: {run.stderr.decode("utf-8", "replace").strip()}')
-    return run.stdout.decode('utf-8')
+    return run.stdout
+
+
+def _git(repo, *args):
+    """Run git in repo and return its stdout; Invalid('git') when it fails."""
+    return _git_bytes(repo, *args).decode('utf-8')
 
 
 def hooks_warning_for(repo):
@@ -627,11 +685,23 @@ def _check_change(repo, change):
 
 
 def check_staged(repo):
-    """Problems of the staged changes against HEAD; none for a first commit or a commit that concludes a merge."""
+    """Problems of what is staged: the documents as the index has them must pass check_docs with their generated
+    outputs up to date (a file left unstaged is not part of the commit, however current the working directory
+    is), and the staged changes against HEAD must follow the version rule. The version rule is not applied to
+    a first commit or a commit that concludes a merge."""
+    problems = []
+    staged = load_staged_snapshot(repo)
+    if SPEC in staged:
+        result = check_docs(staged)
+        problems += [p._replace(message=f'staged: {p.message}') for p in result.problems]
+        if result.updates:
+            names = ', '.join(sorted(result.updates))
+            problems.append(Problem('staged-stale', '', f'staged: generated outputs are out of date in the index: '
+                                                        f'{names}; run tools/build.py and stage them (git add)'))
     has = lambda ref: _git_succeeds(repo, 'rev-parse', '-q', '--verify', ref)
     if not has('HEAD') or has('MERGE_HEAD'):
-        return []
-    return _check_change(repo, Change('HEAD', None, 'staged changes'))
+        return problems
+    return problems + _check_change(repo, Change('HEAD', None, 'staged changes'))
 
 
 def check_commits(repo, base, fallback):
@@ -671,7 +741,44 @@ def _fail(rule, message):
     return 2
 
 
+# The command line: each option, whether a value follows it, and the mode it belongs to (None: any mode).
+MODES = ('--check', '--bump', '--check-staged', '--check-commits')  # none of them: validate and rewrite
+OPTIONS = {'--repo': (True, None), '--check': (False, '--check'), '--bump': (True, '--bump'),
+           '--date': (True, '--bump'), '--note': (True, '--bump'), '--check-staged': (False, '--check-staged'),
+           '--check-commits': (True, '--check-commits'), '--fallback': (True, '--check-commits')}
+
+
+def usage_problem(argv):
+    """What is wrong with the command line, as (rule, message), or None. An argument that is no known option, an
+    option given twice, two modes at once, or an option of a mode that was not asked for: each is an error, so a
+    mistyped flag never falls through to the default mode, which writes."""
+    seen, i = [], 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg not in OPTIONS:
+            known = ', '.join(OPTIONS)
+            return 'usage', f'unknown argument {arg!r}; the options are {known}'
+        if arg in seen:
+            return 'usage', f'{arg} is given more than once'
+        seen.append(arg)
+        takes_value = OPTIONS[arg][0]
+        i += 2 if takes_value and i + 1 < len(argv) and not argv[i + 1].startswith('--') else 1
+    modes = [a for a in seen if a in MODES]
+    if '--bump' in modes and '--check' in modes:
+        return 'bump-check', '--bump writes files; it cannot be combined with --check'
+    if len(modes) > 1:
+        return 'usage', f'{" and ".join(modes)} are different modes; give one'
+    for arg in seen:
+        mode = OPTIONS[arg][1]
+        if mode is not None and mode not in modes:
+            return ('bump-note' if arg == '--note' else 'usage'), f'{arg} belongs to {mode}'
+    return None
+
+
 def main(argv, repo=REPO):
+    problem = usage_problem(argv)
+    if problem:
+        return _fail(*problem)
     given = _option(argv, '--repo')
     if given is not None:
         if not given or not Path(given).is_dir():
@@ -689,15 +796,9 @@ def main(argv, repo=REPO):
     check = '--check' in argv
     version = _option(argv, '--bump')
     if version is not None:
-        if check:
-            print(format_problem(Problem('bump-check', '', '--bump writes files; it cannot be combined with --check')),
-                  file=sys.stderr)
-            return 2
         date = _option(argv, '--date')
         result = bump(load_snapshot(repo), version, taiwan_today() if date is None else date,
                       note=_option(argv, '--note'))
-    elif '--note' in argv:
-        return _fail('bump-note', '--note belongs to --bump')
     else:
         result = check_docs(load_snapshot(repo))
     if check and (warning := hooks_warning_for(repo)):

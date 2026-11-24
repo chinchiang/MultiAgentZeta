@@ -56,22 +56,22 @@ v1.3.6 以前的單一文件 `docs/research/vibe-coding-multiagent-testing-toolk
 
 ## 自動檢查
 
-`python3 -I docs/toolkit/tools/build.py --check` 是這組文件的檢查指令，出錯時以結束碼 2 停止，產生結果過期時以結束碼 1 停止；有任何錯誤時不寫入任何檔案；錯誤的回報方式見 `tools/build.py` 開頭說明。它檢查：
+`python3 -I docs/toolkit/tools/build.py --check` 是這組文件的檢查指令，出錯時以結束碼 2 停止，產生結果過期時以結束碼 1 停止；有任何錯誤時不寫入任何檔案；錯誤的回報方式見 `tools/build.py` 開頭說明。不認得的參數、多餘的參數、同時給兩種模式，或給了別種模式的選項，一律以結束碼 2 停止，不讀也不寫任何檔案（拼錯的 `--check` 不會變成會寫檔的預設模式）。在 git 複本中只讀取版本控制追蹤的檔案（已 `git add` 的新檔算，未追蹤的草稿與被忽略的目錄不算），內容取自工作目錄；不是 git 複本的目錄則讀取全部檔案，但略過 `.git`、`__pycache__`、`.venv`、`scratch`、`.agents`。它檢查：
 
 - 條文區塊：欄位齊全且不空白、等級與 v0.1 值合法、「須」「不得」條文的驗收不是「—」、編號不重複也不跳號。
 - 引用：規格與其他文件（設計說明、審查處置紀錄、本檔、`GLOSSARY.md`、ADR、研究筆記）中的 `TK-` 引用都指向存在的條文；這些文件、`docs/agents/` 與 `toolkit/` 的程式和 schema 中的〈定義：〇〇〉引用，都有對應的「定義：〇〇」小節（`samples/` 不檢查）；[R] 參考資料在設計說明中只定義一次、編號從 1 連續，各文件引用的 [R] 都有定義。
 - 版本：四份文件的檔頭版本一致，且與規格第 0.4 節的版本句相同。
-- 換行：文件、工具、ADR、研究筆記與設定檔都是 LF。repo 根目錄的 `.gitattributes`（`* text=auto eol=lf`）讓 Git 在 checkout 時也保持 LF。
+- 換行：文件、工具、ADR、研究筆記、設定檔、根目錄的 `README.md`、`.claude/agents/*.md` 與 `toolkit/tools/*.sh` 都是 LF。repo 根目錄的 `.gitattributes`（`* text=auto eol=lf`）讓 Git 在 checkout 時也保持 LF。
 - 產生結果：驗收群組表、附錄 A 與 `v0.1-scope.md` 與條文一致。
 
 `--check` 之外另有版本規則的檢查（`check_revision`）：一個提交若改動上方「版本規則」列的路徑，就必須升版，也就是共用版本號比上一代新，**而且** `review-log.md` 第 4 章有新版本的那一列；只改版本與日期的升版提交本身也通過。沒有上一代的根提交與合併提交不檢查，沒有其他例外，改一個錯字也要升版。失敗時結束碼為 2，列出提交、被改動的路徑與未變的版本，並提示 `build.py --bump` 與補修訂紀錄。路徑清單只寫在 `build.py` 的 `VERSIONED_PATHS`，測試確認它與上方版本規則那一句一致。兩種模式：
 
-- `build.py --check-staged`：暫存區對 `HEAD`，給提交前 hook 用。
+- `build.py --check-staged`：給提交前 hook 用，檢查的是暫存區，也就是這次提交的內容，不是工作目錄。它對暫存區的文件執行上面「自動檢查」的全部檢查，產生結果在暫存區中過期時也失敗（結束碼 2，`staged-stale`）；再以暫存區對 `HEAD` 檢查版本規則。重新產生了 `v0.1-scope.md` 卻只 `git add` 了 `spec.md` 的提交因此會被擋下。
 - `build.py --check-commits BASE [--fallback REF]`：`BASE..HEAD` 內每個非合併提交，各與它的第一個上一代比較，給 CI 用；逐一檢查是因為連續兩個提交各自漏升版時，整段的總差異看不出來。`BASE` 是空的、全零或找不到時改用 `HEAD` 與 `REF` 的共同祖先；仍決定不了基準就失敗，不會靜默通過。退回後範圍仍為空（推送的就是預設分支本身，例如第一次推送，或強制推送後找不到舊前端）時，只檢查 `HEAD` 這一個提交；強制推送一次帶入多個新提交又找不到舊基準時，其餘提交看不到，這是已知的限制。
 
-兩道防線都執行 `--check` 與上述版本規則的檢查：
+兩道防線都執行「自動檢查」與上述版本規則的檢查：
 
-- **提交前 hook**：`.githooks/pre-commit`。每個複本執行一次 `git config core.hooksPath .githooks` 後啟用。還沒啟用時，`--check` 會在標準錯誤多印一行 `warning: core.hooksPath is not .githooks; …`（結束碼與標準輸出不變；持續整合與不是 git 複本的目錄不印），提醒這個複本的提交前檢查沒有在跑；工具不會替你啟用，那是複本的設定。`--check` 檢查的是工作目錄，不是暫存區：只暫存部分修改時，檢查通過不代表提交的內容通過；版本規則的檢查讀的是暫存區。
-- **CI**：`.github/workflows/docs-check.yml`，在每次 push 與 PR 執行（取完整歷史），並先跑工具本身的測試。直接推 `main` 時 CI 是事後警報；事前攔截靠 hook。
+- **提交前 hook**：`.githooks/pre-commit`。每個複本執行一次 `git config core.hooksPath .githooks` 後啟用。還沒啟用時，`--check` 會在標準錯誤多印一行 `warning: core.hooksPath is not .githooks; …`（結束碼與標準輸出不變；持續整合與不是 git 複本的目錄不印），提醒這個複本的提交前檢查沒有在跑；工具不會替你啟用，那是複本的設定。hook 只執行 `build.py --check-staged`：工作目錄裡還沒暫存的修改不影響它，也不會被它當成已提交。`--check` 檢查的是工作目錄，不是暫存區，適合編輯時自己執行；提交的內容由 `--check-staged` 檢查。
+- **CI**：`.github/workflows/docs-check.yml`，在每次 push 與 PR 執行 `--check` 與 `--check-commits`（取完整歷史），並先跑工具本身的測試。直接推 `main` 時 CI 是事後警報；事前攔截靠 hook。
 
 工具本身的測試在 `tools/test_build.py`，用 `python3 -I -m unittest discover -s docs/toolkit/tools` 執行；修改 `build.py` 時依 `CODING_STANDARDS.md` 第 14 條補測試。

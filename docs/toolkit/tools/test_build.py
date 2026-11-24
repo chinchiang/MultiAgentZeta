@@ -484,6 +484,50 @@ class BumpNote(unittest.TestCase):
             self.assertNotIn('v9.9.10', Path(d, build.SPEC).read_text(encoding='utf-8'))
 
 
+class CommandLine(unittest.TestCase):
+    """An argument the script does not know never falls through to the default mode, which writes."""
+
+    WRONG = (['--chek'], ['--check', 'extra'], ['docs'], ['--check', '--check'], ['--check', '--check-staged'],
+             ['--check-staged', '--check-commits', 'abc'], ['--date', '2026-01-01'], ['--check', '--date', '2026-01-01'],
+             ['--fallback', 'origin/main'], ['--check', '--fallback', 'origin/main'], ['--bump', 'v9.9.10', 'more'],
+             ['-h'], ['--help'])
+    RIGHT = ([], ['--check'], ['--check-staged'], ['--bump', 'v9.9.10'], ['--bump', 'v9.9.10', '--date', '2026-01-02'],
+             ['--bump', 'v9.9.10', '--note', 'what changed'], ['--check-commits', 'abc', '--fallback', 'origin/main'],
+             ['--check-commits', '', '--fallback', 'origin/main'], ['--check-commits', '--fallback', 'origin/main'],
+             ['--check', '--repo', '/somewhere'], ['--repo', '/somewhere', '--check-staged'])
+
+    def test_a_wrong_command_line_is_named(self):
+        for argv in self.WRONG:
+            with self.subTest(argv=argv):
+                self.assertIsNotNone(build.usage_problem(argv))
+
+    def test_every_documented_command_line_is_accepted(self):
+        for argv in self.RIGHT:
+            with self.subTest(argv=argv):
+                self.assertIsNone(build.usage_problem(argv))
+
+    def test_the_rules_two_mistakes_already_had_keep_their_names(self):
+        self.assertEqual(build.usage_problem(['--bump', 'v9.9.10', '--check'])[0], 'bump-check')
+        self.assertEqual(build.usage_problem(['--note', 'x'])[0], 'bump-note')
+
+    def test_a_mistyped_flag_fails_with_status_2_and_writes_nothing(self):
+        stale = make()  # its generated outputs are out of date: the default mode would rewrite them
+        for argv in (['--chek'], ['--check', 'extra'], ['--date', '2026-01-01']):
+            with self.subTest(argv=argv), tempfile.TemporaryDirectory() as d:
+                write_snapshot(d, stale)
+                code, out, err = run_cli(*argv, '--repo', d)
+                self.assertEqual((code, out), (2, ''))
+                self.assertIn('[usage]', err)
+                self.assertEqual(build.load_snapshot(Path(d)), stale)
+
+    def test_the_default_mode_still_rewrites_stale_outputs(self):
+        with tempfile.TemporaryDirectory() as d:
+            write_snapshot(d, make())
+            code, out, err = run_cli('--repo', d)
+            self.assertEqual((code, err), (0, ''))
+            self.assertEqual(build.load_snapshot(Path(d)), regenerated(make()))
+
+
 class RepoOption(unittest.TestCase):
     """--repo PATH: which repository the command line works on, instead of the one the script lives in."""
 
@@ -538,6 +582,7 @@ class HooksWarningOnTheCommandLine(unittest.TestCase):
         self.addCleanup(self.dir.cleanup)
         write_snapshot(self.dir.name, regenerated(make()))
         subprocess.run(['git', '-C', self.dir.name, 'init', '-q'], check=True)
+        subprocess.run(['git', '-C', self.dir.name, 'add', '-A'], check=True)  # a clone is read as git tracks it
         env = unittest.mock.patch.dict(os.environ)
         env.start()
         self.addCleanup(env.stop)
@@ -588,6 +633,17 @@ class LineEndings(unittest.TestCase):
     def test_cr_outside_doc_set_is_ignored(self):
         self.assertEqual(rules(make(scratch__x_md='a\r\n')), set())
 
+    def test_the_readme_the_agent_definitions_and_the_tool_scripts_use_lf(self):
+        for path in ('README.md', '.claude/agents/reviewer.md', 'toolkit/tools/run-env-tests.sh'):
+            with self.subTest(path=path):
+                self.assertEqual(rules({**make(), path: 'a\nb\n'}), set())
+                self.assertEqual(rules({**make(), path: 'a\r\nb\n'}), {('crlf', '')})
+
+    def test_a_script_or_a_note_elsewhere_is_not_in_the_set(self):
+        for path in ('samples/a/run.sh', '.claude/agents/notes.txt', 'samples/README.md'):
+            with self.subTest(path=path):
+                self.assertEqual(rules({**make(), path: 'a\r\nb\n'}), set())
+
 
 class Markers(unittest.TestCase):
     def test_missing_marker(self):
@@ -597,11 +653,13 @@ class Markers(unittest.TestCase):
 
 
 def revision(version, rows=()):
-    """The two files check_revision reads: the spec header and review-log chapter 4."""
-    log = '# 審查處置紀錄\n\n## 4. 修訂紀錄\n\n| 版本 | 日期 | 內容 |\n|---|---|---|\n'
+    """A whole document set at a version that passes every check, with these rows in review-log chapter 4:
+    check_revision reads its spec header and its log, and --check-staged checks all of it."""
+    snap = {path: text.replace('v9.9.9', version) for path, text in make().items()}
+    log = snap[build.REVIEW] + '\n## 4. 修訂紀錄\n\n| 版本 | 日期 | 內容 |\n|---|---|---|\n'
     log += ''.join(f'| {v} | 2026-01-01 | 修訂。 |\n' for v in rows)
-    log += '\n## 5. 已取消的宣稱\n\n| v9.9.9 | 不是修訂紀錄 |\n'
-    return {build.SPEC: f'# 規格\n\n> **版本**：{version}（四份文件共用版本號）\n', build.REVIEW: log}
+    log += '\n## 5. 已取消的宣稱\n\n| v0.0.0 | 不是修訂紀錄 |\n'
+    return regenerated({**snap, build.REVIEW: log})
 
 
 BASE = revision('v1.4.5', rows=['v1.4.5'])
@@ -751,6 +809,38 @@ class RevisionGitLayer(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn('[revision-version]', err)
 
+    def test_an_output_regenerated_but_left_unstaged_fails_the_staged_check(self):
+        """The working directory is right; the commit would not be: v0.1-scope.md was not staged."""
+        self.commit('base', BASE)
+        self.write(BUMPED)
+        self.assertEqual(build.check_docs(build.load_snapshot(self.repo)).updates, {})  # --check would pass
+        self.git('add', build.SPEC, build.DESIGN, build.REVIEW)
+        code, err = self.run_main('--check-staged')
+        self.assertEqual(code, 2)
+        self.assertIn('[staged-stale]', err)
+        self.assertIn('v0.1-scope.md', err)
+        self.git('add', build.SCOPE)
+        self.assertEqual(self.run_main('--check-staged'), (0, ''))
+
+    def test_a_document_error_that_is_staged_fails_the_staged_check_even_when_the_working_copy_is_fixed(self):
+        self.commit('base', BASE)
+        broken = {**BUMPED, build.DESIGN: BUMPED[build.DESIGN] + '\n見 `TK-ZZZ-999`。\n'}
+        self.write(broken)
+        self.git('add', '-A')
+        self.write(BUMPED)  # fixed in the working directory, but that is not what is staged
+        code, err = self.run_main('--check-staged')
+        self.assertEqual(code, 2)
+        self.assertIn('staged: ', err)
+        self.assertIn('TK-ZZZ-999', err)
+        self.git('add', '-A')
+        self.assertEqual(self.run_main('--check-staged'), (0, ''))
+
+    def test_a_staged_change_outside_the_documents_passes(self):
+        self.commit('base', BASE)
+        self.write({}, **{'toolkit/scan.py': 'x = 1\n'})
+        self.git('add', '-A')
+        self.assertEqual(self.run_main('--check-staged'), (0, ''))
+
     def test_base_that_is_not_an_ancestor_of_head_falls_back_to_the_merge_base(self):
         """A force push: the old tip is a real commit, but no longer in HEAD's history."""
         root = self.commit('base', BASE, **{'GLOSSARY.md': 'a'})
@@ -808,6 +898,28 @@ class DiskAdapter(unittest.TestCase):
             Path(d, '.git').mkdir()
             Path(d, '.git', 'c.md').write_text('x', encoding='utf-8')
             self.assertEqual(build.load_snapshot(Path(d)), {'a.md': '甲\r\n'})
+
+    def test_outside_a_clone_tool_state_is_not_read(self):
+        with tempfile.TemporaryDirectory() as d:
+            for path in ('a.md', '.venv/lib/site.md', 'scratch/logs/run.md', '.agents/skills/x.md',
+                         'docs/__pycache__/y.md', 'docs/kept.md'):
+                Path(d, path).parent.mkdir(parents=True, exist_ok=True)
+                Path(d, path).write_text('x', encoding='utf-8')
+            self.assertEqual(sorted(build.load_snapshot(Path(d))), ['a.md', 'docs/kept.md'])
+
+    def test_in_a_clone_only_what_git_tracks_is_read(self):
+        with tempfile.TemporaryDirectory() as d:
+            git = lambda *args: subprocess.run(['git', '-C', d, *args], check=True, capture_output=True)
+            git('init', '-q')
+            for path, text in (('tracked.md', 'old'), ('added.md', 'new file'), ('draft.md', 'not added'),
+                               ('.gitignore', 'scratch/\n'), ('scratch/log.md', 'ignored')):
+                Path(d, path).parent.mkdir(parents=True, exist_ok=True)
+                Path(d, path).write_text(text, encoding='utf-8')
+            git('add', 'tracked.md', 'added.md', '.gitignore')
+            Path(d, 'tracked.md').write_text('edited, not staged', encoding='utf-8')
+            self.assertEqual(build.load_snapshot(Path(d)), {'tracked.md': 'edited, not staged', 'added.md': 'new file',
+                                                            '.gitignore': 'scratch/\n'})  # the working copy of them
+            self.assertEqual(build.load_staged_snapshot(Path(d))['tracked.md'], 'old')  # the index
 
     def test_real_repo_is_clean(self):
         result = build.check_docs(build.load_snapshot())
