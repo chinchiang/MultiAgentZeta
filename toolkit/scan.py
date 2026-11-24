@@ -973,6 +973,7 @@ def _environment_report(profile):
         'profile_digest': _digest(profile),
         'unsupported': list(profile.get('unsupported') or []),
         'known_differences': list(profile.get('known_differences') or []),
+        'isolation': profile.get('isolation') or {},  # 〈定義：E1 隔離〉; an empty record does not validate
     }
 
 

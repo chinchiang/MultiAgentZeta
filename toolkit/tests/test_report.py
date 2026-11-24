@@ -1400,7 +1400,7 @@ class EnvironmentInReport(unittest.TestCase):
         return doc
 
     def test_environment_schema_requires_all_four_fields_forbids_extras_and_checks_stage_presence(self):
-        for missing in ('mode', 'profile_digest', 'unsupported', 'known_differences'):
+        for missing in ('mode', 'profile_digest', 'unsupported', 'known_differences', 'isolation'):
             with self.subTest(missing=missing):
                 doc = valid_report()
                 del doc['environment'][missing]
@@ -1451,6 +1451,32 @@ class EnvironmentInReport(unittest.TestCase):
         dropped['coverage']['denominator'] -= 1
         dropped['coverage']['unsupported'] -= 1
         self.assertTrue(any(f'environment:{item}' in p for p in report.validate(dropped)))
+
+    def test_isolation_is_required_whole_and_only_records_a_blocked_stack(self):
+        """〈定義：E1 隔離〉 紀錄: every field, no other, and no way to report a stack that was not blocked."""
+        self.assertEqual(report.validate(valid_report()), [])
+        for missing in ('outbound', 'method', 'host_access', 'containers_checked', 'limits'):
+            with self.subTest(missing=missing):
+                doc = valid_report()
+                del doc['environment']['isolation'][missing]
+                self.assertTrue(any('isolation' in p for p in report.validate(doc)))
+        for field, value in (('outbound', 'open'), ('method', 'no-masquerade'), ('containers_checked', []), ('limits', []),
+                             ('observer_password', 'secret')):
+            with self.subTest(field=field):
+                doc = valid_report()
+                doc['environment']['isolation'][field] = value
+                self.assertTrue(any('isolation' in p for p in report.validate(doc)), field)
+
+    def test_markdown_shows_the_isolation_and_what_it_does_not_cover(self):
+        doc = valid_report()
+        doc['environment']['isolation']['limits'] = ['shares the host kernel <!-- hidden']
+        md = report.render_markdown(doc)
+        self.assertIn('- **對外連線（TK-SBX-004）**：已阻擋（內部網路：不與其他網路互通，不解析外部名稱，不發布連接埠）', md)
+        self.assertIn('- **宿主機入口（TK-ENV-008，只在本機回送位址）**：`127.0.0.1:54321 -> kong:8000`、`127.0.0.1:54322 -> db:5432`', md)
+        self.assertIn('`auth`、`db`、`kong`、`rest`', md)
+        self.assertIn('- **隔離未涵蓋的範圍**：', md)
+        self.assertIn('shares the host kernel', md)
+        self.assertNotIn('<!--', re.sub(r'(`+).*?\1', '', md))
 
     def test_markdown_renders_known_differences_missing_environment_and_unsupported_versions_safely(self):
         md = report.render_markdown(valid_report())

@@ -25,7 +25,7 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from toolkit import transport
+from toolkit import forward, transport
 
 RECIPE_FILE = 'build-recipe.json'
 SUPPORT_MATRIX = Path(__file__).with_name('support-matrix.json')
@@ -68,6 +68,8 @@ class Environment:
     observer: dict = field(default_factory=dict)  # {'role', 'password'}; control area only (TK-IDN-005)
     api_keys: dict = field(default_factory=dict)  # public API key format -> key
     usable: bool = True
+    relays: list = field(default_factory=list)  # forward.Relay: the host's way into the internal network
+    isolation: dict = field(default_factory=dict)  # 〈定義：E1 隔離〉: what was checked after the last start
 
     @property
     def network(self):
@@ -285,11 +287,13 @@ def _check_migrations(project_dir, recipe):
 def _start(env):
     si = env.recipe['service_init']
     _create_network(env)
+    _open_relays(env)
     r = _run([env.cli, 'start', '--workdir', str(env.project_dir), '--network-id', env.network])
     if r.returncode:
         raise _Stop(Blocked('service_init', 'the stack failed to start (migrations and seed are applied at start)',
                             _tail(r.stdout + r.stderr)))
     _read_status(env)
+    env.isolation = _check_isolation(env)
     have = set(_psql(env, 'select extname from pg_extension;').split())
     missing = [e for e in si['extensions'] if e not in have]
     if missing:
@@ -298,19 +302,129 @@ def _start(env):
 
 LOOPBACK_OPTION = 'com.docker.network.bridge.host_binding_ipv4'
 
+# 〈定義：E1 隔離〉 宿主機入口: the two ports the CLI and the toolkit use, and the container port behind each.
+RELAYED = (('api', 54321, 'kong', 8000), ('db', 54322, 'db', 5432))
+ISOLATION_LIMITS = (
+    'containers share the host kernel: container isolation is not full isolation (TK-SBX-007)',
+    'no CPU, memory, process or disk limit is set on the stack containers (TK-SBX-003)',
+    'the db container holds the database the observer role lives in (TK-IDN-005)',
+)
+
 
 def _create_network(env):
-    """A dedicated network whose published ports bind to 127.0.0.1 only (TK-ENV-008).
+    """A dedicated internal network (TK-SBX-004, TK-ENV-008, 〈定義：E1 隔離〉): Docker drops traffic between an
+    internal network and every other network, resolves no outside name on it and publishes no port from it.
 
-    The CLI leaves the host IP empty, and on a user-defined network the default
-    comes from this network option, not from the daemon's "ip" setting.
+    The loopback option stays so that a port could only ever be published on 127.0.0.1.
     """
     _run(['docker', 'network', 'rm', env.network], timeout=60)
-    r = _run(['docker', 'network', 'create', '--driver', 'bridge', '--ipv6=false',
+    r = _run(['docker', 'network', 'create', '--driver', 'bridge', '--ipv6=false', '--internal',
               '-o', f'{LOOPBACK_OPTION}=127.0.0.1', env.network], timeout=60)
     if r.returncode:
-        raise _Stop(Blocked('service_init', f'cannot create the loopback-only network {env.network}',
+        raise _Stop(Blocked('service_init', f'cannot create the internal network {env.network}',
                             _tail(r.stdout + r.stderr)))
+
+
+def _address(env, service):
+    """The address of a stack container on the toolkit network; '' when it is not there (yet)."""
+    try:
+        r = _run(['docker', 'inspect', '-f', '{{json .NetworkSettings.Networks}}',
+                  f'supabase_{service}_{env.project_id}'], timeout=60)
+        return json.loads(r.stdout)[env.network]['IPAddress'] or ''
+    except (_CommandFailed, json.JSONDecodeError, KeyError, TypeError):
+        return ''
+
+
+def _open_relays(env):
+    """〈定義：E1 隔離〉 宿主機入口: listen on 127.0.0.1 where the CLI and the toolkit expect the API and the
+    database, before the stack starts (the CLI applies migrations through the database port)."""
+    _close_relays(env)
+    config = _project_config(env.project_dir)
+    for section, default, service, inner in RELAYED:
+        port = (config.get(section) or {}).get('port', default)
+        try:
+            env.relays.append(forward.Relay(port, lambda service=service: _address(env, service), inner))
+        except (OSError, OverflowError, TypeError) as e:
+            raise _Stop(Blocked('service_init', f'cannot listen on 127.0.0.1:{port} for the {service} service: '
+                                                f'{type(e).__name__}', str(e))) from e
+
+
+def _close_relays(env):
+    for relay in env.relays:
+        relay.close()
+    env.relays.clear()
+
+
+def _inside(path, directory):
+    return path == directory or directory in path.parents
+
+
+def isolation_problems(network, containers, env_network, project_dir, toolkit_dir):
+    """〈定義：E1 隔離〉 啟動後檢查: what makes a started stack unfit to be tested, from `docker network inspect`
+    and `docker inspect` output. An empty list means every check held.
+
+    The network is internal (TK-SBX-004); every container is unprivileged (TK-SBX-002), attached to that network
+    only, publishes no port (TK-ENV-008), and mounts nothing from the host but files of the project under test:
+    not the Docker control socket (TK-SBX-001) and nothing of the control area (TK-SBX-005)."""
+    problems = []
+    if not isinstance(network, dict) or network.get('Internal') is not True:
+        problems.append(f'network {env_network} is not internal')
+    if not isinstance(containers, list) or not containers:
+        return problems + ['no stack container could be inspected']
+    for c in containers:
+        if not isinstance(c, dict):
+            problems.append('a container could not be inspected')
+            continue
+        name = str(c.get('Name', '?')).lstrip('/')
+        host = c.get('HostConfig') if isinstance(c.get('HostConfig'), dict) else {}
+        settings = c.get('NetworkSettings') if isinstance(c.get('NetworkSettings'), dict) else {}
+        if host.get('Privileged') is not False:
+            problems.append(f'{name}: runs privileged')
+        networks = sorted(settings.get('Networks') or {})
+        if networks != [env_network]:
+            problems.append(f'{name}: attached to {networks}, not to {env_network} only')
+        published = [p for p, bound in (settings.get('Ports') or {}).items() if bound]
+        if published:
+            problems.append(f'{name}: publishes {sorted(published)}')
+        mounts = c.get('Mounts')
+        if not isinstance(mounts, list):
+            problems.append(f'{name}: mounts could not be read')
+            continue
+        for m in mounts:
+            m = m if isinstance(m, dict) else {}
+            source, kind = str(m.get('Source', '')), m.get('Type')
+            if source.endswith('docker.sock') or str(m.get('Destination', '')).endswith('docker.sock'):
+                problems.append(f'{name}: mounts the Docker control socket')
+            elif kind in ('volume', 'tmpfs'):
+                continue
+            else:
+                path = Path(source)
+                if not source or not _inside(path, project_dir) or _inside(path, toolkit_dir) or _inside(toolkit_dir, path):
+                    problems.append(f'{name}: mounts {source or "an unknown source"} from the host, '
+                                    'outside the project under test')
+    return problems
+
+
+def _check_isolation(env):
+    """Check the started stack against 〈定義：E1 隔離〉 and return the isolation record of the profile."""
+    services = sorted(_containers(env))
+    names = [f'supabase_{s}_{env.project_id}' for s in services]
+    try:
+        network = json.loads(_run(['docker', 'network', 'inspect', env.network], timeout=60).stdout)[0]
+        containers = json.loads(_run(['docker', 'inspect', *names], timeout=60).stdout) if names else []
+    except (json.JSONDecodeError, IndexError, KeyError, TypeError):
+        raise _Stop(Blocked('service_init', 'cannot inspect the stack to check its isolation'))
+    problems = isolation_problems(network, containers, env.network, env.project_dir, Path(__file__).resolve().parent)
+    if len(containers) != len(names):
+        problems.append('not every stack container could be inspected')
+    if problems:
+        raise _Stop(Blocked('service_init', 'the started stack is not isolated as required; it was stopped',
+                            '\n'.join(problems)))
+    return {'outbound': 'blocked', 'method': 'internal-network',
+            'host_access': [f'127.0.0.1:{r.port} -> {service}:{r.inner_port}'
+                            for r, (_, _, service, _) in zip(env.relays, RELAYED)],
+            'containers_checked': services,
+            'limits': list(ISOLATION_LIMITS)}
 
 
 def _read_status(env):
@@ -383,12 +497,7 @@ def _db_address(env):
     password; connections to this address use scram-sha-256, so the observer
     really authenticates as its own role.
     """
-    r = _run(['docker', 'inspect', '-f', '{{json .NetworkSettings.Networks}}', f'supabase_db_{env.project_id}'],
-             timeout=60)
-    try:
-        address = json.loads(r.stdout)[env.network]['IPAddress']
-    except (json.JSONDecodeError, KeyError, TypeError):
-        address = ''
+    address = _address(env, 'db')
     if not address:
         raise _Stop(Blocked('auth', f'cannot find the db address on {env.network} for the observer'))
     return address
@@ -527,6 +636,7 @@ def _profile(env, tools, matrix, health):
         'health': health,
         'observer': ({'role': env.observer['role'], 'select_on': env.observer['select_on'], 'bypassrls': True}
                      if env.observer else None),
+        'isolation': env.isolation,
         'unsupported': unsupported,
         'known_differences': [f'service disabled in this stack: {d}' for d in disabled] + [
             'E1 local stack: no cloud network, real third-party identity or hosted-only limits; '
@@ -596,6 +706,7 @@ def _reset(env, matrix):
     if found != expected:
         raise _Stop(Blocked('snapshot_reset', f'reset check failed: found {found}, expected {expected}; '
                                               'environment isolated'))
+    env.isolation = _check_isolation(env)  # the reset restarts containers: what was checked is checked again
     env.tokens.clear()
     _create_observer(env)
     _check_auth(env)
@@ -605,8 +716,11 @@ def _reset(env, matrix):
 
 def _stop_stack(env):
     env.usable = False
-    _run([env.cli, 'stop', '--no-backup', '--workdir', str(env.project_dir)], timeout=300)
-    _run(['docker', 'network', 'rm', env.network], timeout=60)
+    try:
+        _run([env.cli, 'stop', '--no-backup', '--workdir', str(env.project_dir)], timeout=300)
+        _run(['docker', 'network', 'rm', env.network], timeout=60)
+    finally:
+        _close_relays(env)
 
 
 def _stop_quietly(env):

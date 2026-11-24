@@ -429,6 +429,22 @@ def render_review_issue(finding, doc, option_of_label):
     return title, body
 
 
+OUTBOUND_LABELS = {'blocked': '已阻擋'}
+ISOLATION_METHOD_LABELS = {'internal-network': '內部網路：不與其他網路互通，不解析外部名稱，不發布連接埠'}
+
+
+def _isolation_lines(isolation):
+    """〈定義：E1 隔離〉 as checked after the stack started (TK-SBX-004, TK-ENV-008), with what it does not cover
+    (TK-EVD-014)."""
+    return [f'- **對外連線（TK-SBX-004）**：{OUTBOUND_LABELS[isolation["outbound"]]}'
+            f'（{ISOLATION_METHOD_LABELS[isolation["method"]]}）',
+            '- **宿主機入口（TK-ENV-008，只在本機回送位址）**：' + (_codes(isolation['host_access']) or '（無）'),
+            '- **已檢查的容器（非特權、只接內部網路、未掛載宿主機控制通訊端與專案以外的路徑）**：'
+            + _codes(isolation['containers_checked']),
+            '- **隔離未涵蓋的範圍**：',
+            *[f'  - {_inline(x)}' for x in isolation['limits']]]
+
+
 def _environment_section(env):
     """〈定義：核心資料物件與相依紀錄〉 EnvironmentProfile: support-matrix warnings (TK-SCP-001) and known
     differences from E2 or production (TK-ENV-007, TK-EVD-005)."""
@@ -445,7 +461,7 @@ def _environment_section(env):
         lines += [f'  - {_inline(d)}' for d in env['known_differences']]
     else:
         lines.append('- **環境差異**：（無宣告差異）')
-    return lines
+    return lines + _isolation_lines(env['isolation'])
 
 
 def _limits_section(limits):
