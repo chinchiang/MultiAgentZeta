@@ -49,11 +49,22 @@ def _cross_record_problems(doc):
                     problems.append(f'{label}: {field} {r[field]!r} differs from the report ({doc[field]!r}); '
                                     'every record belongs to this run and its tested commit')
     results = {r.get('id'): r.get('result') for r in _list(doc, 'execution_records') if isinstance(r, dict)}
+    seen = {}
     for i, f in enumerate(_list(doc, 'findings')):
-        if not isinstance(f, dict) or f.get('status') != 'confirmed':
+        if not isinstance(f, dict):
             continue
-        ids = f.get('execution_record_ids') or []
-        if not any(results.get(x) == 'failed' for x in ids):
+        ids = f.get('execution_record_ids') if isinstance(f.get('execution_record_ids'), list) else []
+        problems += [f'findings/{i}: execution_record_ids names {x!r}, which is no execution record of this report'
+                     for x in ids if not isinstance(x, str) or x not in results]
+        # 〈定義：覆核紀錄〉 項目: one finding per fingerprint, fingerprint version and requirement version.
+        key = json.dumps([f.get('fingerprint'), f.get('fingerprint_version'), f.get('requirement_version')], default=str)
+        if key in seen:
+            problems.append(f'findings/{i}: same fingerprint, fingerprint version and requirement version as '
+                            f'findings/{seen[key]}; they are one finding with both execution records (〈定義：覆核紀錄〉)')
+        seen.setdefault(key, i)
+        if f.get('status') != 'confirmed':
+            continue
+        if not any(results.get(x) == 'failed' for x in ids if isinstance(x, str)):
             problems.append(f'findings/{i}: a confirmed finding needs a failed execution record; '
                             f'execution_record_ids {ids} do not include one')
     return (problems + _requirement_problems(doc) + _approval_problems(doc)
@@ -282,11 +293,43 @@ def validate(doc):
 RUN_LABELS = {'pending': '待執行', 'running': '執行中', 'completed': '完整完成', 'partial': '部分完成',
               'blocked': '受阻', 'failed': '失敗', 'cancelled': '已取消'}
 RESULT_LABELS = {'passed': '通過', 'failed': '未通過', 'blocked': '受阻', 'error': '執行錯誤',
-                 'untested': '未測試', 'unsupported': '不支援'}
+                 'untested': '未測試', 'cancelled': '取消', 'unsupported': '不支援'}
 FINDING_LABELS = {'confirmed': '已確認', 'evidence_pending': '證據待補', 'not_reproduced': '本次未重現',
                   'excluded': '已排除', 'fixed_pending_regression': '已修復待回歸', 'regression_passed': '回歸通過'}
 COMPLETED_NOTE = ('「完整完成」表示計畫內的測試都取得明確結果；只對本次範圍與條件有效，'
                   '不代表應用沒有漏洞（TK-RUN-002）。')
+
+
+# Every text of a report that a person or a file outside the toolkit wrote (a ScanManifest, a BuildRecipe, a
+# control-zone record, the platform) goes through one of these before it reaches the Markdown (TK-EVD-002).
+
+def _inline(text):
+    """Single-line escaped text safe in Markdown prose (no line break and no raw HTML, TK-EVD-002)."""
+    return ' '.join(str(text).split()).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
+
+def _code(text):
+    """Single-line Markdown code span that untrusted backticks or HTML cannot break out of (TK-EVD-002)."""
+    s = ' '.join(str(text).split())
+    ticks = max((len(m.group(0)) for m in re.finditer(r'`+', s)), default=0)
+    fence = '`' * (ticks + 1)
+    pad = ' ' if not s or s[0] in '` ' or s[-1] in '` ' else ''
+    return f'{fence}{pad}{s}{pad}{fence}'
+
+
+def _cell(text):
+    """Free text inside one Markdown table cell: no line break, no cell border, and no HTML, which a renderer
+    would act on (a comment opener hides the rest of the report)."""
+    return _inline(text).replace('|', '\\|')
+
+
+def _tcode(text):
+    """A code span inside one Markdown table cell: a cell border ends the cell even inside a code span."""
+    return _code(text).replace('|', '\\|')
+
+
+def _codes(values, cell=False):
+    return '、'.join((_tcode if cell else _code)(v) for v in values)
 
 
 def _confirmation_summary(listed):
@@ -294,24 +337,24 @@ def _confirmation_summary(listed):
     items approved by one person (〈定義：確認清單〉 單人核准)."""
     t = listed['s2_template']
     lines = ['', '## 確認狀態摘要', '',
-             f'- **確認清單**：`{listed["path"]}` v{listed["list_version"]}（`{listed["digest"]}`）'
+             f'- **確認清單**：{_code(listed["path"])} v{_inline(listed["list_version"])}（{_code(listed["digest"])}）'
              + ('；本次產生或更新，待負責人處理：處理其中待確認的項目，再以此路徑與摘要更新 ScanManifest 的引用'
                 if listed['updated'] else ''),
-             f'- **S2 範本**：`{t["policy_template_id"]}` v{t["version"]}（`{t["digest"]}`）', '',
+             f'- **S2 範本**：{_code(t["policy_template_id"])} v{_inline(t["version"])}（{_code(t["digest"])}）', '',
              '| 來源 | ' + ' | '.join(REVIEW_LABELS.values()) + ' |',
              '| :--- |' + ' ---: |' * len(REVIEW_LABELS)]
     for source, counts in listed['summary'].items():
-        lines.append(f'| {source} | ' + ' | '.join(str(counts[s]) for s in REVIEW_LABELS) + ' |')
-    lines += ['', f'- 範圍外 {listed["out_of_scope"]} 項（不是處理狀態，不計入上表）']
+        lines.append(f'| {_cell(source)} | ' + ' | '.join(_cell(counts[s]) for s in REVIEW_LABELS) + ' |')
+    lines += ['', f'- 範圍外 {_inline(listed["out_of_scope"])} 項（不是處理狀態，不計入上表）']
     if listed['single_approval']:
         lines.append('- 單人核准（修改與不適用，尚無第二人核准，TK-REQ-014）：'
-                     + '、'.join(f'`{i}`' for i in listed['single_approval']))
+                     + _codes(listed['single_approval']))
     return lines
 
 
 def _operations(ops):
     """Resource × HTTP method operations of 〈定義：測試授權紀錄〉 as one line."""
-    return '；'.join(f'`{o["resource"]}` ' + '、'.join(o['methods']) for o in ops)
+    return '；'.join(f'{_code(o["resource"])} ' + '、'.join(_inline(m) for m in o['methods']) for o in ops)
 
 
 def _authorization_section(doc):
@@ -319,22 +362,23 @@ def _authorization_section(doc):
     approvals its tests ran under (TK-ENV-001); and the source changes made for it (TK-ENV-006)."""
     a = doc['authorization']
     lines = ['', '## 測試授權', '',
-             f'- **授權紀錄**：`{a["path"]}`（`{a["digest"]}`）',
-             '- **目標**：' + '、'.join(f'`{t}`' for t in a['targets']) + f'（{a["environment"]}）',
-             f'- **期間**：{a["valid_from"]} 至 {a["valid_until"]}',
-             f'- **資料範圍**：{a["data_scope"]}',
+             f'- **授權紀錄**：{_code(a["path"])}（{_code(a["digest"])}）',
+             '- **目標**：' + _codes(a['targets']) + f'（{_inline(a["environment"])}）',
+             f'- **期間**：{_inline(a["valid_from"])} 至 {_inline(a["valid_until"])}',
+             f'- **資料範圍**：{_inline(a["data_scope"])}',
              '- **允許操作**：' + _operations(a['operations']),
-             f'- **簽發**：{a["issued_by"]} {a["issued_at"]}；應用負責人 {a["roles"]["app_owner"]}，執行者 {a["roles"]["operator"]}'
+             f'- **簽發**：{_inline(a["issued_by"])} {_inline(a["issued_at"])}；應用負責人 {_inline(a["roles"]["app_owner"])}，'
+             f'執行者 {_inline(a["roles"]["operator"])}'
              '（身分未經驗證：是宣告的名稱，TK-HRV-004 的經驗證身分目前只用於覆核紀錄）']
     used = {}
     for e in doc['execution_records']:
         if e.get('approval_id'):
             used.setdefault(e['approval_id'], []).append(e.get('test_id', e['id']))
     for ap in a['extra_approvals']:
-        tests = '、'.join(f'`{t}`' for t in used.get(ap['approval_id'], [])) or '（本次未使用）'
-        lines.append(f'- **額外核准** `{ap["approval_id"]}`：{ap["by"]} {ap["at"]}，至 {ap["valid_until"]}；'
-                     + _operations(ap['operations'])
-                     + f'；理由：{ap["reason"]}；用於 {tests}')
+        tests = _codes(used.get(ap['approval_id'], [])) or '（本次未使用）'
+        lines.append(f'- **額外核准** {_code(ap["approval_id"])}：{_inline(ap["by"])} {_inline(ap["at"])}，'
+                     f'至 {_inline(ap["valid_until"])}；' + _operations(ap['operations'])
+                     + f'；理由：{_inline(ap["reason"])}；用於 {tests}')
     lines.append('- 測試用原始碼變更：無（受測原始碼即 `source_digest` 釘選的版本）')
     return lines
 
@@ -354,33 +398,13 @@ REVIEW_TYPE_LABELS = {'candidate_finding': '候選問題覆核'}  # 〈定義：
 def render_review_issue(finding, doc, option_of_label):
     """Title and body of the issue a finding's review is made on (〈定義：覆核紀錄〉 工單). option_of_label maps
     each predefined platform label to its option. The fingerprint is shown to people, never searched."""
-    title = f'{REVIEW_TYPE_LABELS["candidate_finding"]}：{finding["requirement_id"]}'
+    title = f'{REVIEW_TYPE_LABELS["candidate_finding"]}：{_inline(finding["requirement_id"])}'
     options = '、'.join(f'`{label}`（{OPTION_LABELS[option]}）' for label, option in option_of_label.items())
-    body = (f'- 指紋：`{finding["fingerprint"]}`（{finding["fingerprint_version"]}）\n'
-            f'- 需求：`{finding["requirement_id"]}` 第 {finding["requirement_version"]} 版\n'
-            f'- 提交：`{doc["commit"]}`，執行：`{doc["run_id"]}`\n\n'
+    body = (f'- 指紋：{_code(finding["fingerprint"])}（{_inline(finding["fingerprint_version"])}）\n'
+            f'- 需求：{_code(finding["requirement_id"])} 第 {finding["requirement_version"]} 版\n'
+            f'- 提交：{_code(doc["commit"])}，執行：{_code(doc["run_id"])}\n\n'
             f'決定方式：先留言寫下理由，再加上其中一個標籤：{options}。留言本身不算決定。')
     return title, body
-
-
-def _inline(text):
-    """Single-line escaped text safe in Markdown prose (no line break and no raw HTML, TK-EVD-002)."""
-    return ' '.join(str(text).split()).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-
-
-def _code(text):
-    """Single-line Markdown code span that untrusted backticks or HTML cannot break out of (TK-EVD-002)."""
-    s = ' '.join(str(text).split())
-    ticks = max((len(m.group(0)) for m in re.finditer(r'`+', s)), default=0)
-    fence = '`' * (ticks + 1)
-    pad = ' ' if not s or s[0] in '` ' or s[-1] in '` ' else ''
-    return f'{fence}{pad}{s}{pad}{fence}'
-
-
-def _cell(text):
-    """Free text (a reviewer's comment) inside one Markdown table cell: no line break, no cell border, and no
-    HTML, which a renderer would act on (a comment opener hides the rest of the report)."""
-    return _inline(text).replace('|', '\\|')
 
 
 def _environment_section(env):
@@ -390,7 +414,7 @@ def _environment_section(env):
     if not env:
         lines.append('- **測試環境**：本次執行未建立測試環境，尚無環境差異紀錄')
         return lines
-    lines.append(f'- **環境模式**：`{env["mode"]}`（`{env["profile_digest"]}`）')
+    lines.append(f'- **環境模式**：{_code(env["mode"])}（{_code(env["profile_digest"])}）')
     if env['unsupported']:
         lines.append('- **支援矩陣外版本（不支援，TK-SCP-001）**：')
         lines += [f'  - {_inline(u)}' for u in env['unsupported']]
@@ -416,7 +440,7 @@ def _review_section(doc):
     """〈定義：覆核紀錄〉 報告: the record used, the count per review state and each finding's review."""
     ref = doc['review_record']
     lines = ['', '## 覆核', '',
-             f'- **覆核紀錄**：`{ref["path"]}`（`{ref["digest"]}`）' if ref
+             f'- **覆核紀錄**：{_code(ref["path"])}（{_code(ref["digest"])}）' if ref
              else '- **覆核紀錄**：這次執行沒有使用覆核紀錄，每一筆問題都待覆核',
              '- **數量**：' + '、'.join(f'{FINDING_REVIEW_LABELS[k]} {n}' for k, n in doc['review_summary'].items())]
     if not doc['findings']:
@@ -425,9 +449,10 @@ def _review_section(doc):
     for f in sorted(doc['findings'], key=_waiting_first):
         r = f['review']
         d = r.get('decision')
-        decided = (f'{OPTION_LABELS[d["option"]]}：{d["by"]["login"]}（帳號 {d["by"]["id"]}）{d["at"]}；'
+        decided = (f'{OPTION_LABELS[d["option"]]}：{_cell(d["by"]["login"])}（帳號 {_cell(d["by"]["id"])}）{_cell(d["at"])}；'
                    f'理由：{_cell(d["reason"])}' if d else '—')
-        lines.append(f'| `{f["id"]}` | {FINDING_REVIEW_LABELS[r["state"]]} | {r.get("opened_at", "—")} | {decided} |')
+        lines.append(f'| {_tcode(f["id"])} | {FINDING_REVIEW_LABELS[r["state"]]} | {_cell(r.get("opened_at", "—"))} '
+                     f'| {decided} |')
     return lines
 
 
@@ -446,23 +471,30 @@ def _coverage_lines(c):
     inv, tp = c['inventory'], c['tables_and_policies']
     rates = '；'.join(f"{RATE_LABELS[name]}：" + (f'{c[name] * 100:.1f}%' if c['states'][name] == 'measured'
                                                 else RATE_STATE_LABELS[c['states'][name]]) for name in RATE_LABELS)
-    lines = ['', '## 覆蓋', '', f'- 盤點來源：{c["inventory_source"]}',
+    lines = ['', '## 覆蓋', '', f'- 盤點來源：{_inline(c["inventory_source"])}',
              f'- 盤點完整性：{COMPLETENESS_LABELS[inv["completeness"]]}；宣告範圍：{CLAIM_LABELS[c["claim"]]}；'
-             f'擷取規則 {inv["rule"]}、支援版本 {inv["supported_version"]}',
+             f'擷取規則 {_inline(inv["rule"])}、支援版本 {_inline(inv["supported_version"])}',
              f'- 分母 {c["denominator"]}、已執行 {c["executed"]}、有效判定 {c["valid_judgements"]}、受阻 {c["blocked"]}、'
              f'錯誤 {c["errors"]}、未測 {c["untested"]}、取消 {c["cancelled"]}、不支援 {c["unsupported"]}',
              f'- {rates}',
              f'- 資料表與政策：已盤點 {tp["inventoried"]}、已啟用 RLS {tp["rls_enabled"]}、尚無政策 {tp["without_policy"]}、'
              f'未解析 {tp["unresolved"]}、已判定 {tp["judged"]}']
-    lines += [f'  - 未解析：`{u["file"]}{":" + str(u["line"]) if u["line"] else ""}`（{u["reason"]}）' for u in inv['unresolved']]
+    lines += [f'  - 未解析：{_code(u["file"] + (":" + str(u["line"]) if u["line"] else ""))}（{_inline(u["reason"])}）'
+              for u in inv['unresolved']]
     lines += [f'  - 不支援：{_code(u["scope"])}（{_inline(u["reason"])}'
               f'{"；需補充觀測" if u.get("needs_supplement") else ""}）'
               for u in c['unsupported_items']]
-    lines += [f'  - 排除：`{e["ref"]}`（{e["reason"]}；確認者 {e["confirmed_by"]}、版本 {e["version"]}）' for e in c['excluded']]
+    lines += [f'  - 排除：{_code(e["ref"])}（{_inline(e["reason"])}；確認者 {_inline(e["confirmed_by"])}、'
+              f'版本 {_inline(e["version"])}）' for e in c['excluded']]
     if c['excluded_record_ids']:
         lines.append('  - 隨排除項移出分母的執行紀錄：' + '、'.join(_code(i) for i in c['excluded_record_ids']))
-    lines += [f'  - 被拒絕的排除：`{r["ref"]}`（{r["problem"]}）' for r in c['rejected_exclusions']]
+    lines += [f'  - 被拒絕的排除：{_code(r["ref"])}（{_inline(r["problem"])}）' for r in c['rejected_exclusions']]
     return lines
+
+
+def _shown(value, default=''):
+    """A field of a test that could not run is recorded as given, which may be no text at all (TK-IDN-009)."""
+    return default if value is None else value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
 
 
 def render_markdown(doc):
@@ -471,14 +503,14 @@ def render_markdown(doc):
     if problems:
         raise ValueError('invalid report: ' + '; '.join(problems))
     # TK-DAT-001: a report blocked at preflight may name no commit.
-    commit_text = f'`{doc["commit"]}`' if doc['commit'] is not None else '（未提供）'
-    lines = [f'# 執行報告 `{doc["run_id"]}`', '',
+    commit_text = _code(doc['commit']) if doc['commit'] is not None else '（未提供）'
+    lines = [f'# 執行報告 {_code(doc["run_id"])}', '',
              f'- **整體執行狀態**：{RUN_LABELS[doc["status"]]}（`{doc["status"]}`）'
              + (f'；原因：{_inline(doc["status_reason"])}' if doc.get('status_reason') else ''),
              f'- **受測提交**：{commit_text}',
-             f'- **報告建立時間**：{doc["created_at"]}']
+             f'- **報告建立時間**：{_inline(doc["created_at"])}']
     if doc.get('environment'):
-        lines.append(f'- **環境模式**：{doc["environment"].get("mode", "")}')
+        lines.append(f'- **環境模式**：{_inline(doc["environment"].get("mode", ""))}')
     if doc['status'] == 'completed':
         lines += ['', f'> {COMPLETED_NOTE}']
 
@@ -489,10 +521,11 @@ def render_markdown(doc):
             c = r['confirmation']
             state = REVIEW_LABELS[r['status']] + ('（範圍外）' if r['out_of_scope'] else '')
             if c.get('allowed_tests'):
-                state += ('（合法例外：放行 ' + '、'.join(f'`{t}`' for t in c['allowed_tests'])
-                          + f'，到期 {c.get("expiry", "（未填）")}）')
-            who = f'{c["by"]} {c["at"]}' if c['by'] else '（未確認）'
-            lines.append(f'| `{r["id"]}` v{c["version"]} | {r["source"]} | {r["statement"]} | {state} | {who} |')
+                state += ('（合法例外：放行 ' + _codes(c['allowed_tests'], cell=True)
+                          + f'，到期 {_cell(c.get("expiry", "（未填）"))}）')
+            who = f'{_cell(c["by"])} {_cell(c["at"])}' if c['by'] else '（未確認）'
+            lines.append(f'| {_tcode(r["id"])} v{_cell(c["version"])} | {r["source"]} | {_cell(r["statement"])} '
+                         f'| {state} | {who} |')
 
     if doc.get('confirmation_list'):
         lines += _confirmation_summary(doc['confirmation_list'])
@@ -505,20 +538,19 @@ def render_markdown(doc):
     if doc.get('authorization_matrix'):
         lines += ['', '## 授權矩陣中的身分', '', '| 身分 | 傳遞方式 | 路徑 |', '| :--- | :--- | :--- |']
         for m in doc['authorization_matrix']:
-            lines.append(f'| `{m["identity"]}` | {m.get("transport", "")} | {m.get("path", "")} |')
+            lines.append(f'| {_tcode(m["identity"])} | {_cell(m["transport"])} | {_cell(m["path"])} |')
 
     lines += ['', '## 測試結果', '', '| 測試 | 行為者 | 資源 | 結果 |', '| :--- | :--- | :--- | :--- |']
     for e in doc['execution_records']:
-        lines.append(f'| `{e.get("test_id", e["id"])}` | `{e.get("actor_ref", "")}` | `{e.get("resource_ref", "")}` '
-                     f'| {RESULT_LABELS[e["result"]]} |')
+        lines.append(f'| {_tcode(_shown(e.get("test_id"), e["id"]))} | {_tcode(_shown(e.get("actor_ref")))} '
+                     f'| {_tcode(_shown(e.get("resource_ref")))} | {RESULT_LABELS[e["result"]]} |')
 
     lines += ['', '## 問題紀錄', '']
     if doc['findings']:
         lines += ['| 問題 | 狀態 | 需求 | 根因 | 指紋 |', '| :--- | :--- | :--- | :--- | :--- |']
         for f in doc['findings']:
-            label = FINDING_LABELS.get(f.get('status'), f.get('status', ''))
-            lines.append(f'| `{f["id"]}` | {label} | `{f.get("requirement_id", "")}` | {f.get("root_cause", "")} '
-                         f'| `{f.get("fingerprint", "")}`（{f.get("fingerprint_version", "")}） |')
+            lines.append(f'| {_tcode(f["id"])} | {FINDING_LABELS[f["status"]]} | {_tcode(f["requirement_id"])} '
+                         f'| {_cell(f["root_cause"])} | {_tcode(f["fingerprint"])}（{_cell(f["fingerprint_version"])}） |')
     else:
         lines.append('本次計畫內的測試未產生問題紀錄；這只代表上列測試的結果，不涵蓋計畫以外的範圍。')
 

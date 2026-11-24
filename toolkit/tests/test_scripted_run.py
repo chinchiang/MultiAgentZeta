@@ -112,6 +112,25 @@ class ARedirectIsJudgedAsTheAnswer(unittest.TestCase):
         self.assertEqual((record['result'], record['checks']), ('failed', {'access_granted': False}))
 
 
+class OneFindingPerFingerprint(unittest.TestCase):
+    """〈定義：覆核紀錄〉 項目: a run has one FindingRecord per fingerprint, fingerprint version and requirement
+    version, with every failed execution record it rests on."""
+    LEAK = (200, [{'title': 'MARK-A-ALICE-PRIVATE', 'body': 'b'}])
+
+    def test_the_same_attempt_with_both_key_formats_is_one_finding_with_both_records(self):
+        m = cases(('READ-anonymous-anon-jwt', 'JWT', {}), ('READ-anonymous-publishable', 'PUBLISHABLE', {}))
+        rep, by_id, _ = run(m, scripted.World(attempt=self.LEAK))
+        self.assertEqual((by_id['JWT']['result'], by_id['PUBLISHABLE']['result']), ('failed', 'failed'))
+        self.assertEqual(len(rep['findings']), 1)
+        self.assertEqual(rep['findings'][0]['execution_record_ids'], [by_id['JWT']['id'], by_id['PUBLISHABLE']['id']])
+
+    def test_attempts_by_different_actors_stay_separate_findings(self):
+        m = cases(('READ-anonymous-anon-jwt', 'ANON', {}), ('READ-other-tenant', 'OTHER', {}))
+        rep, by_id, _ = run(m, scripted.World(attempt=self.LEAK))
+        self.assertEqual(sorted(f['execution_record_ids'] for f in rep['findings']),
+                         sorted([[by_id['ANON']['id']], [by_id['OTHER']['id']]]))
+
+
 class WhenTheObserverCannotRead(unittest.TestCase):
     """TK-IDN-009: a read that failed or cannot be trusted is no read; the case is blocked, never passed on the
     actor's refusal alone."""

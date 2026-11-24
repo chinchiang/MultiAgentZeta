@@ -327,6 +327,23 @@ def _allowed_case(ops, test, evidence):
     return ('passed' if granted else 'failed'), {'access_granted': granted}
 
 
+def _record_finding(state, findings, test, ex):
+    """The FindingRecord of a failed denial case. A run has one finding per fingerprint, fingerprint version and
+    requirement version (〈定義：覆核紀錄〉 項目): a case that fails on a finding the run already has, such as the
+    same attempt with the other API key format, adds its execution record to that finding."""
+    fingerprint, version = _fingerprint(test), _item_version(state.listed, test)
+    for f in findings:
+        if (f['fingerprint'], f['fingerprint_version'], f['requirement_version']) == (fingerprint, FINGERPRINT_VERSION,
+                                                                                    version):
+            f['execution_record_ids'].append(ex['id'])
+            return
+    findings.append(state.records.new('finding', fingerprint=fingerprint, fingerprint_version=FINGERPRINT_VERSION,
+                                      requirement_id=test['requirement_id'], requirement_version=version,
+                                      root_cause='object-ownership-not-enforced',
+                                      status=item_rule.finding_cap(state.listed.item(test)),
+                                      evidence_type='dynamic', execution_record_ids=[ex['id']]))
+
+
 def _authorization_matrix(prepared):
     """Identities and how their credentials travel, as confirmed in the BuildRecipe (TK-IDN-003)."""
     transport = prepared.env.token_transport
@@ -972,13 +989,7 @@ def run(manifest, prepare=environment.prepare):
                 ex['evidence'] = [{'id': f'{ex["id"]}-ev{i + 1}', **ev} for i, ev in enumerate(evidence)]
                 executions.append(ex)
                 if result == 'failed' and denial:  # a failed allowed case is a broken permitted access, not a leak
-                    findings.append(state.records.new('finding', fingerprint=_fingerprint(test),
-                                                      fingerprint_version=FINGERPRINT_VERSION,
-                                                      requirement_id=test['requirement_id'],
-                                                      requirement_version=_item_version(state.listed, test),
-                                                      root_cause='object-ownership-not-enforced',
-                                                      status=item_rule.finding_cap(state.listed.item(test)),
-                                                      evidence_type='dynamic', execution_record_ids=[ex['id']]))
+                    _record_finding(state, findings, test, ex)
                 if denial and DENIAL_TEMPLATES[test['template_id']]['writes']:
                     reset = ops.reset()
                     if reset:

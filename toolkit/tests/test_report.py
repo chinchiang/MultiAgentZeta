@@ -337,6 +337,159 @@ class Authorization(unittest.TestCase):
         self.assertTrue(any('execution_records/0: approval_id' in p for p in report.validate(doc)), report.validate(doc))
 
 
+class TheWholeReportIsTyped(unittest.TestCase):
+    """TK-DAT-003, CODING_STANDARDS rule 9: the top level of the report and a finding list what they hold; a
+    field nobody declared, or a missing one, is refused."""
+
+    def problems(self, change):
+        doc = valid_report()
+        change(doc)
+        return report.validate(doc)
+
+    def test_the_example_reports_are_valid(self):
+        for name in ('report-valid', 'report-partial-fault', 'report-blocked-no-commit'):
+            with self.subTest(report=name):
+                self.assertEqual(report.validate(fixture(name)), [])
+
+    def test_an_undeclared_field_at_the_top_is_refused(self):
+        self.assertTrue(any('verdict' in p for p in self.problems(lambda d: d.update(verdict='all clear'))))
+
+    def test_what_scan_writes_at_the_top_is_required(self):
+        for field in ('manifest', 'requirements', 'authorization_matrix', 'findings', 'coverage', 'review_summary'):
+            with self.subTest(field=field):
+                self.assertTrue(any(field in p for p in self.problems(lambda d: d.pop(field))))
+
+    def test_the_manifest_reference_and_the_identities_have_their_fields(self):
+        self.assertNotEqual(self.problems(lambda d: d['manifest'].pop('digest')), [])
+        self.assertNotEqual(self.problems(lambda d: d['manifest'].update(path='/somewhere')), [])
+        self.assertNotEqual(self.problems(lambda d: d['authorization_matrix'][0].pop('transport_source')), [])
+        self.assertNotEqual(self.problems(lambda d: d['authorization_matrix'][0].update(token='secret')), [])
+
+    def test_a_finding_needs_every_field_and_takes_no_other(self):
+        for field in ('fingerprint', 'fingerprint_version', 'requirement_id', 'requirement_version', 'root_cause',
+                      'status', 'evidence_type', 'execution_record_ids', 'review'):
+            with self.subTest(missing=field):
+                self.assertTrue(any('findings/0' in p for p in self.problems(lambda d: d['findings'][0].pop(field))))
+        self.assertTrue(any('severity' in p for p in self.problems(lambda d: d['findings'][0].update(severity='high'))))
+
+    def test_a_finding_status_is_one_of_the_spec(self):
+        # 〈定義：問題狀態〉, written here by hand.
+        for status in ('confirmed', 'evidence_pending', 'not_reproduced', 'excluded', 'fixed_pending_regression',
+                       'regression_passed'):
+            with self.subTest(status=status):
+                problems = self.problems(lambda d: d['findings'][0].update(status=status))
+                self.assertFalse(any('is not one of' in p for p in problems), problems)
+        self.assertTrue(any('is not one of' in p for p in self.problems(lambda d: d['findings'][0].update(status='open'))))
+
+    def test_a_finding_rests_on_execution_records_of_this_report(self):
+        problems = self.problems(lambda d: d['findings'][0]['execution_record_ids'].append('exec-9999'))
+        self.assertTrue(any("'exec-9999'" in p and 'no execution record' in p for p in problems), problems)
+        self.assertNotEqual(self.problems(lambda d: d['findings'][0].update(execution_record_ids=[])), [])
+
+    def test_two_findings_with_one_fingerprint_and_requirement_version_are_refused(self):
+        def twice(d):
+            d['findings'].append({**copy.deepcopy(d['findings'][0]), 'id': 'finding-0002'})
+            d['review_summary']['approved'] += 1
+        self.assertTrue(any('one finding' in p for p in self.problems(twice)))
+
+        def revised(d):
+            twice(d)
+            d['findings'][1]['requirement_version'] = 2
+        self.assertFalse(any('one finding' in p for p in self.problems(revised)))
+
+
+class ACancelledCase(unittest.TestCase):
+    """〈定義：覆蓋面向〉 取消與未執行: a cancelled case is a result of its own, counted apart and shown by name."""
+
+    def cancelled(self):
+        doc = fixture('report-partial-fault')
+        record = doc['execution_records'][-1]
+        self.assertEqual(record['result'], 'blocked')
+        record['result'] = 'cancelled'
+        doc['coverage'].update(blocked=doc['coverage']['blocked'] - 1, cancelled=1)
+        return doc
+
+    def test_it_is_valid_and_shown_as_cancelled(self):
+        doc = self.cancelled()
+        self.assertEqual(report.validate(doc), [])
+        md = report.render_markdown(doc)
+        row = next(line for line in md.splitlines() if f"`{doc['execution_records'][-1]['test_id']}`" in line)
+        self.assertTrue(row.rstrip().endswith('| 取消 |'), row)  # 取消, written here by hand
+        self.assertIn('取消 1', md)
+
+    def test_a_completed_run_has_no_cancelled_case(self):
+        doc = self.cancelled()
+        doc['status'] = 'completed'
+        doc.pop('status_reason', None)
+        self.assertNotEqual(report.validate(doc), [])
+
+
+class TextFromOutsideStaysWhereItIsPut(unittest.TestCase):
+    """TK-EVD-002: text a person or a file outside the toolkit wrote cannot break a table, start a heading or
+    hide the rest of the Markdown report."""
+    HOSTILE = 'a | b\n\n## 全面通過\n<!-- hidden <script>alert(1)</script>'
+
+    def assert_contained(self, doc, follows='## 覆蓋'):
+        self.assertEqual(report.validate(doc), [])
+        md = report.render_markdown(doc)
+        self.assertNotIn('\n## 全面通過', md)
+        # Inside a code span nothing is HTML, and the span cannot be closed from within (see _code): what must
+        # hold no raw HTML is everything outside the spans.
+        outside = re.sub(r'(`+)(?:(?!\1).)+?\1(?!`)', '', md)
+        for raw in ('<!--', '<script>'):
+            self.assertNotIn(raw, outside)
+        if follows:
+            self.assertIn(follows, md.split('hidden', 1)[1])  # what follows is still there
+        for line in md.splitlines():
+            if line.startswith('|'):
+                self.assertTrue(line.rstrip().endswith('|'), line)
+        return md
+
+    def table_rows(self, md, heading):
+        section = md.split(heading, 1)[1].split('\n## ', 1)[0]
+        return [line for line in section.splitlines() if line.startswith('|')]
+
+    def test_a_requirement_statement_and_who_confirmed_it(self):
+        doc = valid_report()
+        doc['requirements'][0]['statement'] = self.HOSTILE
+        doc['requirements'][0]['confirmation']['by'] = self.HOSTILE
+        md = self.assert_contained(doc)
+        for row in self.table_rows(md, '## 安全需求（確認項目）'):
+            self.assertEqual(row.replace('\\|', '').count('|'), 6, row)  # five cells
+
+    def test_the_names_and_the_reason_of_the_authorization(self):
+        doc = valid_report()
+        a = doc['authorization']
+        a['issued_by'] = a['roles']['app_owner'] = a['roles']['operator'] = a['data_scope'] = self.HOSTILE
+        for approval in a['extra_approvals']:
+            approval['by'] = approval['reason'] = self.HOSTILE
+        self.assert_contained(doc)
+
+    def test_the_status_reason(self):
+        doc = fixture('report-partial-fault')
+        doc['status_reason'] = self.HOSTILE
+        self.assert_contained(doc)
+
+    def test_an_exclusion_and_a_refused_one(self):
+        doc = valid_report()
+        doc['coverage']['excluded'] = [{'ref': 'public.' + self.HOSTILE, 'reason': self.HOSTILE,
+                                        'confirmed_by': self.HOSTILE, 'version': self.HOSTILE}]
+        doc['coverage']['rejected_exclusions'] = [{'ref': self.HOSTILE, 'problem': self.HOSTILE}]
+        md = self.assert_contained(doc, follows=None)  # the coverage section is the last one
+        self.assertEqual(len([line for line in md.splitlines() if line.startswith('  - 排除：')]), 1)
+        self.assertEqual(len([line for line in md.splitlines() if line.startswith('  - 被拒絕的排除：')]), 1)
+
+    def test_the_fields_of_a_test_and_of_a_finding(self):
+        doc = valid_report()
+        doc['findings'][0]['root_cause'] = self.HOSTILE
+        doc['authorization_matrix'][0]['path'] = self.HOSTILE
+        doc['execution_records'][0]['resource_ref'] = 'MARK | `x` <!-- hidden'
+        md = self.assert_contained(doc)
+        for heading, cells in (('## 測試結果', 4), ('## 問題紀錄', 5), ('## 授權矩陣中的身分', 3)):
+            for row in self.table_rows(md, heading):
+                self.assertEqual(row.replace('\\|', '').count('|'), cells + 1, row)
+
+
 class RenderMarkdown(unittest.TestCase):
     """TK-EVD-003: Markdown for human review is generated from the JSON report."""
 
@@ -379,7 +532,8 @@ class RenderMarkdown(unittest.TestCase):
                    'finding-0003': {'state': 'overdue', 'opened_at': '2026-11-01T00:00:00Z'},
                    'finding-0004': {'state': 'pending'}}  # no issue opened yet: waiting time unknown
         for fid, rev in reviews.items():
-            doc['findings'].append({**copy.deepcopy(first), 'id': fid, 'review': rev})
+            doc['findings'].append({**copy.deepcopy(first), 'id': fid, 'review': rev,
+                                    'fingerprint': f'sha256:{fid}'})  # another finding, not the same one again
         doc['review_summary'].update(pending=2, overdue=1)
         self.assertEqual(report.validate(doc), [])
         section = report.render_markdown(doc).split('## 覆核', 1)[1]

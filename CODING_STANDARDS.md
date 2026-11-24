@@ -53,7 +53,7 @@ diff 新增或修改的每個例外處理、提早返回與預設值分支，結
 
 ## 9. 報告格式同步
 
-改動報告格式時，schema（`schemas/report-v1.json`）、範例報告（`tests/fixtures/`）與 `tests/test_report.py` 在同一個提交裡一起改。證據、觀測與執行紀錄未列出的欄位由 `report.validate()` 檢查；報告最上層與問題紀錄尚未收緊，審查時逐一對照程式實際輸出的欄位；覆蓋紀錄已收緊：欄位與型別由 schema 檢查，各類相加等於分母、分母等於執行紀錄加不支援範圍、比率等於它的數字、零分母沒有數字，由 `report.validate()` 檢查。schema 表達不了的跨紀錄條件寫在 `report.validate()`。原型 v0.1 交付前，不相容的改動直接修改 v1。
+改動報告格式時，schema（`schemas/report-v1.json`）、範例報告（`tests/fixtures/`）與 `tests/test_report.py` 在同一個提交裡一起改。證據、觀測與執行紀錄未列出的欄位由 `report.validate()` 檢查；報告最上層與問題紀錄已收緊：schema 列出每個欄位並拒絕未宣告的欄位，新增欄位時先加進 schema；覆蓋紀錄已收緊：欄位與型別由 schema 檢查，各類相加等於分母、分母等於執行紀錄加不支援範圍、比率等於它的數字、零分母沒有數字，由 `report.validate()` 檢查。schema 表達不了的跨紀錄條件寫在 `report.validate()`。原型 v0.1 交付前，不相容的改動直接修改 v1。
 
 ## 10. 代碼與中文名稱
 

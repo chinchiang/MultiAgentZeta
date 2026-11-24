@@ -23,9 +23,23 @@
       "then": {"properties": {"execution_records": {"items": {"properties": {"result": {"enum": ["passed", "failed"]}}}}}}
     }
   ],
-  "required": ["status", "stages", "execution_records", "findings", "coverage", "source_changes", "review_record",
-               "review_summary"],
+  "required": ["status", "manifest", "stages", "requirements", "authorization_matrix", "execution_records", "findings",
+               "coverage", "source_changes", "review_record", "review_summary"],
+  "unevaluatedProperties": false,
   "properties": {
+    "manifest": {
+      "description": "The ScanManifest the run was given: its identifier as given (any JSON value when the run was blocked for it, 〈定義：必要輸入〉) and the digest of its content.",
+      "type": "object", "required": ["id", "digest"], "additionalProperties": false,
+      "properties": {"id": {}, "digest": {"$ref": "#/$defs/text"}}
+    },
+    "authorization_matrix": {
+      "description": "TK-IDN-003: the identities of the run and how each one's credentials travel, as confirmed in the BuildRecipe; empty when no environment was prepared.",
+      "type": "array",
+      "items": {"type": "object", "required": ["identity", "transport", "transport_source", "path"],
+                "additionalProperties": false,
+                "properties": {"identity": {"$ref": "#/$defs/text"}, "transport": {"$ref": "#/$defs/text"},
+                               "transport_source": {"$ref": "#/$defs/text"}, "path": {"$ref": "#/$defs/text"}}}
+    },
     "stages": {
       "description": "TK-RUN-001, 〈定義：工作階段〉: preflight 前置檢查, static_analysis 靜態與架構分析, model_review 模型審查, threat_planning 威脅與測試規劃, dynamic_execution 動態執行, judgement_report 判定與報告. validate() also requires every stage to be listed.",
       "type": "array",
@@ -291,8 +305,8 @@
           "enum": ["session-revoked", "observer-unavailable", "observer-timeout", "api-unreachable", "api-key-missing"]
         },
         "result": {
-          "description": "〈定義：測試結果〉: passed 通過, failed 未通過, blocked 受阻, error 執行錯誤, untested 未測試, unsupported 不支援.",
-          "enum": ["passed", "failed", "blocked", "error", "untested", "unsupported"]
+          "description": "〈定義：測試結果〉: passed 通過, failed 未通過, blocked 受阻, error 執行錯誤, untested 未測試, unsupported 不支援; cancelled 取消 is a scheduled case that was cancelled, counted apart from untested (〈定義：覆蓋面向〉 取消與未執行).",
+          "enum": ["passed", "failed", "blocked", "error", "untested", "cancelled", "unsupported"]
         }
       }
     },
@@ -371,9 +385,26 @@
       }
     },
     "finding": {
+      "description": "〈定義：核心資料物件與相依紀錄〉 FindingRecord: one per fingerprint, fingerprint version and requirement version of a run (〈定義：覆核紀錄〉 項目), with every failed execution record it rests on.",
       "allOf": [{"$ref": "#/$defs/common"}],
-      "required": ["requirement_version", "review"],
+      "required": ["fingerprint", "fingerprint_version", "requirement_id", "requirement_version", "root_cause", "status",
+                   "evidence_type", "execution_record_ids", "review"],
+      "unevaluatedProperties": false,
       "properties": {
+        "fingerprint": {"$ref": "#/$defs/text"},
+        "fingerprint_version": {"$ref": "#/$defs/text"},
+        "requirement_id": {"$ref": "#/$defs/text"},
+        "root_cause": {"$ref": "#/$defs/text"},
+        "status": {
+          "description": "〈定義：問題狀態〉: confirmed 已確認, evidence_pending 證據待補, not_reproduced 本次未重現, excluded 已排除, fixed_pending_regression 已修復待回歸, regression_passed 回歸通過.",
+          "enum": ["confirmed", "evidence_pending", "not_reproduced", "excluded", "fixed_pending_regression",
+                   "regression_passed"]
+        },
+        "evidence_type": {"$ref": "#/$defs/text"},
+        "execution_record_ids": {
+          "description": "The execution records the finding rests on, in the order they ran; report.validate() requires each to be a record of this report.",
+          "type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/text"}
+        },
         "requirement_version": {
           "description": "TK-REQ-004: the version of the confirmation item the finding was judged on.",
           "type": "integer",
