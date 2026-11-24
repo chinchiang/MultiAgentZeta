@@ -10,7 +10,7 @@ import subprocess
 import unittest
 from pathlib import Path
 
-from toolkit import report, scan
+from toolkit import environment, report, scan
 from toolkit.tests import scripted
 from toolkit.tests.test_e1 import SAMPLES, failing_copy
 from toolkit.tests.test_scan import AUTHORIZATION, authorized, manifest
@@ -129,6 +129,124 @@ class OneFindingPerFingerprint(unittest.TestCase):
         rep, by_id, _ = run(m, scripted.World(attempt=self.LEAK))
         self.assertEqual(sorted(f['execution_record_ids'] for f in rep['findings']),
                          sorted([[by_id['ANON']['id']], [by_id['OTHER']['id']]]))
+
+
+class TheRunsLimitsHoldBeforeDispatch(unittest.TestCase):
+    """TK-BUD-003, 〈定義：執行限制的執行〉: a case the run's limits leave no room for is not dispatched; it is
+    recorded as untested, stays in the denominator, and the run is not completed."""
+    DENIED = (403, [])
+
+    def plan(self, n, **limits):
+        m = cases(*(('READ-other-tenant', f'CASE-{i}', {}) for i in range(1, n + 1)))
+        m['limits'].update(limits)
+        return m
+
+    def test_a_case_the_request_limit_cannot_cover_is_not_sent(self):
+        world = scripted.World(attempt=self.DENIED)
+        rep, by_id, _ = run(self.plan(3, max_requests=10), world)  # a denial case makes five
+        self.assertEqual([by_id[f'CASE-{i}']['result'] for i in (1, 2, 3)], ['passed', 'passed', 'untested'])
+        self.assertIn('request limit', by_id['CASE-3']['error'])
+        self.assertEqual(by_id['CASE-3']['evidence'], [])
+        self.assertEqual(len(world.http_calls), 6)  # three actor requests for each of the two cases that ran
+        self.assertEqual((rep['limits']['requests'], rep['limits']['max_requests']), (10, 10))
+
+    def test_the_run_is_partial_and_the_case_stays_in_the_denominator(self):
+        rep, _, _ = run(self.plan(3, max_requests=10), scripted.World(attempt=self.DENIED))
+        self.assertEqual(rep['status'], 'partial')  # TK-RUN-002: not completed
+        self.assertIn('execution limit', rep['status_reason'])
+        cov = rep['coverage']
+        self.assertEqual((cov['executed'], cov['untested'], cov['denominator']), (2, 1, 3 + cov['unsupported']))
+        self.assertAlmostEqual(cov['required_test_completion_rate'], 2 / 3)
+
+    def test_a_limit_that_just_covers_the_plan_runs_all_of_it(self):
+        rep, by_id, _ = run(self.plan(3, max_requests=15), scripted.World(attempt=self.DENIED))
+        self.assertEqual({e['result'] for e in by_id.values()}, {'passed'})
+        self.assertEqual((rep['status'], rep['limits']['requests']), ('completed', 15))
+
+    def test_a_case_is_run_whole_or_not_at_all(self):
+        # Four requests are left, one short of a denial case: none of them is spent on half a case.
+        world = scripted.World(attempt=self.DENIED)
+        rep, by_id, _ = run(self.plan(2, max_requests=9), world)
+        self.assertEqual([by_id[f'CASE-{i}']['result'] for i in (1, 2)], ['passed', 'untested'])
+        self.assertEqual(rep['limits']['requests'], 5)
+
+    def test_a_smaller_case_later_in_the_plan_still_runs(self):
+        m = cases(('READ-other-tenant', 'DENIAL-1', {}), ('READ-other-tenant', 'DENIAL-2', {}),
+                  ('PUBLIC-READ-same-tenant', 'ALLOWED', {}))
+        m['limits']['max_requests'] = 6
+        world = scripted.World(attempt=(200, []))
+        _, by_id, _ = run(m, world)
+        self.assertEqual((by_id['DENIAL-1']['result'], by_id['DENIAL-2']['result']), ('passed', 'untested'))
+        self.assertNotEqual(by_id['ALLOWED']['result'], 'untested')  # one request was left, and it needs one
+
+    def test_a_case_the_time_limit_cannot_cover_is_not_dispatched(self):
+        ticks = iter(range(0, 10_000, 30))  # every look at the clock is 30 s later
+        prepare, _ = scripted.prepare_with(scripted.World(attempt=self.DENIED))
+        rep = scan.run(self.plan(6, max_duration_seconds=200), prepare=prepare, clock=lambda: next(ticks)).report
+        self.assertEqual(report.validate(rep), [])
+        results = [e['result'] for e in rep['execution_records']]
+        # A denial case may take 5 requests x 15 s; at 30, 60, 90 and 120 s that fits in 200 s, at 150 s it does not.
+        self.assertEqual(results, ['passed'] * 4 + ['untested'] * 2)
+        self.assertIn('time limit', rep['execution_records'][4]['error'])
+        self.assertEqual(rep['status'], 'partial')
+        self.assertEqual(rep['limits']['max_duration_seconds'], 200)
+        self.assertGreater(rep['limits']['elapsed_seconds'], 150)
+
+    def test_the_case_time_follows_the_tests_own_timeout(self):
+        ticks = iter(range(0, 10_000, 30))
+        m = self.plan(1, max_duration_seconds=200)
+        m['tests'][0]['limits'] = {'timeout_seconds': 60}  # 5 x 60 s does not fit
+        prepare, _ = scripted.prepare_with(scripted.World(attempt=self.DENIED))
+        rep = scan.run(m, prepare=prepare, clock=lambda: next(ticks)).report
+        self.assertEqual(rep['execution_records'][0]['result'], 'untested')
+
+    def test_ample_limits_change_nothing_and_the_use_is_reported(self):
+        rep, by_id, _ = run(self.plan(2), scripted.World(attempt=self.DENIED))
+        self.assertEqual({e['result'] for e in by_id.values()}, {'passed'})
+        limits = rep['limits']
+        self.assertEqual((limits['requests'], limits['max_requests'], limits['concurrency'], limits['max_concurrency']),
+                         (10, 500, 1, 1))
+        md = report.render_markdown(rep)
+        self.assertIn('## 執行限制', md)
+        self.assertIn('已用 10，上限 500', md)
+
+    def test_a_revoked_session_costs_its_logout(self):
+        rep, by_id, _ = run(one_case('READ-other-tenant', fault='session-revoked'), scripted.World(attempt=self.DENIED))
+        self.assertLessEqual(rep['limits']['requests'], 6)
+        m = one_case('READ-other-tenant', fault='session-revoked')
+        m['limits']['max_requests'] = 5  # the case alone would fit; with the logout it does not
+        _, by_id, _ = run(m, scripted.World(attempt=self.DENIED))
+        self.assertEqual(by_id['READ-other-tenant']['result'], 'untested')
+
+    def test_a_run_blocked_for_a_missing_limit_reports_it_as_not_stated(self):
+        m = self.plan(1)
+        del m['limits']['max_requests']
+        rep, _, _ = run(m, scripted.World(attempt=self.DENIED))
+        self.assertEqual(rep['status'], 'blocked')
+        self.assertEqual((rep['limits']['max_requests'], rep['limits']['requests']), (None, 0))
+        self.assertIn('上限 （未提供）', report.render_markdown(rep))
+
+
+class TheRequestCountStopsWhatTheEstimateMissed(unittest.TestCase):
+    """The stop behind the count before dispatch: Operations makes no request past its limit."""
+
+    def test_the_request_past_the_limit_is_not_made(self):
+        world = scripted.World(attempt=(403, []))
+        ops = environment.Operations(scripted.handles(), scripted.Transport(world), scripted.Lifecycle())
+        ops.request_limit = 2
+        ops.request('owner', 'GET', '/rest/v1/documents?title=eq.MARK-A-ALICE-PRIVATE&select=title')
+        ops.observe('MARK-A-ALICE-PRIVATE')
+        for attempt in (lambda: ops.request('owner', 'GET', '/rest/v1/documents?title=eq.X&select=title'),
+                        lambda: ops.observe('MARK-A-ALICE-PRIVATE')):
+            with self.assertRaises(environment.LimitReached):
+                attempt()
+        self.assertEqual((ops.requests, len(world.http_calls)), (2, 1))
+
+    def test_without_a_limit_requests_are_only_counted(self):
+        ops = environment.Operations(scripted.handles(), scripted.Transport(scripted.World()), scripted.Lifecycle())
+        for _ in range(3):
+            ops.observe('MARK-A-ALICE-PRIVATE')
+        self.assertEqual(ops.requests, 3)
 
 
 class WhenTheObserverCannotRead(unittest.TestCase):

@@ -6,6 +6,7 @@
   "source_id": "toolkit.scan",
   "commit": "a89be51",
   "status": "completed",
+  "limits": {"max_requests": 500, "requests": 11, "max_duration_seconds": 3600, "elapsed_seconds": 12.5, "max_concurrency": 1, "concurrency": 1},
   "source_changes": [],
   "review_record": {"path": "/control/review-record.json", "digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555"},
   "review_summary": {"pending": 0, "overdue": 0, "approved": 1, "rejected": 0, "evidence_pending": 0},

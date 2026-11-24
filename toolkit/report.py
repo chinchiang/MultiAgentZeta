@@ -67,8 +67,30 @@ def _cross_record_problems(doc):
         if not any(results.get(x) == 'failed' for x in ids if isinstance(x, str)):
             problems.append(f'findings/{i}: a confirmed finding needs a failed execution record; '
                             f'execution_record_ids {ids} do not include one')
-    return (problems + _requirement_problems(doc) + _approval_problems(doc)
+    return (problems + _limit_problems(doc) + _requirement_problems(doc) + _approval_problems(doc)
             + _review_problems(doc) + _environment_problems(doc) + _coverage_problems(doc))
+
+
+def _limit_problems(doc):
+    """〈定義：執行限制的執行〉 (TK-BUD-003): a run never used more than its stated limit on requests or ran more
+    cases at once than it allows, and a run that left a limit unstated did not get past preflight."""
+    limits = doc.get('limits') if isinstance(doc, dict) else None
+    if not isinstance(limits, dict):
+        return []
+    problems = []
+    stated, used = limits.get('max_requests'), limits.get('requests')
+    if isinstance(stated, int) and isinstance(used, int) and used > stated:
+        problems.append(f'limits: {used} requests were made, more than max_requests {stated} (TK-BUD-003)')
+    allowed, ran = limits.get('max_concurrency'), limits.get('concurrency')
+    if isinstance(allowed, int) and isinstance(ran, int) and ran > allowed:
+        problems.append(f'limits: {ran} cases ran at once, more than max_concurrency {allowed} (TK-BUD-003)')
+    unstated = [name for name in ('max_requests', 'max_duration_seconds', 'max_concurrency') if limits.get(name) is None]
+    ran_any = any(isinstance(e, dict) and e.get('result') in ('passed', 'failed', 'error')
+                  for e in _list(doc, 'execution_records'))
+    if unstated and (used or ran_any):
+        problems.append(f'limits: {", ".join(unstated)} not stated, yet cases ran; a run without its limits is '
+                        f'blocked in preflight and no unlimited default is used (TK-SCP-002)')
+    return problems
 
 
 def _environment_problems(doc):
@@ -426,6 +448,18 @@ def _environment_section(env):
     return lines
 
 
+def _limits_section(limits):
+    """〈定義：執行限制的執行〉: each limit as stated and what the run used of it."""
+    def stated(value, unit=''):
+        return f'{value}{unit}' if value is not None else '（未提供）'
+    return ['', '## 執行限制', '',
+            f'- 請求數：已用 {limits["requests"]}，上限 {stated(limits["max_requests"])}'
+            '（測試案例的行為者請求與觀測者讀取；環境建置與重置的請求不計）',
+            f'- 時間：已用 {limits["elapsed_seconds"]:.0f} 秒，上限 {stated(limits["max_duration_seconds"], " 秒")}',
+            f'- 並行數：實際 {limits["concurrency"]}，上限 {stated(limits["max_concurrency"])}',
+            '- 費用上限與網路允許清單在這個版本只檢查是否提供，尚未據以限制執行（TK-EVD-014）']
+
+
 def _waiting_first(finding):
     """Sort key: findings waiting for review (待覆核, 逾期覆核) first, the longest wait first, those with no
     issue opened yet after them; decided findings last. sorted() keeps the report's order among equals."""
@@ -534,6 +568,7 @@ def render_markdown(doc):
         lines += _authorization_section(doc)
 
     lines += _environment_section(doc.get('environment'))
+    lines += _limits_section(doc['limits'])
 
     if doc.get('authorization_matrix'):
         lines += ['', '## 授權矩陣中的身分', '', '| 身分 | 傳遞方式 | 路徑 |', '| :--- | :--- | :--- |']

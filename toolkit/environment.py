@@ -33,6 +33,11 @@ class UnparsedBody:
     text: str
 
 
+class LimitReached(Exception):
+    """A request or an observer read would exceed the run's request limit, so it was not made (TK-BUD-003).
+    scan.run() does not dispatch a case it cannot afford; this is the stop behind that count."""
+
+
 class ApiKeyUnavailable(Exception):
     """The environment does not provide an API key format the case needs: the case is blocked, and no
     request goes out with an empty key (TK-DYN-004, TK-IDN-003; 〈定義：測試結果〉 受阻)."""
@@ -55,6 +60,8 @@ class Operations:
 
     def __init__(self, env, transport=real_transport, lifecycle=e1):
         self._env, self._transport = env, transport
+        self.request_limit = None  # 執行限制 max_requests, set by scan.run(); None counts without a limit
+        self.requests = 0  # actor requests and observer reads made for the run's cases
         self._reset, self._destroy = lifecycle.reset, lifecycle.destroy  # not the module: no provisioning step is reachable
 
     @property
@@ -79,12 +86,19 @@ class Operations:
         if missing:
             raise ApiKeyUnavailable(f'the environment provides no API key of format {", ".join(map(repr, missing))}')
 
+    def _count(self, what):
+        """Count one request or observer read before it is made; refuse the one past the limit (TK-BUD-003)."""
+        if self.request_limit is not None and self.requests >= self.request_limit:
+            raise LimitReached(f'{what} not made: the run has used its {self.request_limit} requests')
+        self.requests += 1
+
     def request(self, identity, method, path, body=None, api_key='anon-jwt', prefer='return=representation',
                 timeout=15):
         """An actor request through the data API, as the given identity. Returns (status, parsed body)."""
         env = self._env
         if not env.api_keys.get(api_key):
             raise ApiKeyUnavailable(f'the environment provides no API key of format {api_key!r}')
+        self._count(f'{method} {path}')
         headers = {'apikey': env.api_keys[api_key], 'Prefer': prefer}
         if identity in env.tokens:
             headers['Authorization'] = 'Bearer ' + env.tokens[identity]['access_token']
@@ -104,6 +118,7 @@ class Operations:
 
     def observe(self, marker):
         """Template document-row-state-v1 as the observer (observer.ObservationFailed when it cannot read)."""
+        self._count('observer read')
         return observer.document_row_state(self._env, marker, self._transport)
 
     def inject(self, fault, actor_ref, key_format, timeout):
