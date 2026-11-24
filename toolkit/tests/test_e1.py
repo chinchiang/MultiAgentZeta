@@ -350,6 +350,121 @@ class NetworkIsolationMeasurementEnv(unittest.TestCase):
     def test_measure_a_network_without_masquerading(self):
         self.measure('no_masquerade')
 
+    def test_measure_an_internal_network_reached_through_forwarders_on_loopback(self):
+        """Second round: --internal is the only option Docker documents as dropping traffic to other networks,
+        but it publishes no port. The host still reaches a container's address on such a network, so forwarders
+        on 127.0.0.1 stand where the published ports were, for the CLI and for the toolkit alike."""
+        import sys
+        from unittest import mock
+        forwarders, found = [], {'candidate': 'internal_forwarded'}
+
+        def create(env):
+            e1._run(['docker', 'network', 'rm', env.network], timeout=60)
+            r = e1._run(['docker', 'network', 'create', '--driver', 'bridge', '--ipv6=false', '--internal',
+                         '-o', f'{e1.LOOPBACK_OPTION}=127.0.0.1', env.network], timeout=60)
+            if r.returncode:
+                raise e1._Stop(e1.Blocked('service_init', 'cannot create the network', (r.stdout + r.stderr)[-500:]))
+            for port, service, inner in ((54321, 'kong', 8000), (54322, 'db', 5432)):
+                forwarders.append(_Forwarder(port, f'supabase_{service}_{env.project_id}', env.network, inner))
+
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(e1, '_create_network', create):
+            result = None
+            try:
+                result = e1.prepare(failing_copy(d, version='vulnerable'))
+                found['prepare'] = type(result).__name__
+                if isinstance(result, e1.Blocked):
+                    found.update(step=result.step, reason=result.reason, detail=result.detail[-600:].replace('\n', ' | '))
+                else:
+                    env = result.env
+                    found.update(_probe(f'supabase_db_{env.project_id}'))
+                    found['published'] = sorted(published_bindings(env.project_id))
+                    try:
+                        status, _ = e1._http('GET', env.api_url + '/rest/v1/', {'apikey': env.anon_key})
+                        found['api_from_host'] = status
+                    except Exception as error:  # a measurement: the failure is the finding
+                        found['api_from_host'] = repr(error)[:200]
+                    try:
+                        after = e1.reset(env)
+                        found['reset'] = type(after).__name__
+                        if isinstance(after, e1.Blocked):
+                            found['reset_detail'] = (after.reason + ' | ' + after.detail[-300:]).replace('\n', ' | ')
+                    except Exception as error:
+                        found['reset'] = repr(error)[:200]
+            except Exception as error:
+                found['prepare'] = repr(error)[:300]
+            finally:
+                found['forwarders'] = [f.close() for f in forwarders]
+                if isinstance(result, e1.Ready):
+                    e1.destroy(result.env)
+        print('MEASURE ' + json.dumps(found, ensure_ascii=False, sort_keys=True), file=sys.stderr, flush=True)
+
+
+class _Forwarder:
+    """Measurement only: listens on 127.0.0.1:port and relays each connection to a container's own port, at the
+    address the container has on the given network (looked up per connection: the container may not exist yet)."""
+
+    def __init__(self, port, container, network, inner):
+        import socket
+        import threading
+        self.container, self.network, self.inner = container, network, inner
+        self.seen = {'port': port, 'bound': None, 'connections': 0, 'relayed': 0, 'last_error': ''}
+        self.server = socket.socket()
+        self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            self.server.bind(('127.0.0.1', port))
+            self.server.listen(64)
+            self.seen['bound'] = True
+            threading.Thread(target=self._accept, daemon=True).start()
+        except OSError as error:
+            self.seen['bound'] = repr(error)
+
+    def _accept(self):
+        import threading
+        while True:
+            try:
+                client, _ = self.server.accept()
+            except OSError:
+                return
+            self.seen['connections'] += 1
+            threading.Thread(target=self._relay, args=(client,), daemon=True).start()
+
+    def _relay(self, client):
+        import socket
+        import subprocess
+        import threading
+        try:
+            address = subprocess.run(
+                ['docker', 'inspect', '-f', f'{{{{(index .NetworkSettings.Networks "{self.network}").IPAddress}}}}',
+                 self.container], capture_output=True, text=True, timeout=20).stdout.strip()
+            upstream = socket.create_connection((address, self.inner), timeout=10)
+            upstream.settimeout(None)
+        except Exception as error:
+            self.seen['last_error'] = repr(error)[:200]
+            client.close()
+            return
+        self.seen['relayed'] += 1
+
+        def pump(source, sink):
+            try:
+                while data := source.recv(65536):
+                    sink.sendall(data)
+            except OSError:
+                pass
+            finally:
+                for s in (source, sink):
+                    try:
+                        s.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+        threading.Thread(target=pump, args=(upstream, client), daemon=True).start()
+        pump(client, upstream)
+        client.close()
+        upstream.close()
+
+    def close(self):
+        self.server.close()
+        return self.seen
+
 
 class SampleVersions(unittest.TestCase):
     """TK-VAL-001: the sample versions differ only in their document policies."""
