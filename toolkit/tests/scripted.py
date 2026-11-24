@@ -124,7 +124,10 @@ def prepare_with(world, api_keys=None, reset_fails=False, unsupported=(), known_
     profile = {'mode': 'E1',
                'identities': {n: {'login': 'ok', 'path': 'scripted'} for n in [*EMAILS, 'anonymous']},
                'unsupported': list(unsupported),
-               'known_differences': list(known_differences)}
+               'known_differences': list(known_differences),
+               'isolation': {'outbound': 'blocked', 'method': 'internal-network',
+                             'host_access': ['127.0.0.1:54321 -> kong:8000'], 'containers_checked': ['db', 'kong'],
+                             'limits': ['containers share the host kernel']}}
 
     def prepare(project_dir):
         env = environment.Operations(handles(api_keys), Transport(world), lifecycle)

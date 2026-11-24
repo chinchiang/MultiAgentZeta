@@ -217,11 +217,52 @@ class PrepareVulnerableEnv(unittest.TestCase):
         for word in ('service_role', 'SERVICE_ROLE', 'secret key'):
             self.assertNotIn(word, text)
 
-    def test_published_ports_bind_to_loopback_only(self):
-        # TK-ENV-008, observed from Docker itself rather than from the profile.
-        bindings = published_bindings(self.result.env.project_id)
-        self.assertTrue(bindings, 'no published ports found')
-        self.assertEqual({ip for ip, _port in bindings}, {'127.0.0.1'}, bindings)
+    def test_the_stack_publishes_no_port_and_is_reached_through_loopback_only(self):
+        # TK-ENV-008, observed from Docker and from the host's sockets rather than from the profile.
+        import socket
+        env = self.result.env
+        self.assertEqual(published_bindings(env.project_id), [])
+        self.assertEqual([r._server.getsockname() for r in env.relays], [('127.0.0.1', 54321), ('127.0.0.1', 54322)])
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:  # no packet is sent: this only picks a route
+            s.connect(('192.0.2.1', 9))
+            host_address = s.getsockname()[0]
+        if not host_address.startswith('127.'):
+            for port in (54321, 54322):
+                with self.subTest(port=port), self.assertRaises(OSError):
+                    socket.create_connection((host_address, port), timeout=3).close()
+
+    def test_the_stack_reaches_nothing_outside_by_address_or_by_name(self):
+        # TK-SBX-004 negative case, from inside the application's own container. The control is a container on
+        # Docker's default network: where that one reaches the outside, the failure below is the network's doing.
+        import subprocess
+        env = self.result.env
+        image = self.profile['services']['db']['image']
+        control = subprocess.run(['docker', 'run', '--rm', '--entrypoint', 'bash', image, '-c',
+                                  'timeout 8 bash -c "</dev/tcp/1.1.1.1/443" && echo OPEN; '
+                                  'getent hosts example.com && echo RESOLVED'],
+                                 capture_output=True, text=True, timeout=120).stdout
+        self.assertIn('OPEN', control, 'the host itself reaches nothing: the check below would prove nothing')
+        self.assertIn('RESOLVED', control)
+        found = _probe(f'supabase_db_{env.project_id}')
+        self.assertIn('CLOSED', found['outbound_ip'], found)
+        self.assertIn('UNRESOLVED', found['dns'], found)
+
+    def test_profile_records_the_isolation_that_was_checked(self):
+        isolation = self.profile['isolation']
+        self.assertEqual((isolation['outbound'], isolation['method']), ('blocked', 'internal-network'))
+        self.assertEqual(isolation['host_access'], ['127.0.0.1:54321 -> kong:8000', '127.0.0.1:54322 -> db:5432'])
+        self.assertEqual(isolation['containers_checked'], sorted(self.profile['services']))
+        self.assertTrue(isolation['limits'])
+
+    def test_no_container_is_privileged_or_mounts_the_host(self):
+        # TK-SBX-001, TK-SBX-002, read from Docker itself.
+        import subprocess
+        env = self.result.env
+        names = [f'supabase_{s}_{env.project_id}' for s in self.profile['services']]
+        for c in json.loads(subprocess.run(['docker', 'inspect', *names], capture_output=True, text=True).stdout):
+            with self.subTest(container=c['Name']):
+                self.assertIs(c['HostConfig']['Privileged'], False)
+                self.assertEqual([m for m in c['Mounts'] if m['Type'] not in ('volume', 'tmpfs')], [])
 
     def test_running_versions_are_in_the_support_matrix(self):
         self.assertEqual(self.profile['unsupported'], [])
@@ -292,178 +333,153 @@ def _probe(container):
         r = subprocess.run(['docker', 'exec', container, 'bash', '-c', script], capture_output=True, text=True, timeout=60)
         return (r.stdout + r.stderr).strip().replace('\n', ' | ')[:200] or f'exit {r.returncode}'
     return {'outbound_ip': inside('timeout 8 bash -c "</dev/tcp/1.1.1.1/443" && echo OPEN || echo CLOSED'),
-            'dns': inside('getent hosts example.com && echo RESOLVED || echo UNRESOLVED'),
-            'default_route': inside('(ip route 2>/dev/null || cat /proc/net/route) | head -3')}
+            'dns': inside('getent hosts example.com && echo RESOLVED || echo UNRESOLVED')}
 
 
-@needs_env
-class NetworkIsolationMeasurementEnv(unittest.TestCase):
-    """Measurement for #6, not yet a requirement: what each way of creating the stack's network does on the
-    Docker engine of the support matrix. Docker's documentation does not say whether a port is published on
-    an --internal network, nor what a container still reaches without masquerading, and the Supabase CLI
-    connects to the published database port to apply migrations. Each candidate is tried with a real stack
-    and the outcome is printed as a `MEASURE` line; only the control is asserted (a stack on today's network
-    reaches the outside, or the probe proves nothing). TK-SBX-004 is implemented from these lines."""
-
-    CANDIDATES = {'control': [],
-                  'internal': ['--internal'],
-                  'no_masquerade': ['-o', 'com.docker.network.bridge.enable_ip_masquerade=false']}
-
-    def measure(self, name):
-        import sys
-        from unittest import mock
-        extra = self.CANDIDATES[name]
-
-        def create(env):
-            e1._run(['docker', 'network', 'rm', env.network], timeout=60)
-            r = e1._run(['docker', 'network', 'create', '--driver', 'bridge', '--ipv6=false',
-                         '-o', f'{e1.LOOPBACK_OPTION}=127.0.0.1', *extra, env.network], timeout=60)
-            if r.returncode:
-                raise e1._Stop(e1.Blocked('service_init', 'cannot create the network', (r.stdout + r.stderr)[-500:]))
-        found = {'candidate': name}
-        with tempfile.TemporaryDirectory() as d, mock.patch.object(e1, '_create_network', create):
-            result = e1.prepare(failing_copy(d, version='vulnerable'))
-            try:
-                found['prepare'] = type(result).__name__
-                if isinstance(result, e1.Blocked):
-                    found.update(step=result.step, reason=result.reason, detail=result.detail[-600:].replace('\n', ' | '))
-                else:
-                    env = result.env
-                    found.update(_probe(f'supabase_db_{env.project_id}'))
-                    found['published'] = sorted(published_bindings(env.project_id))
-                    status, _ = e1._http('GET', env.api_url + '/rest/v1/', {'apikey': env.anon_key})
-                    found['api_from_host'] = status
-            finally:
-                if isinstance(result, e1.Ready):
-                    e1.destroy(result.env)
-        print('MEASURE ' + json.dumps(found, ensure_ascii=False, sort_keys=True), file=sys.stderr, flush=True)
-        return found
-
-    def test_the_control_reaches_the_outside_so_the_probe_means_something(self):
-        found = self.measure('control')
-        self.assertEqual(found['prepare'], 'Ready', found)
-        self.assertIn('OPEN', found['outbound_ip'], found)
-
-    def test_measure_an_internal_network(self):
-        self.measure('internal')
-
-    def test_measure_a_network_without_masquerading(self):
-        self.measure('no_masquerade')
-
-    def test_measure_an_internal_network_reached_through_forwarders_on_loopback(self):
-        """Second round: --internal is the only option Docker documents as dropping traffic to other networks,
-        but it publishes no port. The host still reaches a container's address on such a network, so forwarders
-        on 127.0.0.1 stand where the published ports were, for the CLI and for the toolkit alike."""
-        import sys
-        from unittest import mock
-        forwarders, found = [], {'candidate': 'internal_forwarded'}
-
-        def create(env):
-            e1._run(['docker', 'network', 'rm', env.network], timeout=60)
-            r = e1._run(['docker', 'network', 'create', '--driver', 'bridge', '--ipv6=false', '--internal',
-                         '-o', f'{e1.LOOPBACK_OPTION}=127.0.0.1', env.network], timeout=60)
-            if r.returncode:
-                raise e1._Stop(e1.Blocked('service_init', 'cannot create the network', (r.stdout + r.stderr)[-500:]))
-            for port, service, inner in ((54321, 'kong', 8000), (54322, 'db', 5432)):
-                forwarders.append(_Forwarder(port, f'supabase_{service}_{env.project_id}', env.network, inner))
-
-        with tempfile.TemporaryDirectory() as d, mock.patch.object(e1, '_create_network', create):
-            result = None
-            try:
-                result = e1.prepare(failing_copy(d, version='vulnerable'))
-                found['prepare'] = type(result).__name__
-                if isinstance(result, e1.Blocked):
-                    found.update(step=result.step, reason=result.reason, detail=result.detail[-600:].replace('\n', ' | '))
-                else:
-                    env = result.env
-                    found.update(_probe(f'supabase_db_{env.project_id}'))
-                    found['published'] = sorted(published_bindings(env.project_id))
-                    try:
-                        status, _ = e1._http('GET', env.api_url + '/rest/v1/', {'apikey': env.anon_key})
-                        found['api_from_host'] = status
-                    except Exception as error:  # a measurement: the failure is the finding
-                        found['api_from_host'] = repr(error)[:200]
-                    try:
-                        after = e1.reset(env)
-                        found['reset'] = type(after).__name__
-                        if isinstance(after, e1.Blocked):
-                            found['reset_detail'] = (after.reason + ' | ' + after.detail[-300:]).replace('\n', ' | ')
-                    except Exception as error:
-                        found['reset'] = repr(error)[:200]
-            except Exception as error:
-                found['prepare'] = repr(error)[:300]
-            finally:
-                found['forwarders'] = [f.close() for f in forwarders]
-                if isinstance(result, e1.Ready):
-                    e1.destroy(result.env)
-        print('MEASURE ' + json.dumps(found, ensure_ascii=False, sort_keys=True), file=sys.stderr, flush=True)
+def isolated_stack(project_id, network=None, **changes):
+    """`docker network inspect` and `docker inspect` output of a stack that meets 〈定義：E1 隔離〉."""
+    network = network or f'maz_e1_{project_id}'
+    container = {'Name': f'/supabase_db_{project_id}', 'HostConfig': {'Privileged': False},
+                 'NetworkSettings': {'Networks': {network: {'IPAddress': '172.18.0.2'}}, 'Ports': {'5432/tcp': None}},
+                 'Mounts': [{'Type': 'volume', 'Source': '/var/lib/docker/volumes/db/_data', 'Destination': '/var/lib/postgresql/data'}]}
+    container.update(changes)
+    return {'Internal': True}, [container]
 
 
-class _Forwarder:
-    """Measurement only: listens on 127.0.0.1:port and relays each connection to a container's own port, at the
-    address the container has on the given network (looked up per connection: the container may not exist yet)."""
+class IsolationProblems(unittest.TestCase):
+    """〈定義：E1 隔離〉 啟動後檢查 (TK-SBX-001, TK-SBX-002, TK-SBX-004, TK-SBX-005, TK-ENV-008), on inspect output."""
 
-    def __init__(self, port, container, network, inner):
+    PROJECT = Path('/work/sample')
+    TOOLKIT = Path('/opt/maz/toolkit')
+
+    def problems(self, network=None, **changes):
+        net, containers = isolated_stack('p', **changes)
+        return e1.isolation_problems(net if network is None else network, containers, 'maz_e1_p', self.PROJECT, self.TOOLKIT)
+
+    def test_a_stack_on_an_internal_network_with_only_volumes_has_no_problem(self):
+        self.assertEqual(self.problems(), [])
+
+    def test_a_bind_mount_from_the_project_under_test_is_allowed(self):
+        self.assertEqual(self.problems(Mounts=[{'Type': 'bind', 'Source': '/work/sample/supabase/functions',
+                                                'Destination': '/functions'}]), [])
+
+    def test_a_network_that_is_not_internal_is_a_problem(self):
+        for network in ({'Internal': False}, {}, [], 'x'):
+            with self.subTest(network=network):
+                self.assertTrue(any('not internal' in p for p in self.problems(network=network)))
+
+    def test_a_privileged_container_is_a_problem(self):
+        for host in ({'Privileged': True}, {}, None):
+            with self.subTest(host=host):
+                self.assertTrue(any('privileged' in p for p in self.problems(HostConfig=host)))
+
+    def test_a_container_on_another_network_is_a_problem(self):
+        for networks in ({'maz_e1_p': {}, 'bridge': {}}, {'host': {}}, {}):
+            with self.subTest(networks=networks):
+                found = self.problems(NetworkSettings={'Networks': networks})
+                self.assertTrue(any('attached to' in p for p in found), found)
+
+    def test_a_published_port_is_a_problem(self):
+        settings = {'Networks': {'maz_e1_p': {}}, 'Ports': {'5432/tcp': [{'HostIp': '0.0.0.0', 'HostPort': '54322'}]}}
+        self.assertTrue(any('publishes' in p for p in self.problems(NetworkSettings=settings)))
+
+    def test_the_docker_control_socket_is_a_problem_whatever_the_mount_type(self):
+        for mount in ({'Type': 'bind', 'Source': '/var/run/docker.sock', 'Destination': '/var/run/docker.sock'},
+                      {'Type': 'volume', 'Source': '/x', 'Destination': '/run/docker.sock'}):
+            with self.subTest(mount=mount):
+                self.assertTrue(any('control socket' in p for p in self.problems(Mounts=[mount])))
+
+    def test_a_host_path_outside_the_project_is_a_problem(self):
+        for source in ('/home/user', '/home/user/.ssh', '/home/user/.aws', '/', '/work', '/work/sample-other', ''):
+            with self.subTest(source=source):
+                found = self.problems(Mounts=[{'Type': 'bind', 'Source': source, 'Destination': '/x'}])
+                self.assertTrue(any('outside the project' in p for p in found), found)
+
+    def test_a_mount_that_reaches_the_control_area_is_a_problem_even_inside_the_project(self):
+        net, containers = isolated_stack('p', Mounts=[{'Type': 'bind', 'Source': '/work/sample', 'Destination': '/x'}])
+        for toolkit in ('/work/sample/toolkit', '/work/sample'):
+            with self.subTest(toolkit=toolkit):
+                found = e1.isolation_problems(net, containers, 'maz_e1_p', self.PROJECT, Path(toolkit))
+                self.assertTrue(any('outside the project' in p for p in found), found)
+
+    def test_what_cannot_be_read_is_a_problem_not_a_pass(self):
+        self.assertTrue(any('mounts could not be read' in p for p in self.problems(Mounts=None)))
+        for containers in ([], None, ['x']):
+            with self.subTest(containers=containers):
+                self.assertTrue(e1.isolation_problems({'Internal': True}, containers, 'maz_e1_p', self.PROJECT, self.TOOLKIT))
+
+
+class Relays(unittest.TestCase):
+    """〈定義：E1 隔離〉 宿主機入口: toolkit.forward.Relay, against a server on the loopback interface."""
+
+    def setUp(self):
         import socket
         import threading
-        self.container, self.network, self.inner = container, network, inner
-        self.seen = {'port': port, 'bound': None, 'connections': 0, 'relayed': 0, 'last_error': ''}
-        self.server = socket.socket()
-        self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            self.server.bind(('127.0.0.1', port))
-            self.server.listen(64)
-            self.seen['bound'] = True
-            threading.Thread(target=self._accept, daemon=True).start()
-        except OSError as error:
-            self.seen['bound'] = repr(error)
+        from toolkit import forward
+        self.forward, self.socket = forward, socket
+        self.upstream = socket.socket()
+        self.upstream.bind(('127.0.0.1', 0))
+        self.upstream.listen(4)
+        self.addCleanup(self.upstream.close)
 
-    def _accept(self):
-        import threading
-        while True:
+        def reverse():
+            while True:
+                try:
+                    c, _ = self.upstream.accept()
+                except OSError:
+                    return
+                c.sendall(c.recv(100)[::-1])
+                c.close()
+        threading.Thread(target=reverse, daemon=True).start()
+
+    def relay(self, lookup):
+        probe = self.socket.socket()
+        probe.bind(('127.0.0.1', 0))
+        port = probe.getsockname()[1]
+        probe.close()
+        relay = self.forward.Relay(port, lookup, self.upstream.getsockname()[1])
+        self.addCleanup(relay.close)
+        return relay
+
+    def ask(self, port):
+        with self.socket.create_connection(('127.0.0.1', port), timeout=5) as s:
             try:
-                client, _ = self.server.accept()
-            except OSError:
-                return
-            self.seen['connections'] += 1
-            threading.Thread(target=self._relay, args=(client,), daemon=True).start()
+                s.sendall(b'abc')
+                return s.recv(100)
+            except ConnectionError:  # closed with the request unread: a reset, not an answer
+                return b''
 
-    def _relay(self, client):
-        import socket
-        import subprocess
-        import threading
-        try:
-            address = subprocess.run(
-                ['docker', 'inspect', '-f', f'{{{{(index .NetworkSettings.Networks "{self.network}").IPAddress}}}}',
-                 self.container], capture_output=True, text=True, timeout=20).stdout.strip()
-            upstream = socket.create_connection((address, self.inner), timeout=10)
-            upstream.settimeout(None)
-        except Exception as error:
-            self.seen['last_error'] = repr(error)[:200]
-            client.close()
-            return
-        self.seen['relayed'] += 1
+    def test_a_connection_is_passed_to_the_address_looked_up(self):
+        self.assertEqual(self.ask(self.relay(lambda: '127.0.0.1').port), b'cba')
 
-        def pump(source, sink):
-            try:
-                while data := source.recv(65536):
-                    sink.sendall(data)
-            except OSError:
-                pass
-            finally:
-                for s in (source, sink):
-                    try:
-                        s.shutdown(socket.SHUT_RDWR)
-                    except OSError:
-                        pass
-        threading.Thread(target=pump, args=(upstream, client), daemon=True).start()
-        pump(client, upstream)
-        client.close()
-        upstream.close()
+    def test_a_target_that_is_not_there_closes_the_connection_and_the_relay_goes_on(self):
+        answers = iter(['', '127.0.0.1'])
+        relay = self.relay(lambda: next(answers))
+        self.assertEqual(self.ask(relay.port), b'')
+        self.assertEqual(self.ask(relay.port), b'cba')
 
-    def close(self):
-        self.server.close()
-        return self.seen
+    def test_a_lookup_that_raises_closes_the_connection(self):
+        def lookup():
+            raise RuntimeError('docker is gone')
+        self.assertEqual(self.ask(self.relay(lookup).port), b'')
+
+    def test_it_listens_on_the_loopback_interface_only(self):
+        relay = self.relay(lambda: '127.0.0.1')
+        self.assertEqual(relay._server.getsockname()[0], '127.0.0.1')  # TK-ENV-008
+
+    def test_the_port_is_free_again_once_closed(self):
+        relay = self.relay(lambda: '127.0.0.1')  # its accept() is already waiting in another thread
+        relay.close()
+        with self.assertRaises(ConnectionRefusedError):
+            self.socket.create_connection(('127.0.0.1', relay.port), timeout=5)
+        again = self.socket.socket()  # no SO_REUSEADDR: a listener left behind would refuse this
+        self.addCleanup(again.close)
+        again.bind(('127.0.0.1', relay.port))
+
+    def test_a_port_already_taken_is_an_error(self):
+        relay = self.relay(lambda: '127.0.0.1')
+        with self.assertRaises(OSError):
+            self.forward.Relay(relay.port, lambda: '127.0.0.1', 1)
 
 
 class SampleVersions(unittest.TestCase):
@@ -539,7 +555,8 @@ class ResetEnv(unittest.TestCase):
             self.assertEqual(document_titles(env.project_id), SEED_MARKERS)
             self.assertTrue(all(o['ok'] for o in after.profile['health']['legit_operations']))
             self.assertEqual(after.profile['identities']['owner']['login'], 'ok')
-            self.assertEqual({ip for ip, _ in published_bindings(env.project_id)}, {'127.0.0.1'})
+            self.assertEqual(published_bindings(env.project_id), [])
+            self.assertEqual(after.profile['isolation']['outbound'], 'blocked')  # checked again after the reset
         finally:
             e1.destroy(env)
 
@@ -806,6 +823,25 @@ class ACommandThatDoesNotComplete(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
         self.commands = []
+        self.relays = []  # no real port in a fast test: (port, inner port) of each relay asked for
+
+        def relay(port, lookup, inner):
+            self.relays.append((port, inner))
+            return mock.Mock(port=port, inner_port=inner)
+        patcher = mock.patch('toolkit.forward.Relay', side_effect=relay)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def inspected(self, cmd, **changes):
+        """Answers for the commands that read the stack's isolation; None for any other command."""
+        network, containers = isolated_stack('maz-failure-sample', **changes)
+        if cmd[:2] == ['docker', 'ps']:
+            return 0, 'supabase_db_maz-failure-sample\timage\t\n', ''
+        if cmd[:3] == ['docker', 'network', 'inspect']:
+            return 0, json.dumps([network]), ''
+        if cmd[:2] == ['docker', 'inspect'] and '-f' not in cmd:
+            return 0, json.dumps(containers), ''
+        return None
 
     def run_commands(self, answer):
         """Replace subprocess.run: `answer(argv)` returns (returncode, stdout, stderr) or raises."""
@@ -832,12 +868,53 @@ class ACommandThatDoesNotComplete(unittest.TestCase):
                 return 1, '', 'ERROR:  relation "pg_extension" does not exist'
             if cmd[1:2] == ['status']:
                 return 0, '{"API_URL": "http://127.0.0.1:1", "ANON_KEY": "k"}', ''
-            return 0, '', ''
+            return self.inspected(cmd) or (0, '', '')
         self.run_commands(answer)
         result = e1.prepare(failing_copy(self.tmp.name), matrix=self.matrix)
         self.assertEqual((type(result), result.step), (e1.Blocked, 'service_init'))
         self.assertIn('pg_extension', result.detail)
         self.assertTrue(self.stopped())
+
+    def start_with(self, **changes):
+        def answer(cmd):
+            if cmd[1:2] == ['status']:
+                return 0, '{"API_URL": "http://127.0.0.1:1", "ANON_KEY": "k"}', ''
+            return self.inspected(cmd, **changes) or (0, '', '')
+        self.run_commands(answer)
+        return e1.prepare(failing_copy(self.tmp.name), matrix=self.matrix)
+
+    def test_the_network_is_created_internal_and_the_relays_stand_before_the_stack_starts(self):
+        self.start_with()
+        create = next(c for c in self.commands if c[:3] == ['docker', 'network', 'create'])
+        self.assertIn('--internal', create)  # TK-SBX-004
+        self.assertEqual(self.relays, [(54321, 8000), (54322, 5432)])
+        self.assertLess(self.commands.index(create), next(i for i, c in enumerate(self.commands) if c[1:2] == ['start']))
+
+    def test_a_started_stack_that_is_not_isolated_blocks_service_init_and_is_stopped(self):
+        result = self.start_with(HostConfig={'Privileged': True})
+        self.assertEqual((type(result), result.step), (e1.Blocked, 'service_init'))
+        self.assertIn('not isolated', result.reason)
+        self.assertIn('privileged', result.detail)
+        self.assertTrue(self.stopped())
+
+    def test_isolation_that_cannot_be_inspected_blocks_service_init(self):
+        def answer(cmd):
+            if cmd[1:2] == ['status']:
+                return 0, '{"API_URL": "http://127.0.0.1:1", "ANON_KEY": "k"}', ''
+            return 0, '', ''  # docker inspect prints nothing
+        self.run_commands(answer)
+        result = e1.prepare(failing_copy(self.tmp.name), matrix=self.matrix)
+        self.assertEqual((type(result), result.step), (e1.Blocked, 'service_init'))
+        self.assertIn('isolation', result.reason)
+        self.assertTrue(self.stopped())
+
+    def test_a_port_that_cannot_be_listened_on_blocks_service_init_before_the_stack_starts(self):
+        self.run_commands(lambda cmd: (0, '', ''))
+        with self.mock.patch('toolkit.forward.Relay', side_effect=OSError(98, 'Address already in use')):
+            result = e1.prepare(failing_copy(self.tmp.name), matrix=self.matrix)
+        self.assertEqual((type(result), result.step), (e1.Blocked, 'service_init'))
+        self.assertIn('127.0.0.1:54321', result.reason)
+        self.assertFalse(any(c[1:2] == ['start'] for c in self.commands))
 
     def test_a_command_that_times_out_blocks_its_step(self):
         import subprocess

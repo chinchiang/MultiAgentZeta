@@ -156,15 +156,28 @@
       "type": "array", "maxItems": 0
     },
     "environment": {
-      "description": "〈定義：核心資料物件與相依紀錄〉 EnvironmentProfile summary for this run (TK-SCP-001, TK-ENV-007, TK-EVD-005): the environment mode, the digest of the full profile, any versions outside the support matrix, and the known differences from E2 or production.",
+      "description": "〈定義：核心資料物件與相依紀錄〉 EnvironmentProfile summary for this run (TK-SCP-001, TK-ENV-007, TK-EVD-005): the environment mode, the digest of the full profile, any versions outside the support matrix, the known differences from E2 or production, and the isolation checked after the stack started (〈定義：E1 隔離〉, TK-SBX-004, TK-ENV-008).",
       "type": "object",
-      "required": ["mode", "profile_digest", "unsupported", "known_differences"],
+      "required": ["mode", "profile_digest", "unsupported", "known_differences", "isolation"],
       "additionalProperties": false,
       "properties": {
         "mode": {"enum": ["E0", "E1", "E2"]},
         "profile_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
         "unsupported": {"type": "array", "items": {"$ref": "#/$defs/text"}},
-        "known_differences": {"type": "array", "items": {"$ref": "#/$defs/text"}}
+        "known_differences": {"type": "array", "items": {"$ref": "#/$defs/text"}},
+        "isolation": {
+          "description": "〈定義：E1 隔離〉: a run only gets an environment whose stack passed the checks, so outbound is always blocked here; limits says what the isolation does not cover (TK-EVD-014).",
+          "type": "object",
+          "required": ["outbound", "method", "host_access", "containers_checked", "limits"],
+          "additionalProperties": false,
+          "properties": {
+            "outbound": {"const": "blocked"},
+            "method": {"enum": ["internal-network"]},
+            "host_access": {"type": "array", "items": {"$ref": "#/$defs/text"}},
+            "containers_checked": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/text"}},
+            "limits": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/text"}}
+          }
+        }
       }
     },
     "confirmation_list": {
