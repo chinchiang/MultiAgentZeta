@@ -134,12 +134,15 @@ def _platform_time(value):
 
 def _sync_item(item, roles, platform):
     """Append to item the decisions and rejected attempts its issue reports since the last sync: an account
-    without the review's role, or with no comment since the last decision, is a rejected attempt. The
+    without the review's role, or with no comment that says something since the last decision, is a rejected
+    attempt. The
     platform's times are whole seconds, so a comment in the label's second counts, and in the second of the
     last decision belongs to that one
     (〈定義：覆核紀錄〉 選項, 身分, 角色, 理由)."""
     role = ROLE_FOR[item['review_type']]
     comments = [(_platform_time(c.created_at), c) for c in platform.comments(item['issue'])]
+    for _, c in comments:  # kept in the record with a decision, so checked before any is written
+        _platform_time(c.updated_at)
     events = sorted(platform.label_events(item['issue']), key=lambda e: (_platform_time(e.at), e.id))
     since = control.utc_time(item['decisions'][-1]['at']) if item['decisions'] else None
     seen = {e['event_id'] for e in item['decisions'] + item['rejected']}
@@ -155,7 +158,9 @@ def _sync_item(item, roles, platform):
             item['rejected'].append({**entry, 'problem': 'no_role'})
             continue
         at = _platform_time(event.at)
-        reasons = [c for t, c in comments if c.author_id == event.actor_id and (since is None or t > since) and t <= at]
+        # A comment of nothing but white space gives no reason (〈定義：覆核紀錄〉 理由).
+        reasons = [c for t, c in comments if c.author_id == event.actor_id and (since is None or t > since) and t <= at
+                   and isinstance(c.body, str) and c.body.strip()]
         if not reasons:
             item['rejected'].append({**entry, 'problem': 'no_reason'})
             continue
@@ -321,15 +326,17 @@ def _report(path):
         raise ReportUnusable(f'the report {path} cannot be read: {e}') from e
 
 
-def main(argv, environ, platform_factory, out):
+def main(argv, environ, platform_factory, out, err=None):
     """The command line. platform_factory(repo, token) gives the platform; the token comes from
     MAZ_REVIEW_GITHUB_TOKEN and is never printed or written, and without it nothing is done. A record kept
     for another platform or repository is not used: its issue numbers mean other issues there
-    (〈定義：覆核紀錄〉 身分, 工單). Returns the exit status."""
+    (〈定義：覆核紀錄〉 身分, 工單). The record's new digest goes to out; why nothing was done, or why it
+    failed, goes to err (out when none is given). Returns the exit status."""
+    err = out if err is None else err
     args = _parser().parse_args(argv)
     token = environ.get(TOKEN_VARIABLE)
     if not token:
-        print(f'{TOKEN_VARIABLE} is not set: nothing was {args.action}ed and nothing was written', file=out)
+        print(f'{TOKEN_VARIABLE} is not set: nothing was {args.action}ed and nothing was written', file=err)
         return 2
     now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
     try:
@@ -346,7 +353,7 @@ def main(argv, environ, platform_factory, out):
             new = {'platform': 'github', 'repo': args.repo} if args.new else None
             digest = publish_file(args.record, _report(args.report), platform, now, args.project, new=new)
     except (SyncFailed, PublishFailed, control.RecordUnusable, ReportUnusable) as e:
-        print(f'{args.action} failed: {e}', file=out)
+        print(f'{args.action} failed: {e}', file=err)
         return 1
     print(f'review record {args.record}: {digest}', file=out)
     return 0
