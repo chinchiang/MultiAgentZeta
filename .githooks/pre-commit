@@ -1,18 +1,16 @@
 #!/bin/sh
-# Validate the toolkit design docs before every commit.
+# Validate the toolkit design docs before every commit: what is staged, not the working directory.
 # Enable once per clone:  git config core.hooksPath .githooks
 PY=$(command -v python3 || command -v python)
 if [ -z "$PY" ]; then
   echo "pre-commit: python not found; cannot run docs check" >&2
   exit 1
 fi
-"$PY" -I docs/toolkit/tools/build.py --check || {
-  echo "pre-commit: docs check failed. Fix the error above, or run" >&2
-  echo "  python3 -I docs/toolkit/tools/build.py" >&2
-  echo "to regenerate stale outputs, then stage the changes again." >&2
-  exit 1
-}
 "$PY" -I docs/toolkit/tools/build.py --check-staged || {
-  echo "pre-commit: version rule failed (see above). Bump the version, then stage the changes again." >&2
+  echo "pre-commit: the staged documents failed the check (see above)." >&2
+  echo "  A document error: fix it. Outputs out of date: run" >&2
+  echo "    python3 -I docs/toolkit/tools/build.py" >&2
+  echo "  A missing version bump: run build.py --bump v<new version> --note \"what changed\"." >&2
+  echo "  Then stage the changed files again (git add): a file left unstaged is not in the commit." >&2
   exit 1
 }
