@@ -7,9 +7,14 @@ A run is detached from the shell that starts it (a new session), so ending that 
 does not stop it. A start is refused while a run holds scratch/logs/env-tests.lock or any other test
 process of this toolkit is running on the machine (another clone, a manual run, a process a stopped run
 left behind); otherwise the Docker resources of the maz-* sample projects that an earlier run left are
-removed first. The log is scratch/logs/NAME.log: a header line, the `unittest -v` output (one line per
+removed first. The lock is a file lock (flock) the starting process takes and the run inherits: it is
+held exactly as long as one of them lives, whatever the file says, so no process id is handed over and
+none can be mistaken for another's. The file's text (process id and run name) is only for people.
+The run uses the Supabase CLI MAZ_SUPABASE_BIN names when that file exists (toolkit.e1 checks its digest
+against the support matrix), and fetches the pinned one otherwise. The log is scratch/logs/NAME.log: a header line, the `unittest -v` output (one line per
 test), and an end line with the exit code. Times are shown in GMT+8.
 """
+import fcntl
 import json
 import os
 import re
@@ -27,6 +32,7 @@ LOCK = LOGS / 'env-tests.lock'
 START_DIR = 'toolkit/tests'
 DISCOVER = ['discover', '-s', START_DIR, '-t', '.']  # the run and count_tests() use the same discovery
 GMT8 = timezone(timedelta(hours=8))
+LOCK_FD_VARIABLE = 'MAZ_ENV_TESTS_LOCK_FD'  # how the starting process hands the held lock to the run
 NAME_PATTERN = re.compile(r'^[A-Za-z0-9._-]+$')
 # Docker resources of the sample projects (project_id maz-* in samples/*/supabase/config.toml, see e1.py).
 ORPHAN_PATTERN = re.compile(r'^(supabase_[a-z_]+_|maz_e1_)maz-[A-Za-z0-9-]+$')
@@ -139,65 +145,84 @@ def count_tests(args):
     return loader.discover(str(REPO / START_DIR), pattern=pattern, top_level_dir=str(REPO)).countTestCases()
 
 
-def _alive(pid):
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
-
-
 def read_lock(path):
-    """(pid, run name) of the lock, or None when there is none or it is unreadable."""
+    """(pid, run name) the lock file names, or None when there is none or it is unreadable. This is what the
+    holder wrote about itself, for people; whether the lock is held is lock_held()'s to say."""
     try:
         pid, _, name = Path(path).read_text(encoding='utf-8').strip().partition(' ')
-    except FileNotFoundError:
+    except (FileNotFoundError, UnicodeDecodeError):
         return None
     return (int(pid), name) if pid.isdigit() else None
 
 
-def _write_lock(path, pid, name, exclusive):
-    flags = os.O_WRONLY | os.O_CREAT | (os.O_EXCL if exclusive else os.O_TRUNC)
-    with os.fdopen(os.open(path, flags, 0o644), 'w', encoding='utf-8') as f:
-        f.write(f'{pid} {name}\n')
+def _label(fd, pid, name):
+    """Write who holds the lock into the lock file, through the descriptor that holds it."""
+    text = f'{pid} {name}\n'.encode()
+    os.ftruncate(fd, 0)
+    os.pwrite(fd, text, 0)
 
 
-def acquire_lock(path, pid, name):
-    """Record that run `name` (process pid) is in progress; refuse while another live run holds the lock.
-    The lock file is created exclusively, so two starts at once cannot both pass; a lock whose process is
-    gone is replaced."""
+def acquire_lock(path, name):
+    """Take the lock for run `name` and return the descriptor that holds it; refuse (Busy) while another
+    process holds it. The lock lives with the open descriptor and every copy a child inherits, and is gone
+    when the last of them is closed or its process ends: a run that died leaves no lock behind, and the file
+    it leaves is taken over by the next start."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    for _ in range(2):
-        try:
-            _write_lock(path, pid, name, exclusive=True)
-            return
-        except FileExistsError:
-            held = read_lock(path)
-            if held and _alive(held[0]):
-                raise Busy(f'an environment test run is in progress: pid {held[0]} running {held[1]!r}; '
-                           f'see run-env-tests.sh --status {held[1]}') from None
-            path.unlink(missing_ok=True)
-    raise Busy(f'could not take the lock {path}')
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        held = read_lock(path)
+        who = f'pid {held[0]} running {held[1]!r}; see run-env-tests.sh --status {held[1]}' if held else str(path)
+        raise Busy(f'an environment test run is in progress: {who}') from None
+    except BaseException:
+        os.close(fd)
+        raise
+    _label(fd, os.getpid(), name)
+    return fd
 
 
-def release_lock(path, pid):
-    """Remove the lock if this process holds it."""
-    held = read_lock(path)
-    if held and held[0] == pid:
-        Path(path).unlink(missing_ok=True)
+def lock_held(path):
+    """Whether some process holds the lock. Asked with a shared lock, so two askers never see each other."""
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except FileNotFoundError:
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return True
+    finally:
+        os.close(fd)
+    return False
+
+
+def _is_toolkit_test_run(argv):
+    """Whether a command line is a Python process running this toolkit's tests: `unittest discover -s
+    toolkit/tests` in any spelling of the path, `-m unittest toolkit/tests/test_x.py` or
+    toolkit.tests.test_x, a test file run directly, or this runner's own detached run. A run started inside toolkit/tests under a relative
+    name shows none of this on its command line and is not seen."""
+    if not argv or 'python' not in Path(argv[0]).name:
+        return False
+    if '_run' in argv and any(Path(a).name == Path(__file__).name for a in argv):
+        return True  # a detached run of this runner (any clone) that has not started its tests yet
+    for arg in argv[1:]:
+        text = arg.replace('\\', '/')
+        if START_DIR in text or START_DIR.replace('/', '.') in text:
+            return True
+    return False
 
 
 def other_test_runs(ps_output, exclude):
-    """Lines of `ps -eo pid,args` that are unittest runs of this toolkit's tests, other than the pids in exclude."""
+    """Lines of `ps -eo pid,args` that are runs of this toolkit's tests (see _is_toolkit_test_run), other than
+    the pids in exclude. remove_orphans() deletes the sample projects' containers, so a run this misses loses
+    its stack."""
     found = []
     for line in ps_output.splitlines():
         pid, _, cmd = line.strip().partition(' ')
-        argv = cmd.split()
-        if (pid.isdigit() and int(pid) not in exclude and argv and 'python' in Path(argv[0]).name
-                and 'unittest' in argv and 'discover' in argv and START_DIR in argv):
+        if pid.isdigit() and int(pid) not in exclude and _is_toolkit_test_run(cmd.split()):
             found.append(f'{pid} {cmd.strip()}')
     return found
 
@@ -245,7 +270,7 @@ def start(name, args):
     """Start run `name` detached and return its log path."""
     log = _log_path(name)
     _filters(args)
-    acquire_lock(LOCK, os.getpid(), name)
+    fd = acquire_lock(LOCK, name)
     try:
         ps = subprocess.run(['ps', '-eo', 'pid,args'], capture_output=True, text=True, check=True).stdout
         others = other_test_runs(ps, exclude={os.getpid()})
@@ -255,14 +280,37 @@ def start(name, args):
         for r in remove_orphans():
             print(f'removed leftover {r}', file=sys.stderr)
         with open(log, 'w', encoding='utf-8') as out:
-            child = subprocess.Popen([sys.executable, '-I', __file__, '_run', name, *args], cwd=REPO,
-                                     stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
-                                     start_new_session=True)
-        _write_lock(LOCK, child.pid, name, exclusive=False)  # hand the lock to the run
-    except BaseException:
-        release_lock(LOCK, os.getpid())
-        raise
+            # The run inherits the descriptor, and with it the lock: there is no moment at which neither
+            # process holds it, and none at which the file names a process that is gone as its holder.
+            subprocess.Popen([sys.executable, '-I', __file__, '_run', name, *args], cwd=REPO,
+                             stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
+                             start_new_session=True, pass_fds=(fd,),
+                             env={**os.environ, LOCK_FD_VARIABLE: str(fd)})
+    finally:
+        os.close(fd)  # this process's copy; the run's copy keeps the lock, and without a run it is free again
     return log
+
+
+def _inherited_lock():
+    """The lock descriptor the starting process handed over, or None for a run started some other way."""
+    value = os.environ.get(LOCK_FD_VARIABLE, '')
+    if not value.isdigit():
+        return None
+    try:
+        os.fstat(int(value))
+    except OSError:
+        return None
+    return int(value)
+
+
+def supabase_cli(environ, fetch):
+    """(path, None) of the Supabase CLI the run uses, or (None, why there is none): the file MAZ_SUPABASE_BIN
+    names when it exists, since toolkit.e1 checks any binary's digest against the support matrix before
+    using it (TK-SCP-001); else what fetch() gives."""
+    given = environ.get('MAZ_SUPABASE_BIN', '')
+    if given and Path(given).is_file():
+        return given, None
+    return fetch()
 
 
 def _fetch_cli():
@@ -277,6 +325,9 @@ def _fetch_cli():
 def _run(name, args):
     """The detached run itself: header, the tests, end line, always; then the lock is released."""
     t0, code = time.monotonic(), 2
+    lock = _inherited_lock()
+    if lock is not None:
+        _label(lock, os.getpid(), name)
     try:
         try:
             total, problem = count_tests(args), None
@@ -286,17 +337,19 @@ def _run(name, args):
               flush=True)
         cli = None
         if not problem:
-            cli, problem = _fetch_cli()
+            cli, problem = supabase_cli(os.environ, _fetch_cli)
         if problem:
             print(f'# not started: {problem}', flush=True)
         else:
             env = {**os.environ, 'MAZ_ENV_TESTS': '1', 'MAZ_SUPABASE_BIN': cli}
+            env.pop(LOCK_FD_VARIABLE, None)  # the tests do not inherit the descriptor (close_fds)
             code = subprocess.run([sys.executable, '-I', '-m', 'unittest', *DISCOVER, '-v', *args], cwd=REPO,
                                   stdin=subprocess.DEVNULL, env=env).returncode
         return code
     finally:
         print(f'# end exit={code} wall={time.monotonic() - t0:.1f} ended={_now()}', flush=True)
-        release_lock(LOCK, os.getpid())
+        if lock is not None:
+            os.close(lock)
 
 
 def _previous_wall(status):
@@ -345,7 +398,7 @@ def status(name):
     if not log.exists():
         raise ValueError(f'no run named {name!r}: {log.relative_to(REPO)} does not exist')
     held = read_lock(LOCK)
-    running = bool(held) and held[1] == name and _alive(held[0])
+    running = bool(held) and held[1] == name and lock_held(LOCK)
     text = log.read_text(encoding='utf-8')
     if not _HEADER.match(text):
         if running:
@@ -378,4 +431,7 @@ def main(argv):
 
 
 if __name__ == '__main__':
+    for stream in (sys.stdout, sys.stderr):  # -I ignores PYTHONIOENCODING; test names and paths are not all ASCII
+        if hasattr(stream, 'reconfigure'):
+            stream.reconfigure(encoding='utf-8')
     sys.exit(main(sys.argv[1:]))
