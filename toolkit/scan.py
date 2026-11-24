@@ -1,9 +1,10 @@
-"""One scan run, the toolkit's main seam: run(manifest) -> Run(report, markdown).
+"""One scan run, the toolkit's main seam: run(manifest) -> Run(report, markdown), and main(), its command line.
 
 Minimal controller (tracer bullet, #3): prepare the E1 stack from the project's
 BuildRecipe, run the manifest's fixed tests, judge them with the observer,
 and produce the versioned JSON report plus the Markdown generated from it.
 """
+import argparse
 import hashlib
 import json
 import re
@@ -1154,3 +1155,86 @@ def _finish(state, executions, findings, status, reason, stages, environment, ma
     if problems:
         raise RuntimeError('the toolkit produced an invalid report: ' + '; '.join(problems))
     return Run(doc, report.render_markdown(doc))
+
+
+# --- command line (〈定義：命令列入口〉) -----------------------------------------------
+
+REPORT_JSON, REPORT_MARKDOWN = 'report.json', 'report.md'
+# Exit status of main(): a report was written, whatever the run's status; the command line, the ScanManifest
+# or the output directory was refused before anything was started; the toolkit itself failed.
+EXIT_REPORT, EXIT_REFUSED, EXIT_TOOL_ERROR = 0, 2, 3
+
+
+class _Refused(Exception):
+    """An input the command line does not act on: nothing was started and nothing was written."""
+
+
+def _read_manifest(path):
+    """The ScanManifest in the file at path, or _Refused when there is no such file, it is not JSON or it is
+    not an object. What the object lacks is for run()'s preflight to say, in a report (TK-SCP-002)."""
+    try:
+        manifest = json.loads(Path(path).read_text(encoding='utf-8'))
+    except OSError as e:
+        raise _Refused(f'the ScanManifest {path} cannot be read: {e.strerror or e}') from e
+    except (ValueError, RecursionError) as e:
+        raise _Refused(f'the ScanManifest {path} is not valid JSON: {e}') from e
+    if not isinstance(manifest, dict):
+        raise _Refused(f'the ScanManifest {path} must be a JSON object')
+    return manifest
+
+
+def _output_directory(path, manifest):
+    """The directory the report goes to, created and checked before the run so that a run is never made
+    whose report cannot be written: outside the source under test, which the code under test could write
+    to (TK-SBX-005), and holding no earlier report, which is never overwritten."""
+    target = manifest.get('target')
+    project = target.get('project') if isinstance(target, dict) else None
+    try:
+        if _nonempty_str(project):
+            control.outside_source(path, project, 'report')
+        directory = Path(path)
+        directory.mkdir(parents=True, exist_ok=True)
+    except control.RecordUnusable as e:
+        raise _Refused(str(e)) from e
+    except OSError as e:
+        raise _Refused(f'the output directory {path} cannot be used: {e.strerror or e}') from e
+    existing = [name for name in (REPORT_JSON, REPORT_MARKDOWN) if (directory / name).exists()]
+    if existing:
+        raise _Refused(f'{directory} already holds {" and ".join(existing)}; a report is not overwritten, '
+                       f'give another directory')
+    return directory
+
+
+def main(argv, out, err, prepare=environment.prepare):
+    """The command line of one scan run (〈定義：命令列入口〉): read the ScanManifest, run it, and write the
+    JSON report and the Markdown made from it (TK-EVD-003) to the output directory. Everything about the run
+    is run()'s; this only reads, writes and reports. The run's status goes to out, why nothing was done or
+    what failed goes to err; no credential is printed or written (TK-IDN-005). Returns the exit status."""
+    parser = argparse.ArgumentParser(prog='scan_run.py', description='Run one scan from a ScanManifest.')
+    parser.add_argument('--manifest', required=True, help='the ScanManifest, a JSON file')
+    parser.add_argument('--out', required=True, help='directory for report.json and report.md, outside the '
+                                                     'source under test; an earlier report is not overwritten')
+    args = parser.parse_args(argv)
+    try:
+        manifest = _read_manifest(args.manifest)
+        directory = _output_directory(args.out, manifest)
+    except _Refused as e:
+        print(f'not started: {e}', file=err)
+        return EXIT_REFUSED
+    try:
+        done = run(manifest, prepare=prepare)
+        # Exclusive creation: a report that appeared during the run is not overwritten either.
+        with open(directory / REPORT_JSON, 'x', encoding='utf-8', newline='\n') as f:
+            f.write(json.dumps(done.report, ensure_ascii=False, indent=2) + '\n')
+        with open(directory / REPORT_MARKDOWN, 'x', encoding='utf-8', newline='\n') as f:
+            f.write(done.markdown)
+    except (RuntimeError, OSError) as e:
+        print(f'failed: {type(e).__name__}: {e}', file=err)
+        return EXIT_TOOL_ERROR
+    status = done.report['status']
+    print(f'run {done.report["run_id"]}: {status} ({report.RUN_LABELS[status]})', file=out)
+    if done.report.get('status_reason'):
+        print(f'reason: {done.report["status_reason"]}', file=out)
+    print(f'report: {directory / REPORT_JSON}', file=out)
+    print(f'markdown: {directory / REPORT_MARKDOWN}', file=out)
+    return EXIT_REPORT
