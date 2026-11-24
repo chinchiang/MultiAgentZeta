@@ -66,22 +66,22 @@
   "authorization_matrix": [
     {
       "identity": "anonymous",
-      "transport": "apikey-header",
+      "transport": "apikey-header", "transport_source": "BuildRecipe auth.token_transport",
       "path": "anon API key -> /rest/v1"
     },
     {
       "identity": "owner",
-      "transport": "bearer-header",
+      "transport": "bearer-header", "transport_source": "BuildRecipe auth.token_transport",
       "path": "password grant -> bearer -> /rest/v1"
     },
     {
       "identity": "same_tenant_non_owner",
-      "transport": "bearer-header",
+      "transport": "bearer-header", "transport_source": "BuildRecipe auth.token_transport",
       "path": "password grant -> bearer -> /rest/v1"
     },
     {
       "identity": "other_tenant_user",
-      "transport": "bearer-header",
+      "transport": "bearer-header", "transport_source": "BuildRecipe auth.token_transport",
       "path": "password grant -> bearer -> /rest/v1"
     }
   ],

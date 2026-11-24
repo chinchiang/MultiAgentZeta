@@ -218,6 +218,26 @@ class PublishOpensAnIssuePerUnreviewedFinding(unittest.TestCase):
         self.assertIn('commit', str(caught.exception))
         self.assertEqual(platform.created, [])
 
+    def test_a_finding_without_what_the_issue_and_the_item_need_opens_no_issue(self):
+        # 〈定義：核心資料物件與相依紀錄〉 FindingRecord: publish reads these fields; a report without one is refused
+        # before the first issue, not part-way through.
+        changes = {field: (lambda f, field=field: f.pop(field))
+                   for field in ('fingerprint', 'fingerprint_version', 'requirement_id', 'status')}
+        changes['an unknown field'] = lambda f: f.update(severity='critical')
+        changes['an unknown status'] = lambda f: f.update(status='open')
+        for what, change in changes.items():
+            with self.subTest(what=what):
+                platform = FakePlatform()
+                broken = valid_report()
+                broken['findings'].insert(0, copy.deepcopy(broken['findings'][0]))  # the sound one comes second
+                broken['findings'][1]['fingerprint'] = 'sha256:' + '4' * 64
+                broken['findings'][1]['id'] = 'finding-0002'
+                broken['review_summary']['approved'] += 1
+                change(broken['findings'][0])
+                with self.assertRaises(review.ReportUnusable):
+                    review.publish(empty_record(), broken, platform, self.NOW)
+                self.assertEqual(platform.created, [])
+
 
 class ControlZone(unittest.TestCase):
     """A sample source and, beside it, a control zone holding the roles record."""

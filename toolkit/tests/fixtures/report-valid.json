@@ -51,10 +51,10 @@
                       "allowed_tests": ["SHARED-READ-other-tenant"], "expiry": "2027-05-01T00:00:00Z"}}
   ],
   "authorization_matrix": [
-    {"identity": "anonymous", "transport": "apikey-header", "path": "anon API key -> /rest/v1"},
-    {"identity": "owner", "transport": "bearer-header", "path": "password grant -> bearer -> /rest/v1"},
-    {"identity": "same_tenant_non_owner", "transport": "bearer-header", "path": "password grant -> bearer -> /rest/v1"},
-    {"identity": "other_tenant_user", "transport": "bearer-header", "path": "password grant -> bearer -> /rest/v1"}
+    {"identity": "anonymous", "transport": "apikey-header", "transport_source": "BuildRecipe auth.token_transport", "path": "anon API key -> /rest/v1"},
+    {"identity": "owner", "transport": "bearer-header", "transport_source": "BuildRecipe auth.token_transport", "path": "password grant -> bearer -> /rest/v1"},
+    {"identity": "same_tenant_non_owner", "transport": "bearer-header", "transport_source": "BuildRecipe auth.token_transport", "path": "password grant -> bearer -> /rest/v1"},
+    {"identity": "other_tenant_user", "transport": "bearer-header", "transport_source": "BuildRecipe auth.token_transport", "path": "password grant -> bearer -> /rest/v1"}
   ],
   "execution_records": [
     {"schema_version": "1", "run_id": "run-20261101-0001", "id": "exec-0001", "created_at": "2026-11-01T10:00:01Z",
