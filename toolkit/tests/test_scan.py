@@ -822,8 +822,8 @@ class RequiredInputs(unittest.TestCase):
                     handed over; the list is read only from the control zone with its digest),
                     UnknownRequirement (a test on an unknown or pending item is not run)
       部署資訊      test_missing_deployment_information_blocks_before_start_and_names_the_gap (build method,
-                    external services; environment variable names, test substitute services and marking
-                    the environment differences are not covered yet)
+                    external services, environment variable names, test substitute services);
+                    test_e1.DeploymentInformation (their shape, and the environment differences they give)
       測試身分      UnsupportedIdentity (an identity the BuildRecipe lacks is a coverage gap, for each of the four
                     v0.1 identities and on every path that blocks the run once the recipe is read; the kinds of
                     identity TK-IDN-001 names and no v0.1 run has are listed in every report)
@@ -887,10 +887,13 @@ class RequiredInputs(unittest.TestCase):
             self.assertEqual(rep['stages'][0], {'stage': 'preflight', 'status': 'completed'})
 
     def test_missing_deployment_information_blocks_before_start_and_names_the_gap(self):
-        # 部署資訊: 建置方式 (source_build) and 外部相依服務 (service_init.services). The handling's 受阻項目 is
-        # covered: nothing starts and the reason names the missing part. Its 環境差異 is not: see the mapping above.
+        # 部署資訊: 建置方式 (source_build), 外部相依服務 (service_init.services), 環境變數名稱
+        # (deployment.environment_variables) and 測試替代服務 (deployment.test_substitutes). Nothing starts and
+        # the reason names the missing part; the 環境差異 they give when present is in test_e1.DeploymentInformation.
         for step, setting in (('source_build', None), ('source_build', 'tools'),
-                              ('service_init', None), ('service_init', 'services')):
+                              ('service_init', None), ('service_init', 'services'),
+                              ('deployment', None), ('deployment', 'environment_variables'),
+                              ('deployment', 'test_substitutes')):
             with self.subTest(step=step, setting=setting):
                 def remove(r, step=step, setting=setting):
                     if setting:

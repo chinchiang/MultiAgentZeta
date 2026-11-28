@@ -76,6 +76,7 @@ def full_recipe():
     recipe['test_data']['related_resources'] = []  # the values that reach database commands have a shape
     recipe['auth']['identities'] = []
     recipe['test_data'].update(accounts=[], seed='supabase/seed.sql', synthetic_statement=dict(STATEMENT))
+    recipe['deployment'] = {'environment_variables': [], 'test_substitutes': []}  # 部署資訊: none needed
     return recipe
 
 
@@ -827,6 +828,68 @@ class ResetWithoutRecovery(unittest.TestCase):
         result = e1.reset(env)
         self.assertEqual((type(result), result.step), (e1.Blocked, 'snapshot_reset'))
         self.assertIn('no reset', result.reason)
+
+
+class DeploymentInformation(unittest.TestCase):
+    """〈定義：必要輸入〉 部署資訊 (TK-SCP-002): the names of the environment variables and the test substitutes are
+    stated in the recipe, and what they say about the stack becomes a known difference."""
+
+    def blocked(self, change):
+        recipe = full_recipe()
+        change(recipe)
+        with tempfile.TemporaryDirectory() as d:
+            write_recipe(d, recipe)
+            return e1.prepare(Path(d))
+
+    def test_each_part_is_required_even_when_there_is_nothing_to_list(self):
+        for part in ('environment_variables', 'test_substitutes'):
+            with self.subTest(part=part):
+                result = self.blocked(lambda r: r['deployment'].pop(part))
+                self.assertEqual((type(result), result.step), (e1.Blocked, 'recipe'))
+                self.assertIn(f'deployment.{part}', result.reason)
+        result = self.blocked(lambda r: r.pop('deployment'))
+        self.assertEqual(result.step, 'recipe')
+        self.assertIn('deployment', result.reason)
+
+    def test_an_environment_variable_is_a_name_never_a_value(self):
+        for value in (['API_KEY=sk-live-123'], ['STRIPE KEY'], ['sk-live-123'], [''], [7], 'API_KEY', None):
+            with self.subTest(value=value):
+                result = self.blocked(lambda r: r['deployment'].update(environment_variables=value))
+                self.assertEqual((type(result), result.step), (e1.Blocked, 'recipe'))
+                self.assertIn('names only', result.reason)
+                self.assertNotIn('sk-live-123', result.reason + result.detail)  # nothing that looks like a value is echoed
+
+    def test_names_and_substitutes_in_shape_are_accepted(self):
+        result = self.blocked(lambda r: r['deployment'].update(
+            environment_variables=['NEXT_PUBLIC_SUPABASE_URL', 'STRIPE_SECRET_KEY'],
+            test_substitutes=[{'service': 'stripe', 'substitute': 'stripe-mock'}]))
+        self.assertNotEqual(result.step, 'recipe')  # it stops later, at the source check
+
+    def test_a_substitute_names_its_service_and_what_replaces_it(self):
+        for value in (['stripe-mock'], [{'service': 'stripe'}], [{'service': 'stripe', 'substitute': ''}], 'stripe-mock'):
+            with self.subTest(value=value):
+                result = self.blocked(lambda r: r['deployment'].update(test_substitutes=value))
+                self.assertEqual((type(result), result.step), (e1.Blocked, 'recipe'))
+                self.assertIn('test_substitutes', result.reason)
+
+    def test_what_is_declared_becomes_a_known_difference(self):
+        recipe = full_recipe()
+        self.assertEqual(e1.deployment_differences(recipe), [])
+        recipe['deployment'] = {'environment_variables': ['STRIPE_SECRET_KEY'],
+                                'test_substitutes': [{'service': 'stripe', 'substitute': 'stripe-mock'}]}
+        differences = e1.deployment_differences(recipe)
+        self.assertEqual(len(differences), 2)
+        self.assertIn('STRIPE_SECRET_KEY', differences[0])
+        self.assertIn('not set in this stack', differences[0])
+        self.assertIn('stripe-mock', differences[1])
+        self.assertIn('not verified', differences[1])
+
+    def test_the_samples_state_that_they_need_none(self):
+        for version in SAMPLE_VERSIONS:
+            with self.subTest(version=version):
+                recipe, blocked = e1.load_recipe(SAMPLES / version)
+                self.assertIsNone(blocked)
+                self.assertEqual(recipe['deployment'], {'environment_variables': [], 'test_substitutes': []})
 
 
 class TestDataMustBeSynthetic(unittest.TestCase):
