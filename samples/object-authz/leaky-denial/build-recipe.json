@@ -60,7 +60,12 @@
       "MARK-A-ALICE-SHARED",
       "MARK-A-ALICE-SHARED-TO-B",
       "MARK-B-CAROL-PRIVATE"
-    ]
+    ],
+    "synthetic_statement": {
+      "method": "written by hand for this sample: invented tenants, accounts on the reserved .test domain and notes with no real content",
+      "confirmed_by": "sample-maintainer",
+      "confirmed_at": "2026-11-04T00:00:00Z"
+    }
   },
   "auth": {
     "identities": [

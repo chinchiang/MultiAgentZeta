@@ -827,7 +827,9 @@ class RequiredInputs(unittest.TestCase):
       測試身分      UnsupportedIdentity (an identity the BuildRecipe lacks is a coverage gap, for each of the four
                     v0.1 identities and on every path that blocks the run once the recipe is read; the kinds of
                     identity TK-IDN-001 names and no v0.1 run has are listed in every report)
-      測試資料      test_missing_test_data_is_not_filled_in
+      測試資料      test_missing_test_data_is_not_filled_in; the statement that the data is synthetic, the reserved
+                    domains of the accounts, the place of the seed file and domain exceptions (TK-SBX-011,
+                    TK-SBX-012): test_e1.TestDataMustBeSynthetic
       復原方式      NoRecovery, NoRecoveryMixedPlanEnv
       執行限制      test_missing_limits_block_the_run, test_each_limit_is_required_and_no_unlimited_default_is_used,
                     test_limits_must_be_bounded

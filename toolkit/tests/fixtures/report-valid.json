@@ -14,6 +14,7 @@
   "environment": {"mode": "E1", "profile_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
                   "unsupported": [],
                   "known_differences": ["E1 local stack: no cloud network, real third-party identity or hosted-only limits; results here do not imply E2 or production (TK-ENV-007)"],
+                  "test_data": {"synthetic_statement": {"method": "written by hand for this sample", "confirmed_by": "sample-maintainer", "confirmed_at": "2026-11-04T00:00:00Z"}, "domain_exceptions": []},
                   "isolation": {"outbound": "blocked", "method": "internal-network", "host_access": ["127.0.0.1:54321 -> kong:8000", "127.0.0.1:54322 -> db:5432"], "containers_checked": ["auth", "db", "kong", "rest"], "limits": ["containers share the host kernel: container isolation is not full isolation (TK-SBX-007)"]}},
   "cleanup": {"environment": "destroyed", "leftovers": []},
   "stages": [

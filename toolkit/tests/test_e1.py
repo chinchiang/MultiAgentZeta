@@ -52,7 +52,8 @@ STEPS = {
                      'extensions'],       # 必要擴充
     'test_data': ['seed',                 # 初始狀態
                   'tenants', 'accounts', 'roles', 'sharing_exceptions',
-                  'related_resources', 'markers'],
+                  'related_resources', 'markers',
+                  'synthetic_statement'],  # 合成資料來源聲明 (TK-SBX-011)
     'auth': ['identities',                # 專用測試身分
              'token_transport',           # Cookie／標頭傳遞
              'token_refresh',             # 權杖取得與更新
@@ -74,7 +75,12 @@ def full_recipe():
     recipe = {step: {field: 'x' for field in fields} for step, fields in STEPS.items()}
     recipe['test_data']['related_resources'] = []  # the values that reach database commands have a shape
     recipe['auth']['identities'] = []
+    recipe['test_data'].update(accounts=[], seed='supabase/seed.sql', synthetic_statement=dict(STATEMENT))
     return recipe
+
+
+# TK-SBX-011: a complete statement that the test data is synthetic, as a person confirming a recipe writes it.
+STATEMENT = {'method': 'written by hand for the test', 'confirmed_by': 'recipe-author', 'confirmed_at': '2026-11-04T00:00:00Z'}
 
 
 class RecipeRequired(unittest.TestCase):
@@ -821,6 +827,127 @@ class ResetWithoutRecovery(unittest.TestCase):
         result = e1.reset(env)
         self.assertEqual((type(result), result.step), (e1.Blocked, 'snapshot_reset'))
         self.assertIn('no reset', result.reason)
+
+
+class TestDataMustBeSynthetic(unittest.TestCase):
+    """TK-SBX-011, TK-SBX-012: when the recipe is read, its test data needs the statement that it is synthetic,
+    accounts in the reserved domains and a seed file inside the source under test; otherwise test_data is
+    blocked and nothing is started (no command is run)."""
+
+    def read(self, change):
+        from unittest import mock
+        recipe = full_recipe()
+        change(recipe)
+        with tempfile.TemporaryDirectory() as d, mock.patch('subprocess.run') as run_command:
+            write_recipe(d, recipe)
+            result = e1.prepare(Path(d))
+            self.assertEqual(run_command.call_count, 0 if result.step in ('recipe', 'test_data') else run_command.call_count)
+        self.assertIsInstance(result, e1.Blocked)
+        return result
+
+    def assert_test_data_blocked(self, change, word):
+        result = self.read(change)
+        self.assertEqual(result.step, 'test_data', result)
+        self.assertIn(word, result.reason)
+        return result
+
+    def assert_test_data_accepted(self, change):
+        self.assertNotIn(self.read(change).step, ('recipe', 'test_data'))  # it stops later, at the source check
+
+    def test_a_complete_statement_reserved_accounts_and_a_seed_inside_the_source_are_accepted(self):
+        self.assert_test_data_accepted(lambda r: r['test_data'].update(accounts=['alice@tenant-a.test']))
+
+    def test_a_recipe_without_the_statement_is_incomplete(self):
+        result = self.read(lambda r: r['test_data'].pop('synthetic_statement'))
+        self.assertEqual(result.step, 'recipe')
+        self.assertIn('test_data.synthetic_statement', result.reason)
+
+    def test_each_field_of_the_statement_is_required(self):
+        for field in ('method', 'confirmed_by', 'confirmed_at'):  # 產生方式、確認者、確認時間
+            for value in (None, '', '   ', 7):
+                with self.subTest(field=field, value=value):
+                    def change(r, field=field, value=value):
+                        if value is None:
+                            del r['test_data']['synthetic_statement'][field]
+                        else:
+                            r['test_data']['synthetic_statement'][field] = value
+                    self.assertIn(field, self.assert_test_data_blocked(change, 'synthetic_statement lacks').reason)
+
+    def test_a_statement_that_is_no_object_blocks(self):
+        for value in ('synthetic', ['method'], None):
+            with self.subTest(value=value):
+                self.assert_test_data_blocked(lambda r: r['test_data'].update(synthetic_statement=value), 'synthetic_statement')
+
+    def test_every_class_of_reserved_domain_is_accepted(self):
+        for account in ('a@tenant.test', 'a@corp.example', 'a@x.invalid', 'a@dev.localhost', 'a@example.com',
+                        'a@example.net', 'a@example.org', 'a@mail.example.com', 'a@a.b.example.net',
+                        'a@sub.example.org', 'A@TENANT.TEST'):
+            with self.subTest(account=account):
+                self.assert_test_data_accepted(lambda r: r['test_data'].update(accounts=[account]))
+
+    def test_an_account_outside_the_reserved_domains_blocks(self):
+        for account in ('alice@gmail.com', 'a@example.com.evil.io', 'a@notexample.com', 'a@test.io', 'a@examplecom',
+                        'a@company.co'):
+            with self.subTest(account=account):
+                result = self.assert_test_data_blocked(lambda r: r['test_data'].update(accounts=[account]),
+                                                       'outside the reserved domains')
+                self.assertIn(account, result.reason)
+
+    def test_the_email_of_an_identity_is_checked_like_an_account(self):
+        self.assert_test_data_blocked(
+            lambda r: r['auth'].update(identities=[{'name': 'owner', 'email': 'alice@gmail.com'}]),
+            'outside the reserved domains')
+
+    EXCEPTION = {'account': 'billing@partner.io', 'reason': 'the payment sandbox only mails real domains',
+                 'confirmed_by': 'app-owner', 'confirmed_at': '2026-11-04T00:00:00Z'}
+
+    def test_a_domain_exception_exempts_the_account_it_names_and_no_other(self):
+        self.assert_test_data_accepted(lambda r: r['test_data'].update(
+            accounts=['billing@partner.io', 'a@tenant.test'], domain_exceptions=[self.EXCEPTION]))
+        result = self.assert_test_data_blocked(lambda r: r['test_data'].update(
+            accounts=['billing@partner.io', 'ops@partner.io'], domain_exceptions=[self.EXCEPTION]),
+            'outside the reserved domains')
+        self.assertIn('ops@partner.io', result.reason)
+        self.assertNotIn('billing@partner.io', result.reason)
+
+    def test_an_incomplete_domain_exception_exempts_nothing(self):
+        for field in ('account', 'reason', 'confirmed_by', 'confirmed_at'):
+            with self.subTest(field=field):
+                exception = {k: v for k, v in self.EXCEPTION.items() if k != field}
+                result = self.assert_test_data_blocked(lambda r: r['test_data'].update(
+                    accounts=['billing@partner.io'], domain_exceptions=[exception]), 'domain_exceptions[0] lacks')
+                self.assertIn(field, result.reason)
+        self.assert_test_data_blocked(lambda r: r['test_data'].update(domain_exceptions='billing@partner.io'),
+                                      'domain_exceptions must be a list')
+
+    def test_a_seed_file_outside_the_source_blocks_and_no_exception_waives_it(self):
+        for seed in ('../seed.sql', '/etc/passwd', 'supabase/../../seed.sql', '', '.'):
+            with self.subTest(seed=seed):
+                self.assert_test_data_blocked(lambda r: r['test_data'].update(seed=seed), 'not inside the source')
+        self.assert_test_data_blocked(lambda r: r['test_data'].update(
+            seed='../seed.sql', accounts=['billing@partner.io'], domain_exceptions=[self.EXCEPTION]),
+            'does not waive')
+
+    def test_a_seed_file_that_is_a_link_out_of_the_source_blocks(self):
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as outside:
+            (Path(outside) / 'seed.sql').write_text('select 1;', encoding='utf-8')
+            (Path(d) / 'supabase').mkdir()
+            try:
+                (Path(d) / 'supabase' / 'seed.sql').symlink_to(Path(outside) / 'seed.sql')
+            except OSError:
+                self.skipTest('symbolic links are not available here')
+            write_recipe(d, full_recipe())
+            result = e1.prepare(Path(d))
+        self.assertEqual((type(result), result.step), (e1.Blocked, 'test_data'))
+        self.assertIn('not inside the source', result.reason)
+
+    def test_the_samples_state_that_their_data_is_synthetic(self):
+        for version in SAMPLE_VERSIONS:
+            with self.subTest(version=version):
+                recipe, blocked = e1.load_recipe(SAMPLES / version)
+                self.assertIsNone(blocked)
+                self.assertEqual(sorted(recipe['test_data']['synthetic_statement']), ['confirmed_at', 'confirmed_by', 'method'])
+                self.assertNotIn('domain_exceptions', recipe['test_data'])
 
 
 class RecipeValuesInDatabaseCommands(unittest.TestCase):

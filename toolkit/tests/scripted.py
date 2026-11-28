@@ -137,7 +137,10 @@ def prepare_with(world, api_keys=None, reset_fails=False, unsupported=(), known_
                'known_differences': list(known_differences),
                'isolation': {'outbound': 'blocked', 'method': 'internal-network',
                              'host_access': ['127.0.0.1:54321 -> kong:8000'], 'containers_checked': ['db', 'kong'],
-                             'limits': ['containers share the host kernel']}}
+                             'limits': ['containers share the host kernel']},
+               'test_data': {'synthetic_statement': {'method': 'scripted', 'confirmed_by': 'tests',
+                                                     'confirmed_at': '2026-11-04T00:00:00Z'},
+                             'domain_exceptions': []}}
 
     def prepare(project_dir):
         env = environment.Operations(handles(api_keys), Transport(world), lifecycle)

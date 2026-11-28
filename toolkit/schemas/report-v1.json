@@ -158,13 +158,33 @@
     "environment": {
       "description": "〈定義：核心資料物件與相依紀錄〉 EnvironmentProfile summary for this run (TK-SCP-001, TK-ENV-007, TK-EVD-005): the environment mode, the digest of the full profile, any versions outside the support matrix, the known differences from E2 or production, and the isolation checked after the stack started (〈定義：E1 隔離〉, TK-SBX-004, TK-ENV-008).",
       "type": "object",
-      "required": ["mode", "profile_digest", "unsupported", "known_differences", "isolation"],
+      "required": ["mode", "profile_digest", "unsupported", "known_differences", "isolation", "test_data"],
       "additionalProperties": false,
       "properties": {
         "mode": {"enum": ["E0", "E1", "E2"]},
         "profile_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
         "unsupported": {"type": "array", "items": {"$ref": "#/$defs/text"}},
         "known_differences": {"type": "array", "items": {"$ref": "#/$defs/text"}},
+        "test_data": {
+          "description": "TK-SBX-011, TK-SBX-012: the statement that the test data is synthetic (the confirmer's, never inferred by the tool) and the domain exceptions a person confirmed. A domain exception is approved by one person until second-person approval exists (TK-REQ-014).",
+          "type": "object", "additionalProperties": false,
+          "required": ["synthetic_statement", "domain_exceptions"],
+          "properties": {
+            "synthetic_statement": {
+              "type": "object", "additionalProperties": false,
+              "required": ["method", "confirmed_by", "confirmed_at"],
+              "properties": {"method": {"$ref": "#/$defs/text"}, "confirmed_by": {"$ref": "#/$defs/text"},
+                             "confirmed_at": {"$ref": "#/$defs/text"}}
+            },
+            "domain_exceptions": {
+              "type": "array",
+              "items": {"type": "object", "additionalProperties": false,
+                        "required": ["account", "reason", "confirmed_by", "confirmed_at"],
+                        "properties": {"account": {"$ref": "#/$defs/text"}, "reason": {"$ref": "#/$defs/text"},
+                                       "confirmed_by": {"$ref": "#/$defs/text"}, "confirmed_at": {"$ref": "#/$defs/text"}}}
+            }
+          }
+        },
         "isolation": {
           "description": "〈定義：E1 隔離〉: a run only gets an environment whose stack passed the checks, so outbound is always blocked here; limits says what the isolation does not cover (TK-EVD-014).",
           "type": "object",
