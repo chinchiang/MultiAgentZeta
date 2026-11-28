@@ -13,6 +13,10 @@
     },
     "download_policy": "service images only from the tags pinned by the supabase-cli version in the support matrix"
   },
+  "deployment": {
+    "environment_variables": [],
+    "test_substitutes": []
+  },
   "service_init": {
     "services": [
       "db",

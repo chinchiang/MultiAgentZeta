@@ -105,12 +105,44 @@ def _step(name, action, *args):
 
 # --- recipe and source ----------------------------------------------------------
 
+# 〈定義：必要輸入〉 部署資訊, besides the build method (source_build) and the external services
+# (service_init.services): the names of the environment variables the application needs, never their values,
+# and the test substitutes of its external services. Both are stated, as an empty list when there are none.
+DEPLOYMENT = ('environment_variables', 'test_substitutes')
+SUBSTITUTE_FIELDS = ('service', 'substitute')
+
+
+def deployment_problem(recipe):
+    """Why the deployment information of a recipe cannot be used, or None. A name of an environment variable is
+    a name: anything with a value in it is refused, so that no secret is written into a recipe (TK-IDN-005)."""
+    deployment = recipe['deployment']
+    names = deployment['environment_variables']
+    if not _is_list_of(_NAME, names):
+        return ('deployment.environment_variables must list variable names only (letters, digits and underscores): '
+                'a recipe never holds a value')
+    substitutes = deployment['test_substitutes']
+    if not (isinstance(substitutes, list) and all(
+            isinstance(s, dict) and all(_filled(s.get(f)) for f in SUBSTITUTE_FIELDS) for s in substitutes)):
+        return 'deployment.test_substitutes must list objects with ' + ' and '.join(SUBSTITUTE_FIELDS)
+    return None
+
+
+def deployment_differences(recipe):
+    """〈定義：必要輸入〉 部署資訊 標示環境差異: what the E1 stack does not give the application, from what its recipe
+    declares. The stack runs no application process, so no declared variable is set in it."""
+    deployment = recipe['deployment']
+    return [f'environment variable {name} is declared by the application and is not set in this stack: what '
+            f'depends on it is not exercised' for name in deployment['environment_variables']] + [
+            f'external service {s["service"]} is replaced by the test substitute {s["substitute"]}: its real '
+            f'behaviour is not verified' for s in deployment['test_substitutes']]
+
+
 def recipe_problems(recipe):
     """Missing steps and settings of a BuildRecipe, as 'step' or 'step.setting'."""
     if not isinstance(recipe, dict):
         return ['recipe must be a JSON object']
     problems = []
-    for step, settings in RECIPE_STEPS.items():
+    for step, settings in {**RECIPE_STEPS, 'deployment': DEPLOYMENT}.items():
         if not isinstance(recipe.get(step), dict):
             problems.append(step)
             continue
@@ -222,6 +254,9 @@ def load_recipe(project_dir):
     problem = sql_value_problem(recipe)
     if problem:
         return None, Blocked(*problem)
+    problem = deployment_problem(recipe)
+    if problem:
+        return None, Blocked('recipe', problem)
     problem = test_data_problem(project_dir, recipe)
     if problem:
         return None, Blocked('test_data', problem)
@@ -718,7 +753,11 @@ def _profile(env, tools, matrix, health):
                       'domain_exceptions': [{f: e[f] for f in EXCEPTION_FIELDS}
                                             for e in env.recipe['test_data'].get('domain_exceptions', [])]},
         'unsupported': unsupported,
-        'known_differences': [f'service disabled in this stack: {d}' for d in disabled] + [
+        'deployment': {'environment_variables': list(env.recipe['deployment']['environment_variables']),
+                       'test_substitutes': [{f: s[f] for f in SUBSTITUTE_FIELDS}
+                                            for s in env.recipe['deployment']['test_substitutes']]},
+        # 〈定義：必要輸入〉 部署資訊: what the E1 stack does not give the application, as the recipe declares it
+        'known_differences': [f'service disabled in this stack: {d}' for d in disabled] + deployment_differences(env.recipe) + [
             'E1 local stack: no cloud network, real third-party identity or hosted-only limits; '
             'results here do not imply E2 or production (TK-ENV-007)',
         ],
