@@ -180,7 +180,28 @@ def sql_value_problem(recipe):
     emails = [i['email'] for i in identities if i.get('email')]
     if not _is_list_of(_EMAIL, emails):
         return 'auth', 'an identity email must be a plain email address without quotes or spaces'
+    unstated = [i['name'] for i in identities if i.get('email') and not (isinstance(i.get('login'), str) and i['login'].strip())]
+    if unstated:  # 〈定義：認證與登入方式〉: the way an identity logs in is stated, never guessed
+        return 'auth', f'identities {", ".join(unstated)} do not state how they log in (login); it is not guessed'
     return None
+
+
+# 〈定義：認證與登入方式〉 (TK-ENV-005): the one way of logging in this version automates, in the E1 stack's own
+# auth service. Every other way (SSO, OAuth, multi-factor, anything by hand) needs a person: the identity
+# is blocked, and no other identity or way of logging in stands in for it.
+AUTOMATED_LOGIN = 'password'
+UNVERIFIED_AUTHENTICATION = (
+    'authentication goes through the local auth service of the E1 stack by password: the production identity '
+    "provider's SSO or OAuth configuration, multi-factor authentication and third-party identities are not "
+    'verified (TK-ENV-005)')
+
+
+def login_problem(identity):
+    """Why an identity of the recipe is not logged in by the toolkit, or None (TK-ENV-005)."""
+    if 'email' not in identity or identity['login'] == AUTOMATED_LOGIN:
+        return None
+    return (f'login {identity["login"]!r} needs a person or is not automated in this version; the identity is not '
+            f'logged in and nothing stands in for it')
 
 
 # TK-SBX-012 [R59]: the names reserved for testing and documentation, where no real mailbox can exist.
@@ -605,8 +626,11 @@ def _login(env, name, email, password):
 
 
 def _check_auth(env):
+    """Log in every identity whose login this version automates. Resetting the password of a test account is
+    provisioning that identity's own credential on synthetic data; no control of the application is changed
+    (〈定義：認證與登入方式〉)."""
     for ident in env.recipe['auth']['identities']:
-        if ident.get('email'):
+        if ident.get('email') and not login_problem(ident):
             _open_session(env, ident['name'], ident['email'])
 
 
@@ -629,10 +653,11 @@ def relogin(env, name):
     """〈定義：故障注入〉 影響限於該案例: give an identity whose session a fault ended a new one. Returns Blocked when
     it cannot; the identity then has no session at all, so a later case that needs it is blocked at its identity
     check instead of running with a session nobody can vouch for."""
-    email = next((i.get('email') for i in env.recipe['auth']['identities'] if i['name'] == name), None)
+    identity = next((i for i in env.recipe['auth']['identities'] if i['name'] == name), {})
+    email = identity.get('email')
     env.tokens.pop(name, None)
-    if not email:
-        return None  # an anonymous identity has no session to give back
+    if not email or login_problem(identity):
+        return None  # an anonymous identity, or one the toolkit does not log in, has no session to give back
     try:
         _step('auth', _open_session, env, name, email)
     except _Stop as stop:
@@ -720,6 +745,10 @@ def _profile(env, tools, matrix, health):
     identities = {}
     for ident in env.recipe['auth']['identities']:
         name = ident['name']
+        if login_problem(ident):  # TK-ENV-005: blocked, with its reason; no path is claimed for it
+            identities[name] = {'path': f'not logged in: login {ident["login"]!r} is not automated', 'login': 'blocked',
+                                'account': ident['email'], 'reason': login_problem(ident)}
+            continue
         identities[name] = ({'path': ANON_PATH, 'login': 'none'} if 'email' not in ident
                             else {'path': USER_PATH, 'login': 'ok', 'account': ident['email']})
     unsupported = []
@@ -758,6 +787,7 @@ def _profile(env, tools, matrix, health):
                                             for s in env.recipe['deployment']['test_substitutes']]},
         # 〈定義：必要輸入〉 部署資訊: what the E1 stack does not give the application, as the recipe declares it
         'known_differences': [f'service disabled in this stack: {d}' for d in disabled] + deployment_differences(env.recipe) + [
+            UNVERIFIED_AUTHENTICATION,
             'E1 local stack: no cloud network, real third-party identity or hosted-only limits; '
             'results here do not imply E2 or production (TK-ENV-007)',
         ],

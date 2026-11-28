@@ -502,6 +502,47 @@ class AFaultIsUndoneForTheNextCase(unittest.TestCase):
         self.assertEqual(rep['findings'], [])
 
 
+class AnIdentityThatIsNotLoggedIn(unittest.TestCase):
+    """TK-ENV-005, 〈定義：認證與登入方式〉: a test that needs an identity the environment did not log in is blocked,
+    named with the reason; nothing is sent for it and no other identity takes its place."""
+
+    def run_with_blocked(self, name):
+        m = cases(('READ-same-tenant', 'SAME', {}), ('READ-other-tenant', 'OTHER', {}))
+        world = scripted.World(attempt=(403, None))
+        prepare, _ = scripted.prepare_with(world)
+
+        def prepared(project_dir):
+            ready = prepare(project_dir)
+            ready.profile['identities'][name] = {'path': "not logged in: login 'sso' is not automated", 'login': 'blocked',
+                                                 'account': 'x@tenant-a.test',
+                                                 'reason': "login 'sso' needs a person or is not automated"}
+            ready.env._env.tokens.pop(name, None)
+            return ready
+        rep = scan.run(m, prepare=prepared).report
+        self.assertEqual(report.validate(rep), [])
+        return rep, {e['test_id']: e for e in rep['execution_records']}, world
+
+    def test_the_tests_of_the_blocked_actor_are_blocked_and_the_others_run(self):
+        rep, by_id, world = self.run_with_blocked('same_tenant_non_owner')
+        self.assertEqual((by_id['SAME']['result'], by_id['OTHER']['result']), ('blocked', 'passed'))
+        self.assertIn('same_tenant_non_owner', by_id['SAME']['error'])
+        self.assertIn("'sso'", by_id['SAME']['error'])
+        self.assertEqual(by_id['SAME']['evidence'], [])  # nothing was sent in its name or in anyone else's
+        self.assertEqual(rep['status'], 'partial')
+        self.assertFalse([h for _, _, h, _ in world.http_calls if 'token-same_tenant_non_owner' in h.get('Authorization', '')])
+
+    def test_a_blocked_owner_blocks_every_denial_case_that_needs_its_control(self):
+        _, by_id, world = self.run_with_blocked('owner')
+        self.assertEqual({e['result'] for e in by_id.values()}, {'blocked'})
+        self.assertEqual(world.http_calls, [])
+
+    def test_the_identity_shows_without_a_transport_in_the_matrix(self):
+        rep, _, _ = self.run_with_blocked('same_tenant_non_owner')
+        row = next(m for m in rep['authorization_matrix'] if m['identity'] == 'same_tenant_non_owner')
+        self.assertEqual(row['transport'], 'none')
+        self.assertIn('not logged in', row['path'])
+
+
 class FaultsAreForSelfValidationRunsOnly(unittest.TestCase):
     """〈定義：故障注入〉 (TK-VAL-001): a scan injects nothing; a ScanManifest cannot make a run a self-validation run."""
 
