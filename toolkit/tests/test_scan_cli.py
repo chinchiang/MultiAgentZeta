@@ -47,7 +47,7 @@ class CommandLine(unittest.TestCase):
         m, world = passing_read()
         code, out, err, _ = self.run_main(m, world)
         self.assertEqual((code, err), (0, ''))
-        self.assertEqual(self.written(), ['report.json', 'report.md'])
+        self.assertEqual(self.written(), ['report.json', 'report.md', 'seal.json'])
         doc = json.loads((self.out / 'report.json').read_text(encoding='utf-8'))
         self.assertEqual(report.validate(doc), [])
         self.assertEqual((self.out / 'report.md').read_text(encoding='utf-8'), report.render_markdown(doc))  # TK-EVD-003
@@ -173,6 +173,38 @@ class CommandLine(unittest.TestCase):
         self.assertIn('no report was written', err)
         self.assertEqual(self.written(), [])
         self.assertEqual(lifecycle.calls, ['destroy'])
+
+    def test_the_report_is_sealed_and_a_later_change_is_noticed(self):
+        # TK-DAT-009 封存: the digests of the report files are recorded, the files are read-only.
+        import os
+        import stat
+        m, world = passing_read()
+        code, out, _, _ = self.run_main(m, world)
+        self.assertEqual(code, 0)
+        self.assertIn(str(self.out / 'seal.json'), out)
+        self.assertEqual(scan.seal_problems(self.out), [])
+        for name in ('report.json', 'report.md', 'seal.json'):
+            self.assertFalse(stat.S_IMODE(os.stat(self.out / name).st_mode) & 0o222, name)
+        sealed = json.loads((self.out / 'seal.json').read_text(encoding='utf-8'))
+        self.assertEqual(sorted(sealed['files']), ['report.json', 'report.md'])
+        os.chmod(self.out / 'report.md', 0o644)
+        (self.out / 'report.md').write_text('rewritten', encoding='utf-8')
+        self.assertEqual(scan.seal_problems(self.out), ['report.md was changed after it was sealed'])
+        os.chmod(self.out / 'report.json', 0o644)
+        (self.out / 'report.json').unlink()
+        self.assertIn('report.json is missing', scan.seal_problems(self.out))
+
+    def test_a_directory_without_a_seal_is_not_taken_for_sealed(self):
+        self.out.mkdir()
+        self.assertEqual(scan.seal_problems(self.out), ['seal.json is missing or unreadable'])
+
+    def test_an_earlier_seal_is_not_overwritten_either(self):
+        self.out.mkdir()
+        (self.out / 'seal.json').write_text('{}', encoding='utf-8')
+        m, world = passing_read()
+        code, _, err, _ = self.run_main(m, world)
+        self.assertEqual(code, 2)
+        self.assertIn('seal.json', err)
 
     def test_a_fault_is_taken_only_with_the_self_validation_flag(self):
         m, world = passing_read()

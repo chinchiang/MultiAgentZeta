@@ -502,6 +502,67 @@ class AFaultIsUndoneForTheNextCase(unittest.TestCase):
         self.assertEqual(rep['findings'], [])
 
 
+class TheEvidencePackageOfARun(unittest.TestCase):
+    """TK-EVD-001, TK-EVD-005: the report a run makes states its evidence package and its scope."""
+
+    def test_a_run_with_a_finding_misses_only_the_fix_suggestion(self):
+        rep, _, _ = run(one_case('READ-other-tenant'), scripted.World(attempt=(200, [{'title': 'MARK-A-ALICE-PRIVATE', 'body': 'b'}])))
+        status = {i['item']: i['status'] for i in rep['evidence_package']}
+        self.assertEqual([k for k, v in status.items() if v == 'missing'], ['fix_and_regression'])
+        self.assertEqual(rep['evidence_package'], report.evidence_package(rep))
+
+    def test_a_run_without_a_finding_misses_nothing(self):
+        rep, _, _ = run(one_case('READ-other-tenant'), scripted.World(attempt=(403, None)))
+        self.assertEqual([i['item'] for i in rep['evidence_package'] if i['status'] == 'missing'], [])
+        self.assertNotIn('證據包有缺件', report.render_markdown(rep))
+
+    def test_a_run_blocked_before_the_environment_says_what_it_does_not_hold(self):
+        m = one_case('READ-other-tenant')
+        m['target']['source_digest'] = 'sha256:' + '0' * 64
+        rep = scan.run(m).report
+        missing = {i['item'] for i in rep['evidence_package'] if i['status'] == 'missing'}
+        self.assertLessEqual({'container_image_digests', 'environment_differences', 'identity_references',
+                              'synthetic_data_version', 'requests_and_responses'}, missing)
+        self.assertIn('證據包有缺件', report.render_markdown(rep))
+
+    def test_the_report_names_the_toolkit_version_and_the_scope_of_the_manifest(self):
+        import toolkit
+        m = one_case('READ-other-tenant')
+        rep, _, _ = run(m, scripted.World(attempt=(403, None)))
+        self.assertEqual(rep['toolkit_version'], toolkit.__version__)
+        self.assertEqual(rep['scope']['allowed_operations'], m['scope']['allowed_operations'])
+        self.assertEqual(rep['scope']['resources'], [r['name'] for r in m['scope']['resources']])
+        self.assertEqual(rep['environment']['seed_version'], 'scripted-1')
+        self.assertEqual([i['service'] for i in rep['environment']['service_images']], ['db'])
+
+    def test_a_manifest_without_a_readable_scope_gives_a_report_without_one(self):
+        m = one_case('READ-other-tenant')
+        m['scope'] = 'everything'
+        rep = scan.run(m).report
+        self.assertEqual(report.validate(rep), [])
+        self.assertNotIn('scope', rep)
+        self.assertIn('沒有可讀取的受測範圍', report.render_markdown(rep))
+
+
+class TheEvidenceARunKeeps(unittest.TestCase):
+    """TK-DAT-009: the evidence of a run comes out as references whose digests match their content."""
+
+    def test_every_piece_of_evidence_is_a_reference_with_a_matching_digest(self):
+        m = cases(('UPDATE-other-tenant', 'WRITE', {}), ('PUBLIC-READ-same-tenant', 'ALLOWED', {}),
+                  ('READ-other-tenant', 'FAULTED', {'fault': 'session-revoked'}))
+        rep, by_id, _ = run(m, scripted.World(attempt=(403, None)))
+        evidence = [ev for e in rep['execution_records'] for ev in e['evidence']]
+        self.assertGreater(len(evidence), 5)
+        self.assertEqual(report.changed_evidence(rep), [])
+        self.assertEqual({ev['type'] for ev in evidence}, {'request_response', 'observation'})
+        for ev in evidence:
+            self.assertEqual(ev['type'], 'observation' if ev['channel'] == 'observer' else 'request_response')
+            self.assertRegex(ev['captured_at'], r'^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d')
+        times = [ev['captured_at'] for ev in by_id['WRITE']['evidence']]
+        self.assertEqual(times, sorted(times))  # captured in the order the case made them
+        self.assertTrue(by_id['FAULTED']['evidence'][0]['injection'])
+
+
 class AnIdentityThatIsNotLoggedIn(unittest.TestCase):
     """TK-ENV-005, 〈定義：認證與登入方式〉: a test that needs an identity the environment did not log in is blocked,
     named with the reason; nothing is sent for it and no other identity takes its place."""

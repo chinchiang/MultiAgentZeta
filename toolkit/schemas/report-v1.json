@@ -24,7 +24,8 @@
     }
   ],
   "required": ["status", "manifest", "stages", "requirements", "authorization_matrix", "execution_records", "findings",
-               "coverage", "limits", "source_changes", "review_record", "review_summary"],
+               "coverage", "limits", "source_changes", "review_record", "review_summary", "toolkit_version",
+               "evidence_package"],
   "unevaluatedProperties": false,
   "properties": {
     "limits": {
@@ -158,13 +159,20 @@
     "environment": {
       "description": "〈定義：核心資料物件與相依紀錄〉 EnvironmentProfile summary for this run (TK-SCP-001, TK-ENV-007, TK-EVD-005): the environment mode, the digest of the full profile, any versions outside the support matrix, the known differences from E2 or production, and the isolation checked after the stack started (〈定義：E1 隔離〉, TK-SBX-004, TK-ENV-008).",
       "type": "object",
-      "required": ["mode", "profile_digest", "unsupported", "known_differences", "isolation", "test_data"],
+      "required": ["mode", "profile_digest", "unsupported", "known_differences", "isolation", "test_data", "seed_version", "service_images"],
       "additionalProperties": false,
       "properties": {
         "mode": {"enum": ["E0", "E1", "E2"]},
         "profile_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
         "unsupported": {"type": "array", "items": {"$ref": "#/$defs/text"}},
         "known_differences": {"type": "array", "items": {"$ref": "#/$defs/text"}},
+        "seed_version": {"description": "TK-EVD-001: the version of the synthetic test data, from the BuildRecipe.", "type": "string"},
+        "service_images": {
+          "description": "TK-EVD-001: each service of the stack with the image it ran and that image's content digest (empty when Docker reports none).",
+          "type": "array",
+          "items": {"type": "object", "additionalProperties": false, "required": ["service", "image", "digest"],
+                    "properties": {"service": {"$ref": "#/$defs/text"}, "image": {"type": "string"}, "digest": {"type": "string"}}}
+        },
         "test_data": {
           "description": "TK-SBX-011, TK-SBX-012: the statement that the test data is synthetic (the confirmer's, never inferred by the tool) and the domain exceptions a person confirmed. A domain exception is approved by one person until second-person approval exists (TK-REQ-014).",
           "type": "object", "additionalProperties": false,
@@ -248,6 +256,23 @@
     "self_validation": {
       "description": "〈定義：故障注入〉 (TK-VAL-001): present, and true, on a run of the toolkit's own acceptance. Only such a run has execution records with a fault.",
       "const": true
+    },
+    "toolkit_version": {"description": "TK-EVD-001: the version of the toolkit that made this report.", "$ref": "#/$defs/text"},
+    "scope": {
+      "description": "TK-EVD-005 範圍: the scope the ScanManifest states. Absent when the ScanManifest gave none that could be read.",
+      "type": "object", "additionalProperties": false,
+      "required": ["endpoints", "resources", "allowed_operations", "data_scope"],
+      "properties": {"endpoints": {"type": "array", "items": {"$ref": "#/$defs/text"}},
+                     "resources": {"type": "array", "items": {"$ref": "#/$defs/text"}},
+                     "allowed_operations": {"type": "array", "items": {"$ref": "#/$defs/text"}},
+                     "data_scope": {"$ref": "#/$defs/text"}}
+    },
+    "evidence_package": {
+      "description": "〈定義：最低證據包的項目〉 (TK-EVD-001): every item of the minimum evidence package with whether this report holds it: present 具備, missing 缺件, not_applicable 不適用, each with where it is or why it is not. report.validate() recomputes it from the report.",
+      "type": "array", "minItems": 1,
+      "items": {"type": "object", "additionalProperties": false, "required": ["item", "status", "note"],
+                "properties": {"item": {"$ref": "#/$defs/text"}, "status": {"enum": ["present", "missing", "not_applicable"]},
+                               "note": {"$ref": "#/$defs/text"}}}
     },
     "environment_build": {
       "description": "〈定義：環境建置的量測〉 (TK-ENV-006): what the preparation of the environment and its resets attempted and completed, each part counted on its own and authentication per test identity. Present whenever the environment was asked for. A part with no attempt was not reached. These numbers are not part of any coverage or detection rate.",
@@ -424,9 +449,14 @@
     "evidence": {
       "description": "One piece of evidence and the channel it was obtained through (TK-IDN-008): actor = a request made as an actor identity through the application's real path; observer = state read by the read-only observer role.",
       "type": "object",
-      "required": ["id", "channel", "identity_ref"],
+      "required": ["id", "channel", "identity_ref", "digest", "type", "captured_at", "source", "access_level"],
       "properties": {
         "id": {"$ref": "#/$defs/text"},
+        "digest": {"description": "TK-DAT-009: content digest of this evidence without its id and digest. It helps to notice changed bytes; it does not prove where the evidence came from.", "type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "type": {"description": "TK-DAT-009: request_response 請求與回應, observation 觀測.", "enum": ["request_response", "observation"]},
+        "captured_at": {"$ref": "#/$defs/text"},
+        "source": {"$ref": "#/$defs/text"},
+        "access_level": {"description": "TK-DAT-009, TK-EVD-002: restricted 限制存取.", "enum": ["restricted"]},
         "channel": {"enum": ["actor", "observer"]},
         "identity_ref": {"$ref": "#/$defs/text"},
         "point": {

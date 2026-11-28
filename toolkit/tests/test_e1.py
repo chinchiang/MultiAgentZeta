@@ -262,6 +262,19 @@ class PrepareVulnerableEnv(unittest.TestCase):
         self.assertEqual(tracked, '')  # no file of the project was edited (config.toml, migrations, seed)
         self.assertEqual({i['login'] for i in self.profile['identities'].values()}, {'ok', 'none'})
 
+    def test_the_test_credentials_are_short_lived_and_stay_out_of_the_profile(self):
+        # TK-SEC-009: each session says how long it lives, and no token is in the profile.
+        for name, identity in self.profile['identities'].items():
+            if identity['login'] == 'ok':
+                with self.subTest(identity=name):
+                    self.assertIsInstance(identity['session_expires_in_seconds'], int)
+                    self.assertGreater(identity['session_expires_in_seconds'], 0)
+                    self.assertLessEqual(identity['session_expires_in_seconds'], 24 * 3600)
+        text = json.dumps(self.profile)
+        for tokens in self.result.env.tokens.values():
+            self.assertNotIn(tokens['access_token'], text)
+            self.assertNotIn(tokens['refresh_token'], text)
+
     def test_the_stack_reaches_nothing_outside_by_address_or_by_name(self):
         # TK-SBX-004 negative case, from inside the application's own container. The control is a container on
         # Docker's default network: where that one reaches the outside, the failure below is the network's doing.

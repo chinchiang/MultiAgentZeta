@@ -671,7 +671,8 @@ def _open_session(env, name, email):
                               {'apikey': env.anon_key}, {'refresh_token': tokens['refresh_token']})
     if status != 200 or 'access_token' not in (refreshed or {}):
         raise _Stop(Blocked('auth', f'{name}: token refresh failed (HTTP {status})'))
-    env.tokens[name] = {'access_token': refreshed['access_token'], 'refresh_token': refreshed['refresh_token']}
+    env.tokens[name] = {'access_token': refreshed['access_token'], 'refresh_token': refreshed['refresh_token'],
+                        'expires_in': refreshed.get('expires_in')}  # TK-SEC-009: the session's own lifetime, seconds
 
 
 def relogin(env, name):
@@ -776,7 +777,9 @@ def _profile(env, tools, matrix, health):
                                 'account': ident['email'], 'reason': login_problem(ident)}
             continue
         identities[name] = ({'path': ANON_PATH, 'login': 'none'} if 'email' not in ident
-                            else {'path': USER_PATH, 'login': 'ok', 'account': ident['email']})
+                            else {'path': USER_PATH, 'login': 'ok', 'account': ident['email'],
+                                  # TK-SEC-009: the test credential is short-lived; it lives in memory only
+                                  'session_expires_in_seconds': (env.tokens.get(name) or {}).get('expires_in')})
     unsupported = []
     if version != cli_entry['version']:
         unsupported.append(f'supabase-cli {version} (matrix {cli_entry["version"]})')
