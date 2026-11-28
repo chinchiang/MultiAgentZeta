@@ -482,6 +482,18 @@ OUTBOUND_LABELS = {'blocked': '已阻擋'}
 ISOLATION_METHOD_LABELS = {'internal-network': '內部網路：不與其他網路互通，不解析外部名稱，不發布連接埠'}
 
 
+def _test_data_lines(test_data):
+    """TK-SBX-011, TK-SBX-012: who states the test data is synthetic, and each domain exception, marked as
+    approved by one person (TK-REQ-014 is not implemented)."""
+    st = test_data['synthetic_statement']
+    lines = [f'- **合成資料來源聲明（TK-SBX-011）**：{_inline(st["method"])}；確認者 {_inline(st["confirmed_by"])}，'
+             f'{_code(st["confirmed_at"])}（資料是否為合成資料以此聲明為準，工具不自行推定）']
+    for e in test_data['domain_exceptions']:
+        lines.append(f'- **網域例外（TK-SBX-012，單人核准，尚無第二人核准）**：{_code(e["account"])}；理由：{_inline(e["reason"])}；'
+                     f'確認者 {_inline(e["confirmed_by"])}，{_code(e["confirmed_at"])}')
+    return lines
+
+
 def _isolation_lines(isolation):
     """〈定義：E1 隔離〉 as checked after the stack started (TK-SBX-004, TK-ENV-008), with what it does not cover
     (TK-EVD-014)."""
@@ -551,7 +563,7 @@ def _environment_section(env):
         lines += [f'  - {_inline(d)}' for d in env['known_differences']]
     else:
         lines.append('- **環境差異**：（無宣告差異）')
-    return lines + _isolation_lines(env['isolation'])
+    return lines + _test_data_lines(env['test_data']) + _isolation_lines(env['isolation'])
 
 
 def _limits_section(limits):

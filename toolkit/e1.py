@@ -36,7 +36,8 @@ TOOL_EXE = {'supabase-cli': 'supabase'}
 RECIPE_STEPS = {
     'source_build': ('source_digest', 'lockfiles', 'tools', 'build_commands', 'resources', 'download_policy'),
     'service_init': ('services', 'migrations', 'extensions'),
-    'test_data': ('seed', 'tenants', 'accounts', 'roles', 'sharing_exceptions', 'related_resources', 'markers'),
+    'test_data': ('seed', 'tenants', 'accounts', 'roles', 'sharing_exceptions', 'related_resources', 'markers',
+                  'synthetic_statement'),
     'auth': ('identities', 'token_transport', 'token_refresh', 'expiry_revocation_check'),
     'health': ('services_up', 'legit_operations'),
     'snapshot_reset': ('seed_version', 'reset_scope', 'reset_check', 'cleanup'),
@@ -150,6 +151,59 @@ def sql_value_problem(recipe):
     return None
 
 
+# TK-SBX-012 [R59]: the names reserved for testing and documentation, where no real mailbox can exist.
+RESERVED_TLDS = ('test', 'example', 'invalid', 'localhost')
+RESERVED_DOMAINS = ('example.com', 'example.net', 'example.org')
+STATEMENT_FIELDS = ('method', 'confirmed_by', 'confirmed_at')  # TK-SBX-011: 產生方式, 確認者, 確認時間
+EXCEPTION_FIELDS = ('account', 'reason', 'confirmed_by', 'confirmed_at')  # TK-SBX-012 網域例外
+
+
+def in_reserved_domain(email):
+    """Whether an email address is in a domain reserved for testing (TK-SBX-012)."""
+    domain = email.rpartition('@')[2].lower().rstrip('.')
+    return bool(domain) and (domain.rpartition('.')[2] in RESERVED_TLDS
+                             or any(domain == d or domain.endswith('.' + d) for d in RESERVED_DOMAINS))
+
+
+def _filled(value):
+    return isinstance(value, str) and bool(value.strip())
+
+
+def test_data_problem(project_dir, recipe):
+    """Why the test data of a recipe may not be used, or None (TK-SBX-011, TK-SBX-012): the statement that it is
+    synthetic, by a person, with every field; every test account in a reserved domain unless a complete domain
+    exception names it; the seed file inside the source under test, which no exception waives. Whether the data
+    is synthetic is the confirmer's statement, never inferred here (TK-SCP-003)."""
+    td = recipe['test_data']
+    statement = td['synthetic_statement']
+    if not isinstance(statement, dict):
+        return 'synthetic_statement must be an object with ' + ', '.join(STATEMENT_FIELDS)
+    missing = [f for f in STATEMENT_FIELDS if not _filled(statement.get(f))]
+    if missing:
+        return 'synthetic_statement lacks ' + ', '.join(missing)
+    exceptions = td.get('domain_exceptions', [])
+    if not isinstance(exceptions, list):
+        return 'domain_exceptions must be a list'
+    for i, e in enumerate(exceptions):
+        lacking = list(EXCEPTION_FIELDS) if not isinstance(e, dict) else [f for f in EXCEPTION_FIELDS if not _filled(e.get(f))]
+        if lacking:
+            return f'domain_exceptions[{i}] lacks {", ".join(lacking)}; an incomplete exception exempts nothing'
+    exempt = {e['account'] for e in exceptions}
+    accounts = td['accounts']
+    if not (isinstance(accounts, list) and all(isinstance(a, str) for a in accounts)):
+        return 'accounts must be a list of email addresses'
+    emails = accounts + [i['email'] for i in recipe['auth']['identities'] if i.get('email')]
+    outside = sorted({a for a in emails if a not in exempt and not in_reserved_domain(a)})
+    if outside:
+        return (f'test accounts outside the reserved domains: {", ".join(outside)}; use .test, .example, .invalid, '
+                f'.localhost or example.com/.net/.org, or have a person confirm a domain exception')
+    seed = td['seed']
+    root = Path(project_dir).resolve()
+    if not _filled(seed) or root not in (root / seed).resolve().parents:
+        return f'the seed file {seed!r} is not inside the source under test; a domain exception does not waive this'
+    return None
+
+
 MODE = 'E1'  # the environment mode this module provides (〈定義：測試授權紀錄〉 environment)
 
 
@@ -168,6 +222,9 @@ def load_recipe(project_dir):
     problem = sql_value_problem(recipe)
     if problem:
         return None, Blocked(*problem)
+    problem = test_data_problem(project_dir, recipe)
+    if problem:
+        return None, Blocked('test_data', problem)
     return recipe, None
 
 
@@ -655,6 +712,11 @@ def _profile(env, tools, matrix, health):
         'observer': ({'role': env.observer['role'], 'select_on': env.observer['select_on'], 'bypassrls': True}
                      if env.observer else None),
         'isolation': env.isolation,
+        # TK-SBX-011, TK-SBX-012: who says the data is synthetic, and the accounts a person let out of the
+        # reserved domains.
+        'test_data': {'synthetic_statement': {f: env.recipe['test_data']['synthetic_statement'][f] for f in STATEMENT_FIELDS},
+                      'domain_exceptions': [{f: e[f] for f in EXCEPTION_FIELDS}
+                                            for e in env.recipe['test_data'].get('domain_exceptions', [])]},
         'unsupported': unsupported,
         'known_differences': [f'service disabled in this stack: {d}' for d in disabled] + [
             'E1 local stack: no cloud network, real third-party identity or hosted-only limits; '

@@ -1549,7 +1549,7 @@ class EnvironmentInReport(unittest.TestCase):
         return doc
 
     def test_environment_schema_requires_all_four_fields_forbids_extras_and_checks_stage_presence(self):
-        for missing in ('mode', 'profile_digest', 'unsupported', 'known_differences', 'isolation'):
+        for missing in ('mode', 'profile_digest', 'unsupported', 'known_differences', 'isolation', 'test_data'):
             with self.subTest(missing=missing):
                 doc = valid_report()
                 del doc['environment'][missing]
@@ -1625,6 +1625,35 @@ class EnvironmentInReport(unittest.TestCase):
         self.assertIn('`auth`、`db`、`kong`、`rest`', md)
         self.assertIn('- **隔離未涵蓋的範圍**：', md)
         self.assertIn('shares the host kernel', md)
+        self.assertNotIn('<!--', re.sub(r'(`+).*?\1', '', md))
+
+    def test_the_test_data_record_is_required_whole(self):
+        """TK-SBX-011, TK-SBX-012 in the report."""
+        for path in (('synthetic_statement',), ('domain_exceptions',), ('synthetic_statement', 'method'),
+                     ('synthetic_statement', 'confirmed_by'), ('synthetic_statement', 'confirmed_at')):
+            with self.subTest(path=path):
+                doc = valid_report()
+                target = doc['environment']['test_data']
+                for key in path[:-1]:
+                    target = target[key]
+                del target[path[-1]]
+                self.assertTrue(any('test_data' in p for p in report.validate(doc)))
+        doc = valid_report()
+        doc['environment']['test_data']['domain_exceptions'] = [{'account': 'billing@partner.io', 'reason': 'sandbox'}]
+        self.assertNotEqual(report.validate(doc), [])
+
+    def test_markdown_shows_the_statement_and_marks_a_domain_exception_as_approved_by_one_person(self):
+        doc = valid_report()
+        md = report.render_markdown(doc)
+        self.assertIn('- **合成資料來源聲明（TK-SBX-011）**：written by hand for this sample；確認者 sample-maintainer，'
+                      '`2026-11-04T00:00:00Z`', md)
+        self.assertNotIn('網域例外', md)
+        doc['environment']['test_data']['domain_exceptions'] = [
+            {'account': 'billing@partner.io', 'reason': 'the payment sandbox <!-- only mails real domains',
+             'confirmed_by': 'app-owner', 'confirmed_at': '2026-11-04T00:00:00Z'}]
+        md = report.render_markdown(doc)
+        self.assertIn('- **網域例外（TK-SBX-012，單人核准，尚無第二人核准）**：`billing@partner.io`；理由：', md)
+        self.assertIn('確認者 app-owner', md)
         self.assertNotIn('<!--', re.sub(r'(`+).*?\1', '', md))
 
     def test_markdown_renders_known_differences_missing_environment_and_unsupported_versions_safely(self):
