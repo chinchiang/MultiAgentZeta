@@ -160,6 +160,11 @@ def manifest(version):
     }
 
 
+# Unsupported scopes every run lists (TK-EVD-008): the five surfaces no v0.1 module covers (〈定義：框架模組〉) and
+# the five kinds of identity no v0.1 run has (TK-IDN-001, 測試身分). Counted here by hand.
+FIXED_GAPS = 5 + 5
+
+
 def results(rep):
     return {e['test_id']: e['result'] for e in rep['execution_records']}
 
@@ -605,7 +610,11 @@ class UnsupportedScopes(unittest.TestCase):
 
     # The access paths of TK-DYN-004 that no v0.1 template covers yet.
     # (and the two Next.js surfaces no v0.1 module resolves: 〈定義：框架模組〉)
-    EXPECTED_SCOPES = {'rls-functions', 'rls-views', 'rls-column-privileges', 'nextjs-routes', 'nextjs-server-actions'}
+    EXPECTED_SCOPES = {'rls-functions', 'rls-views', 'rls-column-privileges', 'nextjs-routes', 'nextjs-server-actions',
+                       # TK-IDN-001: the kinds of identity no v0.1 run has, each a cell of the matrix (測試身分)
+                       'identity-kind:tenant-admin', 'identity-kind:system-or-service-identity',
+                       'identity-kind:disabled-account', 'identity-kind:revoked-authorization',
+                       'identity-kind:expired-session'}
 
     def test_unsupported_rls_scopes_are_listed_and_counted(self):
         m = manifest('vulnerable')
@@ -815,7 +824,9 @@ class RequiredInputs(unittest.TestCase):
       部署資訊      test_missing_deployment_information_blocks_before_start_and_names_the_gap (build method,
                     external services; environment variable names, test substitute services and marking
                     the environment differences are not covered yet)
-      測試身分      UnsupportedIdentity (an identity the BuildRecipe lacks is listed as a coverage gap)
+      測試身分      UnsupportedIdentity (an identity the BuildRecipe lacks is a coverage gap, for each of the four
+                    v0.1 identities and on every path that blocks the run once the recipe is read; the kinds of
+                    identity TK-IDN-001 names and no v0.1 run has are listed in every report)
       測試資料      test_missing_test_data_is_not_filled_in
       復原方式      NoRecovery, NoRecoveryMixedPlanEnv
       執行限制      test_missing_limits_block_the_run, test_each_limit_is_required_and_no_unlimited_default_is_used,
@@ -1053,7 +1064,7 @@ class UnknownRequirement(unittest.TestCase):
                         self.assertIn('does not match the rule (TK-REQ-016)', e['error'])
                     else:
                         self.assertIn('BuildRecipe', e['error'])
-            self.assertEqual(rep['coverage']['denominator'], len(TESTS) + 1 + 5)  # plus the five unsupported scopes
+            self.assertEqual(rep['coverage']['denominator'], len(TESTS) + 1 + FIXED_GAPS)
 
 
 class CaseKindMatchesItem(unittest.TestCase):
@@ -1079,7 +1090,7 @@ class CaseKindMatchesItem(unittest.TestCase):
             for test_id in ('READ-same-tenant', 'PUBLIC-READ-other-tenant'):
                 self.assertEqual(errors[test_id][0], 'blocked')
                 self.assertIn('BuildRecipe', errors[test_id][1])
-            self.assertEqual(rep['coverage']['denominator'], 4 + 5)  # plus the five unsupported scopes
+            self.assertEqual(rep['coverage']['denominator'], 4 + FIXED_GAPS)
 
 
 class ConfirmationListInScan(unittest.TestCase):
@@ -1837,11 +1848,99 @@ class UnsupportedIdentity(unittest.TestCase):
             self.assertIn('tenant_admin', e['error'])
         gaps = {u['scope'] for u in rep['coverage']['unsupported_items']}
         self.assertIn('identity:tenant_admin', gaps)
-        # The gap is an unsupported scope of the inventory, so it is in the denominator (TK-EVD-008): the five
-        # fixed scopes and the gap, besides the planned tests, all of which are unsupported.
+        # The gap is an unsupported scope of the inventory, so it is in the denominator (TK-EVD-008): the fixed
+        # scopes and the gap, besides the planned tests, all of which are unsupported.
         cov = rep['coverage']
-        self.assertEqual((cov['denominator'], cov['unsupported']), (len(TESTS) + 6, len(TESTS) + 6))
+        self.assertEqual((cov['denominator'], cov['unsupported']), (len(TESTS) + FIXED_GAPS + 1, len(TESTS) + FIXED_GAPS + 1))
         self.assertEqual((cov['valid_judgements'], cov['effective_judgement_rate']), (0, 0))
+
+    KINDS_NOT_IN_V01 = ('tenant-admin', 'system-or-service-identity', 'disabled-account', 'revoked-authorization',
+                        'expired-session')  # TK-IDN-001, written here by hand
+
+    def gaps(self, rep):
+        return {u['scope'] for u in rep['coverage']['unsupported_items']}
+
+    def test_the_identity_kinds_no_v01_run_has_are_listed_cell_by_cell_in_every_report(self):
+        import tempfile
+        blocked_early = manifest('vulnerable')
+        blocked_early['target']['source_digest'] = 'sha256:' + '0' * 64
+        with tempfile.TemporaryDirectory() as d:
+            at_the_recipe = manifest_for_recipe_change(d, lambda r: r['source_build'].update(tools=['no-such-tool']))
+            reports = {'blocked in preflight': scan.run(blocked_early).report,
+                       'blocked at the BuildRecipe': scan.run(at_the_recipe).report}
+        for name, rep in reports.items():
+            with self.subTest(run=name):
+                self.assertEqual(report.validate(rep), [])
+                for kind in self.KINDS_NOT_IN_V01:
+                    self.assertIn(f'identity-kind:{kind}', self.gaps(rep))
+                cov = rep['coverage']  # TK-EVD-008: each is in the denominator
+                self.assertEqual(cov['denominator'], len(rep['execution_records']) + len(cov['unsupported_items']))
+                self.assertEqual(cov['unsupported'], cov['denominator'] - cov['blocked'])
+
+    def test_each_of_the_four_v01_identities_removed_from_the_recipe_is_a_gap_and_the_rest_goes_on(self):
+        import tempfile
+        for removed in ('anonymous', 'owner', 'same_tenant_non_owner', 'other_tenant_user'):
+            with self.subTest(removed=removed), tempfile.TemporaryDirectory() as d:
+                def change(r, removed=removed):
+                    r['auth']['identities'] = [i for i in r['auth']['identities'] if i['name'] != removed]
+                    r['source_build'].update(tools=['no-such-tool'])  # the run stops at the BuildRecipe: no Docker
+                m = manifest_for_recipe_change(d, change)
+                rep = scan.run(m).report
+                self.assertEqual(report.validate(rep), [])
+                self.assertIn(f'identity:{removed}', self.gaps(rep))
+                self.assertEqual({g for g in self.gaps(rep) if g.startswith('identity:')}, {f'identity:{removed}'})
+                uses = {t['test_id'] for t in m['tests']
+                        if removed in (t['actor_ref'], t.get('owner_ref') if 'cross-user' in t['template_id'] else None)}
+                self.assertTrue(uses)
+                by_id = {e['test_id']: e for e in rep['execution_records']}
+                for test_id, e in by_id.items():
+                    if test_id in uses:  # depends on the missing identity: an unsupported cell
+                        self.assertEqual(e['result'], 'unsupported', test_id)
+                        self.assertIn(removed, e['error'])
+                    else:  # would have run: stopped only by the BuildRecipe step this test breaks on purpose
+                        self.assertEqual(e['result'], 'blocked', test_id)
+                        self.assertIn('BuildRecipe step', e['error'])
+
+    def test_a_run_the_authorization_does_not_cover_still_lists_the_missing_identity(self):
+        # #56: the recipe was read, so its gaps are known, though the run is blocked before any test is checked.
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            m = manifest_for_recipe_change(d, lambda r: r.update(sample='object-authz/not-authorized'))
+            m['tests'][0]['actor_ref'] = 'tenant_admin'
+            rep = scan.run(m).report
+        self.assertEqual(report.validate(rep), [])
+        self.assertEqual(rep['status'], 'blocked')
+        self.assertIn('test authorization does not cover this run', rep['status_reason'])
+        self.assertIn('identity:tenant_admin', self.gaps(rep))
+
+    def test_a_recipe_without_a_sample_name_still_lists_the_missing_identity(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            m = manifest_for_recipe_change(d, lambda r: r.pop('sample'))
+            m['tests'][0]['actor_ref'] = 'tenant_admin'
+            rep = scan.run(m).report
+        self.assertEqual(report.validate(rep), [])
+        self.assertIn('BuildRecipe sample', rep['status_reason'])
+        self.assertIn('identity:tenant_admin', self.gaps(rep))
+
+    def test_a_run_in_which_no_test_can_run_lists_the_missing_identity(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            m = manifest_for_recipe_change(d, lambda r: None)
+            for t in m['tests']:
+                t['actor_ref'] = 'tenant_admin'
+            rep = scan.run(m).report
+        self.assertEqual(report.validate(rep), [])
+        self.assertIn('no test in the ScanManifest can run', rep['status_reason'])
+        self.assertIn('identity:tenant_admin', self.gaps(rep))
+
+    def test_a_run_blocked_before_the_recipe_is_read_names_no_identity_of_the_recipe(self):
+        m = manifest('vulnerable')
+        m['target']['source_digest'] = 'sha256:' + '0' * 64
+        m['tests'][0]['actor_ref'] = 'tenant_admin'
+        rep = scan.run(m).report
+        self.assertEqual(report.validate(rep), [])
+        self.assertFalse({g for g in self.gaps(rep) if g.startswith('identity:')})
 
     def test_the_gap_stays_when_the_environment_is_blocked(self):
         import tempfile

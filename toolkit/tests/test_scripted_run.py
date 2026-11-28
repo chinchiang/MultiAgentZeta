@@ -796,9 +796,9 @@ class TheCoverageComesFromTheInventory(unittest.TestCase):
     def test_the_rates_of_one_passed_case(self):
         m, world = passing_read()
         cov = run(m, world)[0]['coverage']
-        self.assertEqual((cov['denominator'], cov['executed'], cov['valid_judgements'], cov['unsupported']), (6, 1, 1, 5))
-        self.assertAlmostEqual(cov['effective_judgement_rate'], 1 / 6)
-        self.assertAlmostEqual(cov['tool_support_rate'], 1 / 6)
+        self.assertEqual((cov['denominator'], cov['executed'], cov['valid_judgements'], cov['unsupported']), (11, 1, 1, 10))
+        self.assertAlmostEqual(cov['effective_judgement_rate'], 1 / 11)
+        self.assertAlmostEqual(cov['tool_support_rate'], 1 / 11)
         self.assertEqual(cov['required_test_completion_rate'], 1)
         self.assertEqual((cov['excluded'], cov['rejected_exclusions']), ([], []))
 
@@ -860,7 +860,7 @@ class ExclusionsComeFromTheScanManifest(unittest.TestCase):
 
     def test_a_complete_exclusion_takes_its_item_out_of_the_denominator_and_is_reported(self):
         rep, cov = self.coverage_with([self.ROUTES])
-        self.assertEqual((cov['denominator'], cov['unsupported']), (5, 4))
+        self.assertEqual((cov['denominator'], cov['unsupported']), (10, 9))
         self.assertEqual((cov['excluded'], cov['rejected_exclusions'], cov['excluded_record_ids']), ([self.ROUTES], [], []))
         self.assertIn('nextjs-routes', {u['scope'] for u in cov['unsupported_items']})  # still listed, not hidden
         self.assertIn('排除：`nextjs-routes`', report.render_markdown(rep))
@@ -870,16 +870,16 @@ class ExclusionsComeFromTheScanManifest(unittest.TestCase):
             for incomplete in ({k: v for k, v in self.ROUTES.items() if k != field}, {**self.ROUTES, field: '  '}):
                 with self.subTest(field=field, given=field in incomplete):
                     _, cov = self.coverage_with([incomplete])
-                    self.assertEqual((cov['denominator'], cov['excluded']), (6, []))
+                    self.assertEqual((cov['denominator'], cov['excluded']), (11, []))
                     self.assertEqual(cov['rejected_exclusions'], [{'ref': 'nextjs-routes', 'problem': f'missing {field}'}])
         _, cov = self.coverage_with([{**self.ROUTES, 'ref': 'public.no_such_table'}])
-        self.assertEqual((cov['denominator'], cov['excluded']), (6, []))
+        self.assertEqual((cov['denominator'], cov['excluded']), (11, []))
         self.assertEqual(cov['rejected_exclusions'], [{'ref': 'public.no_such_table', 'problem': 'not in the inventory'}])
 
     def test_excluding_everything_a_test_exercises_leaves_its_record_out_and_names_it(self):
         rep, cov = self.coverage_with([{**self.ROUTES, 'ref': ref} for ref in self.DOCUMENT_READ])
         self.assertEqual(cov['excluded_record_ids'], [rep['execution_records'][0]['id']])
-        self.assertEqual((cov['denominator'], cov['executed']), (5, 0))
+        self.assertEqual((cov['denominator'], cov['executed']), (10, 0))
         self.assertIsNone(cov['required_test_completion_rate'])
         self.assertEqual(cov['states']['required_test_completion_rate'], 'not_applicable')
         self.assertEqual(rep['execution_records'][0]['result'], 'passed')  # the test still ran and is still reported
@@ -887,7 +887,7 @@ class ExclusionsComeFromTheScanManifest(unittest.TestCase):
 
     def test_excluding_only_part_of_what_a_test_exercises_keeps_its_record(self):
         _, cov = self.coverage_with([{**self.ROUTES, 'ref': 'public.documents'}])
-        self.assertEqual((cov['excluded_record_ids'], cov['denominator'], cov['executed']), ([], 6, 1))
+        self.assertEqual((cov['excluded_record_ids'], cov['denominator'], cov['executed']), ([], 11, 1))
 
     def test_exclusions_of_the_wrong_shape_block_the_run_in_preflight(self):
         for wrong, said in (('nextjs-routes', 'must be a list'),
@@ -911,7 +911,7 @@ class ExclusionsComeFromTheScanManifest(unittest.TestCase):
                 if exclusions is not None:
                     m['scope']['exclusions'] = exclusions
                 cov = run(m, world)[0]['coverage']
-                self.assertEqual((cov['denominator'], cov['excluded'], cov['excluded_record_ids']), (6, [], []))
+                self.assertEqual((cov['denominator'], cov['excluded'], cov['excluded_record_ids']), (11, [], []))
 
 
 class DuplicateTestIdsAreRefusedInPreflight(unittest.TestCase):
@@ -1000,8 +1000,8 @@ class EnvironmentSupportMatrixAndKnownDifferences(unittest.TestCase):
         cov = rep['coverage']
         self.assertEqual(cov['claim'], 'known_scope_only')
         self.assertIn(f'environment:{bad_ver}', {u['scope'] for u in cov['unsupported_items']})
-        # 2 scheduled tests (1 blocked, 1 unsupported) + 6 unsupported scopes (5 fixed + 1 environment) = 8
-        self.assertEqual((cov['denominator'], cov['blocked'], cov['unsupported'], cov['executed']), (8, 1, 7, 0))
+        # 2 scheduled tests (1 blocked, 1 unsupported) + 11 unsupported scopes (10 fixed + 1 environment) = 13
+        self.assertEqual((cov['denominator'], cov['blocked'], cov['unsupported'], cov['executed']), (13, 1, 12, 0))
         self.assertIn('支援矩陣外版本', res.markdown)
         self.assertIn(bad_ver, res.markdown)
 

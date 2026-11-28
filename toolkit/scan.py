@@ -98,6 +98,16 @@ class _Precheck:
         return (default, reason) if self.runnable else (self.result, self.reason)
 
 
+# TK-IDN-001 and 〈定義：必要輸入〉 測試身分: the identities the authorization matrix asks for beyond the four of
+# v0.1 (anonymous, owner, same-tenant non-owner, other-tenant user). No v0.1 run has them, so each is an
+# unsupported cell of every run's matrix and stays in the coverage denominator (TK-EVD-008).
+IDENTITY_KINDS_NOT_IN_V01 = ('tenant-admin', 'system-or-service-identity', 'disabled-account',
+                             'revoked-authorization', 'expired-session')
+IDENTITY_KIND_GAPS = tuple({'scope': f'identity-kind:{kind}',
+                            'reason': 'no test identity of this kind in this version (TK-IDN-001, 測試身分)'}
+                           for kind in IDENTITY_KINDS_NOT_IN_V01)
+
+
 @dataclass
 class _RunState:
     """What one run carries from its start to its report. listed, granted and gaps stay empty until they
@@ -108,7 +118,8 @@ class _RunState:
     granted: _Granted = field(default_factory=_Granted)
     prechecks: list = field(default_factory=list)  # one _Precheck per planned test, in plan order
     reviewed: _Reviewed = field(default_factory=_Reviewed)
-    gaps: list = field(default_factory=list)  # 測試身分 the BuildRecipe cannot provide
+    # 測試身分: the kinds of identity no v0.1 run has, then the identities the BuildRecipe cannot provide
+    gaps: list = field(default_factory=lambda: [dict(g) for g in IDENTITY_KIND_GAPS])
     clock: object = time.monotonic  # seconds; the run's time limit is measured with it
     started: float = 0.0  # clock() when the run began
     requests: int = 0  # actor requests and observer reads the run's cases made (執行限制 max_requests)
@@ -536,7 +547,7 @@ class _TestChecks:
     def of(cls, state, recipe, now, items):
         manifest = state.manifest
         return cls(tests=manifest['tests'], items=items, plan=_plan(manifest),
-                   identities={i['name'] for i in recipe['auth']['identities']} if recipe else None,
+                   identities=_recipe_identities(recipe) if recipe else None,
                    restorable=not (recipe and recipe['snapshot_reset'].get('reset_scope') == 'none'),
                    allowed_operations=manifest['scope']['allowed_operations'], granted=state.granted.doc, now=now)
 
@@ -578,8 +589,19 @@ class _TestChecks:
         """Coverage gaps for identities the recipe cannot provide."""
         if self.identities is None:
             return []
-        names = sorted({ref for t in self.tests for ref in _test_identities(t) if ref not in self.identities})
-        return [{'scope': f'identity:{n}', 'reason': 'no such identity in the BuildRecipe (測試身分)'} for n in names]
+        return _identity_gaps(self.tests, self.identities)
+
+
+def _identity_gaps(tests, identities):
+    """〈定義：必要輸入〉 測試身分: one unsupported cell for each identity the tests name and the BuildRecipe lacks.
+    A test that is no object names nothing."""
+    names = sorted({ref for t in tests if isinstance(t, dict) for ref in _test_identities(t) if ref not in identities})
+    return [{'scope': f'identity:{n}', 'reason': 'no such identity in the BuildRecipe (測試身分)'} for n in names]
+
+
+def _recipe_identities(recipe):
+    """The names of the test identities a readable BuildRecipe provides."""
+    return {i['name'] for i in recipe['auth']['identities']}
 
 
 def _test_identities(test):
@@ -1044,6 +1066,9 @@ def _preflight(state, now):
         return f'nothing was started: {problem}'
     state.reviewed = reviewed
     recipe, _ = e1.load_recipe(project)  # without one, e1.prepare blocks the run at the BuildRecipe step
+    if recipe is not None:
+        # 測試身分: known as soon as the recipe is read, so every path that blocks the run from here on lists them.
+        state.gaps = state.gaps + _identity_gaps(manifest['tests'], _recipe_identities(recipe))
     if recipe is not None and not _nonempty_str(recipe.get('sample')):
         return 'nothing was started: BuildRecipe sample is missing or not a non-empty string'
     problem = recipe and authorization.target_problem(state.granted.doc, recipe['sample'], e1.MODE)
@@ -1060,7 +1085,7 @@ def _preflight(state, now):
     elif state.listed.ref is not None and prepared_list.updated:
         prechecks = [_TestChecks.of(state, recipe, now, items=state.listed.items).precheck(t)
                      for t in manifest['tests']]
-    state.prechecks, state.gaps = prechecks, checks.identity_gaps()
+    state.prechecks = prechecks
     if not runnable:
         return 'no test in the ScanManifest can run; nothing was started'
     return None
