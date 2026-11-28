@@ -4,6 +4,7 @@ The JSON report is the native format (TK-EVD-003); its structure is the versione
 JSON Schema in schemas/report-v1.json. validate() also checks the conditions that
 span records, which JSON Schema cannot express.
 """
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -68,7 +69,124 @@ def _cross_record_problems(doc):
             problems.append(f'findings/{i}: a confirmed finding needs a failed execution record; '
                             f'execution_record_ids {ids} do not include one')
     return (problems + _limit_problems(doc) + _requirement_problems(doc) + _approval_problems(doc)
-            + _review_problems(doc) + _environment_problems(doc) + _coverage_problems(doc) + _abort_problems(doc))
+            + _review_problems(doc) + _environment_problems(doc) + _coverage_problems(doc) + _abort_problems(doc)
+            + _package_problems(doc))
+
+
+# TK-DAT-009: what every evidence reference carries besides the evidence itself.
+EVIDENCE_TYPES = {'actor': 'request_response', 'observer': 'observation'}  # by the channel it was obtained through
+EVIDENCE_SOURCES = {'actor': "the application's API, as the identity named", 'observer': 'the database, as the read-only observer role'}
+EVIDENCE_ACCESS = 'restricted'  # evidence may hold test data and paths: it is not for general distribution
+REFERENCE_FIELDS = ('digest', 'type', 'captured_at', 'source', 'access_level')
+
+
+def evidence_digest(evidence):
+    """The content digest of one piece of evidence (TK-DAT-009): over everything but its id and the digest
+    itself. It helps to notice that bytes changed; it proves nothing about where the evidence came from."""
+    content = {k: v for k, v in evidence.items() if k not in ('id', 'digest')}
+    return 'sha256:' + hashlib.sha256(json.dumps(content, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+
+def evidence_reference(evidence, captured_at):
+    """The evidence with the fields of its reference (TK-DAT-009): type, capture time, source, access level and,
+    last, the digest of all of it."""
+    channel = evidence['channel']
+    ref = {**evidence, 'type': EVIDENCE_TYPES[channel], 'captured_at': captured_at, 'source': EVIDENCE_SOURCES[channel],
+           'access_level': EVIDENCE_ACCESS}
+    return {**ref, 'digest': evidence_digest(ref)}
+
+
+def changed_evidence(doc):
+    """The ids of the evidence whose content no longer matches its digest (TK-DAT-009)."""
+    return [ev.get('id') for e in _list(doc, 'execution_records') if isinstance(e, dict)
+            for ev in e.get('evidence') or [] if isinstance(ev, dict) and ev.get('digest') != evidence_digest(ev)]
+
+
+def _texts(value):
+    return isinstance(value, str) and bool(value.strip())
+
+
+def evidence_package(doc):
+    """〈定義：最低證據包的項目〉 (TK-EVD-001): each item of the minimum evidence package and whether this report
+    holds it, computed from the report alone. present names where the item is, missing says why it is not
+    there, not_applicable says why this version has no such thing. Nothing is counted as present on trust."""
+    env = doc.get('environment') if isinstance(doc.get('environment'), dict) else None
+    execs = [e for e in _list(doc, 'execution_records') if isinstance(e, dict)]
+    ran = [e for e in execs if e.get('evidence')]
+    evidence = [ev for e in ran for ev in e['evidence'] if isinstance(ev, dict)]
+    findings = [f for f in _list(doc, 'findings') if isinstance(f, dict)]
+    by_id = {e.get('id'): e for e in execs}
+    denials = [e for e in ran if e.get('case_kind') != 'allowed']
+    images = env.get('service_images') if env else None
+    coverage = doc.get('coverage') if isinstance(doc.get('coverage'), dict) else {}
+    no_env = 'no environment was prepared'
+
+    def held(code, ok, where, why):
+        return {'item': code, 'status': 'present' if ok else 'missing', 'note': where if ok else why}
+
+    def none(code, why):
+        return {'item': code, 'status': 'not_applicable', 'note': why}
+    return [
+        held('commit', _texts(doc.get('commit')), 'commit', 'the ScanManifest named no commit'),
+        none('build_artifact_digest', 'no build is run in this version; the source is the one the BuildRecipe pins'),
+        held('container_image_digests', bool(images) and all(isinstance(i, dict) and _texts(i.get('digest')) for i in images),
+             'environment.service_images', no_env if not env else 'a service image has no content digest'),
+        held('environment_differences', env is not None, 'environment.known_differences', no_env),
+        held('requirement_test_finding_links',
+             bool(execs) and all(_texts(e.get('requirement_id')) for e in ran)
+             and all(i in by_id for f in findings for i in f.get('execution_record_ids') or []),
+             'execution_records[].requirement_id, findings[].execution_record_ids',
+             'no test was recorded' if not execs else 'a record or a finding names nothing that is in the report'),
+        none('threat_links', 'threat modelling is not part of this version (stage threat_planning is not_run)'),
+        held('toolkit_version', _texts(doc.get('toolkit_version')), 'toolkit_version', 'the report names no toolkit version'),
+        held('rule_and_template_versions',
+             _texts((coverage.get('inventory') or {}).get('rule')) and all(_texts(e.get('template_id')) for e in ran),
+             'coverage.inventory.rule, execution_records[].template_id, findings[].fingerprint_version',
+             'the extraction rule or a test template is not named'),
+        none('model_and_prompt_versions', 'no model is called in this version'),
+        held('identity_references', bool(doc.get('authorization_matrix')), 'authorization_matrix, execution_records[].actor_ref',
+             no_env),
+        held('synthetic_data_version', bool(env) and _texts(env.get('seed_version')), 'environment.seed_version, environment.test_data',
+             no_env if not env else 'the BuildRecipe names no seed version'),
+        none('random_seed', 'no test of this version draws random input'),
+        held('preconditions', bool(ran) and all(e.get('checks') is not None for e in ran if e.get('result') in ('passed', 'failed')),
+             'execution_records[].checks', 'no case ran' if not ran else 'a judged case has no checks'),
+        held('requests_and_responses', any(ev.get('channel') == 'actor' for ev in evidence),
+             'execution_records[].evidence: method, path, status and row count; no body is kept, so nothing needs masking',
+             'no case made a request'),
+        (held('positive_control_and_state_difference', any(ev.get('channel') == 'observer' for ev in evidence),
+              "execution_records[].evidence: the owner's control request and the observer's states before and after",
+              'no denial case reached its observation')
+         if denials or not ran else none('positive_control_and_state_difference', 'no denial case ran: allowed cases make no observation')),
+        held('error_records', bool(execs), 'execution_records[].error', 'no test was recorded'),
+        held('timing', bool(execs) and all(_texts(e.get('started_at')) and _texts(e.get('ended_at')) for e in execs),
+             'execution_records[].started_at and ended_at, limits.elapsed_seconds', 'a record has no start or end time'),
+        none('cost', 'no model is called: nothing is billed'),
+        none('retries', 'no request is retried in this version'),
+        held('cancellation', True, 'abort' if 'abort' in doc else 'no abort was requested; a cancelled case is named in execution_records[].result', ''),
+        (held('reproduction_steps', all(any(by_id.get(i, {}).get('evidence') for i in f.get('execution_record_ids') or []) for f in findings),
+              "the requests of each finding's execution records, in order", 'a finding has no execution record with evidence')
+         if findings else none('reproduction_steps', 'the run has no finding')),
+        ({'item': 'fix_and_regression', 'status': 'missing',
+          'note': 'this version writes no fix suggestion; the failed test is the regression test to run again'}
+         if findings else none('fix_and_regression', 'the run has no finding')),
+        held('limitations', bool(coverage), 'coverage.claim, coverage.unsupported_items, environment.known_differences, stages',
+             'the report has no coverage record'),
+    ]
+
+
+def _package_problems(doc):
+    """TK-EVD-001: the evidence package a report states is the one its content gives; in particular nothing is
+    stated as held that the report does not hold."""
+    if not isinstance(doc, dict) or not isinstance(doc.get('evidence_package'), list):
+        return []
+    computed = evidence_package(doc)
+    stated = doc['evidence_package']
+    if [i.get('item') if isinstance(i, dict) else None for i in stated] != [i['item'] for i in computed]:
+        return ['evidence_package: it lists every item of 〈定義：最低證據包的項目〉 once, in order (TK-EVD-001)']
+    return [f"evidence_package/{c['item']}: stated {s.get('status')!r}, but the report gives {c['status']!r}: {c['note']} (TK-EVD-001)"
+            for s, c in zip(stated, computed) if s.get('status') != c['status']]
+
 
 
 ABORT_STEPS = ('dispatch_stopped', 'credentials_revoked', 'in_flight_ended', 'evidence_kept', 'in_flight_checked',
@@ -691,6 +809,85 @@ def _shown(value, default=''):
 SELF_VALIDATION_NOTE = '工具包自我驗證（含故障注入，不是對應用的掃描結果）'
 
 
+def _scope_section(scope):
+    """TK-EVD-005 範圍: what the ScanManifest put in scope; a report whose scope could not be read says so."""
+    lines = ['', '## 範圍', '']
+    if not scope:
+        return lines + ['- 這次執行的 ScanManifest 沒有可讀取的受測範圍。']
+    return lines + [f'- **受測端點**：{_codes(scope["endpoints"]) or "（無）"}',
+                    f'- **受測資源**：{_codes(scope["resources"]) or "（無）"}',
+                    f'- **允許操作**：{_codes(scope["allowed_operations"]) or "（無）"}',
+                    f'- **資料範圍**：{_inline(scope["data_scope"])}']
+
+
+# TK-EVD-005: the three lists of findings a report always has, by the status of 〈定義：問題狀態〉.
+FINDING_LISTS = (('confirmed', '已確認問題'), ('evidence_pending', '待補證問題'), ('not_reproduced', '未重現問題'))
+NOT_JUDGED = ('blocked', 'error', 'untested', 'cancelled', 'unsupported')
+
+
+def _findings_by_status(findings):
+    lines = []
+    for status, title in FINDING_LISTS:
+        ids = [f['id'] for f in findings if f['status'] == status]
+        lines.append(f'- **{title}**：' + (_codes(ids) if ids else '（無）'))
+    return lines + ['']
+
+
+def _not_judged_section(records):
+    """TK-EVD-005 受阻與未測試清單: every test without a verdict, with why. A report is not only its findings."""
+    lines = ['', '## 受阻與未測試清單', '']
+    rows = [e for e in records if e['result'] in NOT_JUDGED]
+    if not rows:
+        return lines + ['（無：計畫內的測試都取得了判定）']
+    lines += ['| 測試 | 結果 | 原因 |', '| :--- | :--- | :--- |']
+    lines += [f'| {_tcode(_shown(e.get("test_id"), e["id"]))} | {RESULT_LABELS[e["result"]]} | {_cell(e.get("error") or "（未記錄）")} |'
+              for e in rows]
+    return lines
+
+
+def _exceptions_section(doc):
+    """TK-EVD-005 例外: everything that let this run do or accept more than the default, in one place: the
+    confirmation items a person modified or set aside, the extra approvals tests ran under, the domain exceptions
+    of the test data and the items excluded from the coverage."""
+    lines = ['', '## 例外', '']
+    items = [f'確認項目 {_code(r["id"])}：{REVIEW_LABELS[r["status"]]}' for r in doc['requirements']
+             if r.get('status') in ('modified', 'not_applicable')]
+    approvals = sorted({e['approval_id'] for e in doc['execution_records'] if e.get('approval_id')})
+    items += [f'額外核准 {_code(a)}（測試授權紀錄）' for a in approvals]
+    env = doc.get('environment') or {}
+    items += [f'網域例外 {_code(e["account"])}（單人核准）' for e in (env.get('test_data') or {}).get('domain_exceptions', [])]
+    items += [f'覆蓋排除項 {_code(x["ref"])}' for x in doc['coverage'].get('excluded', [])]
+    return lines + ([f'- {i}' for i in items] if items else ['（無）'])
+
+
+PACKAGE_STATUS_LABELS = {'present': '具備', 'missing': '缺件', 'not_applicable': '不適用'}
+PACKAGE_ITEM_LABELS = {
+    'commit': '受測提交識別碼', 'build_artifact_digest': '建置產物摘要', 'container_image_digests': '容器映像摘要',
+    'environment_differences': '環境差異', 'requirement_test_finding_links': '需求、測試、判定與問題的關聯',
+    'threat_links': '威脅的關聯', 'toolkit_version': '工具版本', 'rule_and_template_versions': '規則與範本版本',
+    'model_and_prompt_versions': '適配器、模型與提示範本版本', 'identity_references': '測試身分參照',
+    'synthetic_data_version': '合成資料版本', 'random_seed': '隨機種子', 'preconditions': '必要前置條件',
+    'requests_and_responses': '遮罩後的請求與回應', 'positive_control_and_state_difference': '正向對照與狀態差異',
+    'error_records': '錯誤紀錄', 'timing': '時間', 'cost': '費用', 'retries': '重試', 'cancellation': '取消紀錄',
+    'reproduction_steps': '可重現步驟', 'fix_and_regression': '修復建議與回歸測試', 'limitations': '限制'}
+INCOMPLETE_NOTE = '證據包有缺件：本報告的結論只及於已具備的項目，不代表受測範圍內沒有其他問題。'
+
+
+def _evidence_package_section(package):
+    """〈定義：最低證據包的項目〉 (TK-EVD-001, TK-EVD-006): every item with whether the report holds it; what is
+    missing is named, and a report with a missing item says what its conclusions do not reach."""
+    missing = [i for i in package if i['status'] == 'missing']
+    lines = ['', '## 證據包', '',
+             f'- 具備 {sum(i["status"] == "present" for i in package)} 項、缺件 {len(missing)} 項、'
+             f'不適用 {sum(i["status"] == "not_applicable" for i in package)} 項']
+    if missing:
+        lines += [f'- **缺件**：' + '、'.join(PACKAGE_ITEM_LABELS[i['item']] for i in missing), '', f'> {INCOMPLETE_NOTE}']
+    lines += ['', '| 項目 | 狀態 | 位置或原因 |', '| :--- | :--- | :--- |']
+    lines += [f'| {PACKAGE_ITEM_LABELS[i["item"]]} | {PACKAGE_STATUS_LABELS[i["status"]]} | {_cell(i["note"] or "—")} |'
+              for i in package]
+    return lines
+
+
 def render_markdown(doc):
     """Markdown for human review, generated from a valid JSON report. Raises ValueError if invalid."""
     problems = validate(doc)
@@ -707,8 +904,10 @@ def render_markdown(doc):
         lines.append(f'- **執行類型**：{SELF_VALIDATION_NOTE}')
     if doc.get('environment'):
         lines.append(f'- **環境模式**：{_inline(doc["environment"].get("mode", ""))}')
+    lines.append(f'- **工具版本**：{_code(doc["toolkit_version"])}')
     if doc['status'] == 'completed':
         lines += ['', f'> {COMPLETED_NOTE}']
+    lines += _scope_section(doc.get('scope'))
 
     if doc.get('requirements'):
         lines += ['', '## 安全需求（確認項目）', '', '| 確認項目 | 來源 | 內容 | 處理狀態 | 確認者 |',
@@ -744,7 +943,10 @@ def render_markdown(doc):
         lines.append(f'| {_tcode(_shown(e.get("test_id"), e["id"]))} | {_tcode(_shown(e.get("actor_ref")))} '
                      f'| {_tcode(_shown(e.get("resource_ref")))} | {RESULT_LABELS[e["result"]]} |')
 
+    lines += _not_judged_section(doc['execution_records'])
+
     lines += ['', '## 問題紀錄', '']
+    lines += _findings_by_status(doc['findings'])
     if doc['findings']:
         lines += ['| 問題 | 狀態 | 需求 | 根因 | 指紋 |', '| :--- | :--- | :--- | :--- | :--- |']
         for f in doc['findings']:
@@ -755,6 +957,8 @@ def render_markdown(doc):
 
     lines += _review_section(doc)
 
+    lines += _exceptions_section(doc)
     lines += _coverage_lines(doc['coverage'])
+    lines += _evidence_package_section(doc['evidence_package'])
     lines.append('')
     return '\n'.join(lines)

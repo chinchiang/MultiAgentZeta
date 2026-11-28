@@ -16,6 +16,7 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+import toolkit
 from toolkit import (authorization, confirmation, control, coverage, e1, environment, extract, inventory, item_rule,
                      observer, policy, report, review)
 
@@ -31,6 +32,11 @@ class Run:
 
 def _now():
     return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+
+
+def _captured(evidence):
+    """One piece of evidence as its reference (TK-DAT-009), captured now."""
+    return report.evidence_reference(evidence, _now())
 
 
 def _digest(obj):
@@ -271,15 +277,15 @@ def _denial_case(ops, test, evidence):
     def actor(identity, method, path, body=None, prefer='return=representation'):
         key = _api_key_for(test, identity)
         status, data = ops.request(identity, method, path, body, key, prefer, _timeout(test))
-        evidence.append({'channel': 'actor', 'identity_ref': identity, 'api_key_format': key,
-                         'request': {'method': method, 'path': path, 'prefer': prefer},
-                         'response': {'status': status, 'rows': len(data) if isinstance(data, list) else None}})
+        evidence.append(_captured({'channel': 'actor', 'identity_ref': identity, 'api_key_format': key,
+                                   'request': {'method': method, 'path': path, 'prefer': prefer},
+                                   'response': {'status': status, 'rows': len(data) if isinstance(data, list) else None}}))
         return status, data
 
     def observe(point):
         state = ops.observe(marker)
-        evidence.append({'channel': 'observer', 'identity_ref': ops.observer_role, 'point': point,
-                         'observation': state})
+        evidence.append(_captured({'channel': 'observer', 'identity_ref': ops.observer_role, 'point': point,
+                                   'observation': state}))
         return state
 
     # 1. The owner's control operation succeeds, and the resource is in the expected state.
@@ -341,9 +347,9 @@ def _allowed_case(ops, test, evidence):
     path = f'/rest/v1/{template["table"]}?title=eq.{marker}&select=title'
     status, data = ops.request(test['actor_ref'], template['method'], path, api_key=key, timeout=_timeout(test))
     rows = data if isinstance(data, list) else None
-    evidence.append({'channel': 'actor', 'identity_ref': test['actor_ref'], 'api_key_format': key,
-                     'request': {'method': template['method'], 'path': path},
-                     'response': {'status': status, 'rows': len(rows) if rows is not None else None}})
+    evidence.append(_captured({'channel': 'actor', 'identity_ref': test['actor_ref'], 'api_key_format': key,
+                               'request': {'method': template['method'], 'path': path},
+                               'response': {'status': status, 'rows': len(rows) if rows is not None else None}}))
     granted = status == 200 and rows == [{'title': marker}]
     if not granted and (status in BACKEND_UNAVAILABLE or (status == 200 and rows is None)):
         # 〈定義：測試結果〉 允許案例: no answer the contract can judge is an execution error, not a refusal.
@@ -1101,6 +1107,10 @@ def _environment_report(profile):
         'known_differences': list(profile.get('known_differences') or []),
         'isolation': profile.get('isolation') or {},  # 〈定義：E1 隔離〉; an empty record does not validate
         'test_data': profile.get('test_data') or {},  # TK-SBX-011, TK-SBX-012; likewise
+        # TK-EVD-001: the version of the synthetic data and the content digest of each service image
+        'seed_version': profile.get('seed_version') or '',
+        'service_images': [{'service': name, 'image': s.get('image') or '', 'digest': s.get('image_digest') or ''}
+                           for name, s in sorted((profile.get('services') or {}).items())],
     }
 
 
@@ -1176,7 +1186,7 @@ def run(manifest, prepare=environment.prepare, clock=time.monotonic, abort=None,
                     undo, injected = ops.inject(test.get('fault'), test['actor_ref'],
                                                 test.get('fault_api_key') or test.get('api_key', 'anon-jwt'), _timeout(test))
                     if injected:
-                        evidence.append(injected)
+                        evidence.append(_captured(injected))
                     _check_api_keys(ops, test, denial)
                     if denial:
                         result, checks = _denial_case(ops, test, evidence)
@@ -1194,7 +1204,7 @@ def run(manifest, prepare=environment.prepare, clock=time.monotonic, abort=None,
                 except environment.InjectionFailed as e:  # 〈定義：故障注入〉: never judged as if the fault were there
                     result, checks, error = 'blocked', None, f'fault injection failed: {e}'
                     if e.evidence:
-                        evidence.append(e.evidence)
+                        evidence.append(_captured(e.evidence))
                 except environment.LimitReached as e:  # the count before dispatch should have held the case back
                     result, checks, error = 'error', None, f'request limit reached inside the case: {e}'
                 except environment.Aborted:  # TK-RUN-005 step 5: what it did before the abort is not known
@@ -1217,7 +1227,7 @@ def run(manifest, prepare=environment.prepare, clock=time.monotonic, abort=None,
                 ex['case_kind'] = _case_kind(test)
                 if checks is not None:
                     ex['checks'] = checks
-                ex['evidence'] = [{'id': f'{ex["id"]}-ev{i + 1}', **ev} for i, ev in enumerate(evidence)]
+                ex['evidence'] = [{'id': f'{ex["id"]}-ev{i + 1}', **ev} for i, ev in enumerate(evidence)]  # each a reference
                 executions.append(ex)
                 if result == 'failed' and denial:  # a failed allowed case is a broken permitted access, not a leak
                     _record_finding(state, findings, test, ex)
@@ -1384,6 +1394,20 @@ def _cases(state, executions, inv):
     return cases
 
 
+def _reported_scope(manifest):
+    """TK-EVD-005 範圍: the scope the ScanManifest states, as far as it is in shape; None when it is not, which
+    the report then says."""
+    scope = manifest.get('scope')
+    if not isinstance(scope, dict):
+        return None
+    names = [r.get('name') for r in scope.get('resources') or [] if isinstance(r, dict) and _nonempty_str(r.get('name'))] \
+        if isinstance(scope.get('resources'), list) else []
+    listed = {key: [v for v in scope.get(key) or [] if _nonempty_str(v)] if isinstance(scope.get(key), list) else []
+              for key in ('endpoints', 'allowed_operations')}
+    return {**listed, 'resources': names,
+            'data_scope': scope['data_scope'] if _nonempty_str(scope.get('data_scope')) else '(not stated)'}
+
+
 def _finish(state, executions, findings, status, reason, stages, environment, matrix, cleanup=None, abort=None,
             measure=None):
     manifest, records, listed = state.manifest, state.records, state.listed
@@ -1419,8 +1443,13 @@ def _finish(state, executions, findings, status, reason, stages, environment, ma
         doc['confirmation_list'] = dict(listed.ref)
     if state.granted.ref:
         doc['authorization'] = state.granted.report()
+    doc['toolkit_version'] = toolkit.__version__
+    scope = _reported_scope(manifest)
+    if scope:
+        doc['scope'] = scope
     # Each finding's review state, as of when the report is made (TK-HRV-010).
     doc = review.apply(doc, state.reviewed.doc, state.reviewed.ref, doc['created_at'])
+    doc['evidence_package'] = report.evidence_package(doc)  # TK-EVD-001: last, from everything above
     problems = report.validate(doc)
     if problems:
         raise RuntimeError('the toolkit produced an invalid report: ' + '; '.join(problems))
@@ -1429,7 +1458,38 @@ def _finish(state, executions, findings, status, reason, stages, environment, ma
 
 # --- command line (〈定義：命令列入口〉) -----------------------------------------------
 
-REPORT_JSON, REPORT_MARKDOWN = 'report.json', 'report.md'
+REPORT_JSON, REPORT_MARKDOWN, SEAL = 'report.json', 'report.md', 'seal.json'
+
+
+def _seal(directory):
+    """TK-DAT-009 封存: record the digest of each file of the report and make the files read-only. The seal lets
+    a later change of bytes be noticed; who may write to the directory is for the control area to settle, and
+    the directory is never inside the source under test (TK-SBX-005)."""
+    digests = {name: 'sha256:' + hashlib.sha256((directory / name).read_bytes()).hexdigest()
+               for name in (REPORT_JSON, REPORT_MARKDOWN)}
+    with open(directory / SEAL, 'x', encoding='utf-8', newline='\n') as f:
+        f.write(json.dumps({'sealed_at': _now(), 'files': digests}, indent=2) + '\n')
+    for name in (REPORT_JSON, REPORT_MARKDOWN, SEAL):
+        (directory / name).chmod(0o444)
+
+
+def seal_problems(directory):
+    """What no longer matches the seal of a report directory: a missing seal, a missing file, changed bytes."""
+    directory = Path(directory)
+    try:
+        sealed = json.loads((directory / SEAL).read_text(encoding='utf-8'))['files']
+    except (OSError, ValueError, KeyError, TypeError):
+        return [f'{SEAL} is missing or unreadable']
+    problems = []
+    for name, digest in sealed.items():
+        try:
+            actual = 'sha256:' + hashlib.sha256((directory / name).read_bytes()).hexdigest()
+        except OSError:
+            problems.append(f'{name} is missing')
+            continue
+        if actual != digest:
+            problems.append(f'{name} was changed after it was sealed')
+    return problems
 # Exit status of main(): a report was written, whatever the run's status; the command line, the ScanManifest
 # or the output directory was refused before anything was started; the toolkit itself failed.
 EXIT_REPORT, EXIT_REFUSED, EXIT_TOOL_ERROR = 0, 2, 3
@@ -1468,7 +1528,7 @@ def _output_directory(path, manifest):
         raise _Refused(str(e)) from e
     except OSError as e:
         raise _Refused(f'the output directory {path} cannot be used: {e.strerror or e}') from e
-    existing = [name for name in (REPORT_JSON, REPORT_MARKDOWN) if (directory / name).exists()]
+    existing = [name for name in (REPORT_JSON, REPORT_MARKDOWN, SEAL) if (directory / name).exists()]
     if existing:
         raise _Refused(f'{directory} already holds {" and ".join(existing)}; a report is not overwritten, '
                        f'give another directory')
@@ -1533,6 +1593,7 @@ def main(argv, out, err, prepare=environment.prepare):
             f.write(json.dumps(done.report, ensure_ascii=False, indent=2) + '\n')
         with open(directory / REPORT_MARKDOWN, 'x', encoding='utf-8', newline='\n') as f:
             f.write(done.markdown)
+        _seal(directory)
     except (RuntimeError, OSError) as e:
         print(f'failed: {type(e).__name__}: {e}', file=err)
         return EXIT_TOOL_ERROR
@@ -1547,4 +1608,5 @@ def main(argv, out, err, prepare=environment.prepare):
         print(f'reason: {done.report["status_reason"]}', file=out)
     print(f'report: {directory / REPORT_JSON}', file=out)
     print(f'markdown: {directory / REPORT_MARKDOWN}', file=out)
+    print(f'seal: {directory / SEAL}', file=out)
     return EXIT_REPORT

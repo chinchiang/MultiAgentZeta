@@ -134,6 +134,8 @@ def prepare_with(world, api_keys=None, reset_fails=False, unsupported=(), known_
     profile = {'mode': 'E1',
                'identities': {n: {'login': 'ok', 'path': 'scripted'} for n in [*EMAILS, 'anonymous']},
                'unsupported': list(unsupported),
+               'seed_version': 'scripted-1',
+               'services': {'db': {'image': 'supabase/postgres:17', 'image_digest': 'sha256:' + 'd' * 64}},
                'known_differences': list(known_differences),
                'isolation': {'outbound': 'blocked', 'method': 'internal-network',
                              'host_access': ['127.0.0.1:54321 -> kong:8000'], 'containers_checked': ['db', 'kong'],

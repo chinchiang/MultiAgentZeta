@@ -62,7 +62,7 @@ class Validate(unittest.TestCase):
                 stage.update(status=preflight, reason='commit (受測範圍) is missing')
         for rec in [doc, *doc['execution_records'], *doc['findings'], doc['coverage']]:
             rec['commit'] = None
-        return doc
+        return repackaged(doc)
 
     def test_report_blocked_at_preflight_may_name_no_commit(self):
         # TK-DAT-001's one exception: blocked before any source is read.
@@ -869,9 +869,9 @@ class Faults(unittest.TestCase):
     def test_the_injection_is_marked_on_its_evidence(self):
         doc = self.faulted_report()
         ex = self.faulted_record(doc)
-        ex['evidence'] = [{'id': f"{ex['id']}-ev1", 'channel': 'actor', 'identity_ref': 'other_tenant_user',
-                           'api_key_format': 'anon-jwt', 'injection': 'failed',
-                           'request': {'method': 'POST', 'path': '/auth/v1/logout?scope=global'}}]
+        ex['evidence'] = [{'id': f"{ex['id']}-ev1", **report.evidence_reference(
+            {'channel': 'actor', 'identity_ref': 'other_tenant_user', 'api_key_format': 'anon-jwt', 'injection': 'failed',
+             'request': {'method': 'POST', 'path': '/auth/v1/logout?scope=global'}}, '2026-11-01T10:00:03Z')}]
         self.assertEqual(report.validate(doc), [])
         ex['evidence'][0]['injection'] = 'maybe'
         self.assertNotEqual(report.validate(doc), [])
@@ -932,6 +932,245 @@ def cancelled_report():
             stage.update(status='cancelled', reason='aborted by the operator')
     doc['abort'] = abort_record()
     return doc
+
+
+class TheMinimumEvidencePackage(unittest.TestCase):
+    """〈定義：最低證據包的項目〉 (TK-EVD-001, TK-EVD-006): a report states, item by item, what of the minimum
+    evidence package it holds. Take a part away and the item is missing, named, and the report says what its
+    conclusions do not reach; a report that still calls the item present is refused."""
+
+    ITEMS = ('commit', 'build_artifact_digest', 'container_image_digests', 'environment_differences',
+             'requirement_test_finding_links', 'threat_links', 'toolkit_version', 'rule_and_template_versions',
+             'model_and_prompt_versions', 'identity_references', 'synthetic_data_version', 'random_seed',
+             'preconditions', 'requests_and_responses', 'positive_control_and_state_difference', 'error_records',
+             'timing', 'cost', 'retries', 'cancellation', 'reproduction_steps', 'fix_and_regression',
+             'limitations')  # TK-EVD-001's seven groups, written here by hand
+
+    def status(self, doc):
+        return {i['item']: i['status'] for i in report.evidence_package(doc)}
+
+    def test_the_package_lists_every_item_once_and_in_order(self):
+        for name in ('report-valid', 'report-partial-fault', 'report-blocked-no-commit'):
+            with self.subTest(report=name):
+                doc = fixture(name)
+                self.assertEqual(tuple(i['item'] for i in doc['evidence_package']), self.ITEMS)
+                self.assertEqual(doc['evidence_package'], report.evidence_package(doc))
+                self.assertTrue(all(i['note'] for i in doc['evidence_package']))
+
+    def test_a_run_with_findings_holds_everything_but_the_fix_suggestion(self):
+        status = self.status(valid_report())
+        self.assertEqual([k for k, v in status.items() if v == 'missing'], ['fix_and_regression'])
+        for item in ('threat_links', 'model_and_prompt_versions', 'cost', 'retries', 'random_seed', 'build_artifact_digest'):
+            self.assertEqual(status[item], 'not_applicable', item)  # nothing this version has
+
+    # What to take out of the example report for each item that it holds, and so can lose.
+    REMOVALS = {
+        'commit': lambda d: d.update(commit=None),
+        'container_image_digests': lambda d: d['environment']['service_images'][0].update(digest=''),
+        'environment_differences': lambda d: d.pop('environment'),
+        'requirement_test_finding_links': lambda d: d['findings'][0].update(execution_record_ids=['no-such-record']),
+        'toolkit_version': lambda d: d.pop('toolkit_version'),
+        'rule_and_template_versions': lambda d: d['coverage']['inventory'].update(rule=''),
+        'identity_references': lambda d: d.update(authorization_matrix=[]),
+        'synthetic_data_version': lambda d: d['environment'].update(seed_version=''),
+        'preconditions': lambda d: [e.pop('checks', None) for e in d['execution_records']],
+        'requests_and_responses': lambda d: [e.update(evidence=[ev for ev in e['evidence'] if ev['channel'] != 'actor'])
+                                             for e in d['execution_records']],
+        'positive_control_and_state_difference': lambda d: [
+            e.update(evidence=[ev for ev in e['evidence'] if ev['channel'] != 'observer']) for e in d['execution_records']],
+        'error_records': lambda d: d.update(execution_records=[], findings=[]),
+        'timing': lambda d: d['execution_records'][0].pop('ended_at'),
+        'reproduction_steps': lambda d: [e.update(evidence=[]) for e in d['execution_records']],
+        'limitations': lambda d: d.pop('coverage'),
+    }
+
+    def test_each_item_the_report_holds_goes_missing_when_its_part_is_removed(self):
+        self.assertEqual(set(self.REMOVALS), {k for k, v in self.status(valid_report()).items() if v == 'present'}
+                         - {'cancellation'})  # cancellation is always answered: an abort record, or that there was none
+        for item, remove in self.REMOVALS.items():
+            with self.subTest(item=item):
+                doc = valid_report()
+                self.assertEqual(self.status(doc)[item], 'present')
+                remove(doc)
+                self.assertEqual(self.status(doc)[item], 'missing')
+                # The report still says "present": it claims evidence it does not hold, and is refused.
+                self.assertTrue(any(f'evidence_package/{item}' in p for p in report.validate(doc)), report.validate(doc))
+
+    def test_a_report_cannot_drop_reorder_or_relabel_an_item(self):
+        doc = valid_report()
+        doc['evidence_package'] = doc['evidence_package'][1:]
+        self.assertTrue(any('evidence_package' in p for p in report.validate(doc)))
+        doc = valid_report()
+        doc['evidence_package'][-1]['status'] = 'not_applicable'
+        self.assertTrue(any('evidence_package/limitations' in p for p in report.validate(doc)))
+        doc = valid_report()
+        next(i for i in doc['evidence_package'] if i['item'] == 'fix_and_regression')['status'] = 'present'
+        self.assertTrue(any('evidence_package/fix_and_regression' in p for p in report.validate(doc)))
+
+    def test_markdown_names_what_is_missing_and_what_the_conclusions_do_not_reach(self):
+        md = report.render_markdown(valid_report())
+        section = md.split('## 證據包', 1)[1]
+        self.assertIn('- **缺件**：修復建議與回歸測試', section)
+        self.assertIn('證據包有缺件：本報告的結論只及於已具備的項目', section)
+        self.assertIn('| 受測提交識別碼 | 具備 | commit |', section)
+        self.assertIn('| 費用 | 不適用 |', section)
+        self.assertNotIn('全面通過', md)  # TK-EVD-006
+
+    def test_a_run_without_findings_and_with_everything_else_has_nothing_missing(self):
+        doc = valid_report()
+        doc['findings'] = []
+        doc['review_summary'] = dict.fromkeys(doc['review_summary'], 0)
+        for e in doc['execution_records']:
+            if e['result'] == 'failed':
+                e['result'] = 'passed'
+                e['checks'] = dict.fromkeys(e['checks'], True)
+        repackaged(doc)
+        self.assertEqual([i['item'] for i in doc['evidence_package'] if i['status'] == 'missing'], [])
+        md = report.render_markdown(doc) if report.validate(doc) == [] else ''
+        if md:
+            self.assertNotIn('證據包有缺件', md)
+            self.assertNotIn('全面通過', md)
+
+
+class WhatEveryReportContains(unittest.TestCase):
+    """TK-EVD-005: a report is not only the exploited vulnerabilities. Every report has the scope, the confirmed,
+    evidence-pending and not-reproduced findings, the blocked and untested list, the coverage denominator, the
+    environment differences and the exceptions."""
+
+    SECTIONS = ('## 範圍', '## 測試環境與差異', '## 受阻與未測試清單', '## 問題紀錄', '## 例外', '## 覆蓋', '## 證據包')
+    FINDING_LISTS = ('- **已確認問題**：', '- **待補證問題**：', '- **未重現問題**：')
+
+    def test_every_example_report_has_every_section_and_every_finding_list(self):
+        for name in ('report-valid', 'report-partial-fault', 'report-blocked-no-commit'):
+            md = report.render_markdown(fixture(name))
+            for text in self.SECTIONS + self.FINDING_LISTS + ('分母',):
+                with self.subTest(report=name, text=text):
+                    self.assertIn(text, md)
+
+    def test_the_scope_is_shown_or_said_to_be_unreadable(self):
+        md = report.render_markdown(valid_report())
+        self.assertIn('- **受測資源**：`documents`', md)
+        self.assertIn('- **允許操作**：`GET`、`PATCH`', md)
+        self.assertIn('沒有可讀取的受測範圍', report.render_markdown(fixture('report-blocked-no-commit')))
+
+    def test_the_findings_are_listed_by_status_and_an_empty_list_says_so(self):
+        md = report.render_markdown(valid_report())
+        self.assertIn('- **已確認問題**：`finding-0001`', md)
+        self.assertIn('- **待補證問題**：（無）', md)
+        self.assertIn('- **未重現問題**：（無）', md)
+
+    def test_every_test_without_a_verdict_is_listed_with_its_reason(self):
+        doc = fixture('report-partial-fault')
+        section = report.render_markdown(doc).split('## 受阻與未測試清單', 1)[1].split('\n## ', 1)[0]
+        not_judged = [e for e in doc['execution_records'] if e['result'] not in ('passed', 'failed')]
+        self.assertTrue(not_judged)
+        for e in not_judged:
+            self.assertIn(f"`{e['test_id']}`", section)
+        for e in doc['execution_records']:
+            if e['result'] in ('passed', 'failed'):
+                self.assertNotIn(f"`{e['test_id']}`", section)
+        self.assertIn('（無：計畫內的測試都取得了判定）', report.render_markdown(valid_report()))
+
+    def test_the_exceptions_are_gathered_in_one_place(self):
+        self.assertIn('## 例外\n\n（無）', report.render_markdown(fixture('report-blocked-no-commit')))
+        self.assertIn('## 例外\n\n- 確認項目 `S2-TENANT-ISOLATION@documents`：修改', report.render_markdown(valid_report()))
+        doc = valid_report()
+        doc['environment']['test_data']['domain_exceptions'] = [
+            {'account': 'billing@partner.io', 'reason': 'sandbox', 'confirmed_by': 'app-owner', 'confirmed_at': '2026-11-04T00:00:00Z'}]
+        section = report.render_markdown(doc).split('## 例外', 1)[1].split('\n## ', 1)[0]
+        self.assertIn('網域例外 `billing@partner.io`（單人核准）', section)
+
+
+class ClaimsNoReportMakes(unittest.TestCase):
+    """TK-EVD-014, TK-EVD-006: neither the text the report module can write nor a rendered report claims what the
+    toolkit cannot know."""
+
+    # '完全隔離' is not in the list for rendered reports: an S2 clause of the application says it of tenants.
+    FORBIDDEN = ('全面通過', '沒有漏洞', '無漏洞', '保證安全', '百分之百', '100%', '證明安全', '已排除所有', '消除全部',
+                 '絕對安全', '保證完全隔離')
+
+    def test_no_rendered_report_makes_a_forbidden_claim(self):
+        for name in ('report-valid', 'report-partial-fault', 'report-blocked-no-commit'):
+            md = report.render_markdown(fixture(name))
+            for claim in self.FORBIDDEN:
+                with self.subTest(report=name, claim=claim):
+                    # The one place such words may stand is a sentence that denies them.
+                    for line in md.splitlines():
+                        if claim in line:
+                            self.assertRegex(line, r'不等於|不代表|不表示|不宣稱|不得|並非|不是')
+
+    def test_no_label_or_note_of_the_report_module_makes_one(self):
+        texts = [v for name, value in vars(report).items() if name.isupper()
+                 for v in (value.values() if isinstance(value, dict) else [value]) if isinstance(v, str)]
+        self.assertGreater(len(texts), 50)
+        for text in texts:
+            for claim in self.FORBIDDEN:
+                if claim in text:
+                    self.assertRegex(text, r'不等於|不代表|不表示|不宣稱|不得|並非|不是', text)
+
+    def test_a_completed_report_says_what_completed_does_not_mean(self):
+        md = report.render_markdown(valid_report())
+        self.assertIn('只對本次範圍與條件有效', md)
+
+    def test_a_report_names_the_stages_this_version_does_not_run(self):
+        # TK-SCP-006: no capability that is 可延後 is presented as covered.
+        md = report.render_markdown(valid_report())
+        stages = {s['stage']: s['status'] for s in valid_report()['stages']}
+        self.assertEqual({stages[x] for x in ('static_analysis', 'model_review', 'threat_planning')}, {'not_run'})
+        self.assertIn('not implemented in this toolkit version', json.dumps(valid_report()['stages']))
+        self.assertIn('| 威脅的關聯 | 不適用 |', md)
+        self.assertIn('| 適配器、模型與提示範本版本 | 不適用 |', md)
+
+
+class EvidenceReferences(unittest.TestCase):
+    """TK-DAT-009: every evidence reference carries a content digest, its type, when it was captured, its source
+    and its access level; a reference without one of them is refused."""
+
+    def first(self, doc):
+        return doc['execution_records'][0]['evidence'][0]
+
+    def test_the_example_reports_carry_every_field_on_every_piece_of_evidence(self):
+        for name in ('report-valid', 'report-partial-fault'):
+            doc = fixture(name)
+            evidence = [ev for e in doc['execution_records'] for ev in e['evidence']]
+            self.assertTrue(evidence)
+            for ev in evidence:
+                with self.subTest(report=name, evidence=ev['id']):
+                    for field in ('digest', 'type', 'captured_at', 'source', 'access_level'):  # written here by hand
+                        self.assertTrue(ev[field], field)
+
+    def test_a_reference_without_any_one_field_is_refused(self):
+        for field in ('digest', 'type', 'captured_at', 'source', 'access_level'):
+            with self.subTest(field=field):
+                doc = valid_report()
+                del self.first(doc)[field]
+                self.assertTrue(any(field in p for p in report.validate(doc)), report.validate(doc))
+
+    def test_the_fields_take_only_their_values(self):
+        for field, value in (('digest', 'md5:abc'), ('digest', ''), ('type', 'screenshot'), ('access_level', 'public'),
+                             ('captured_at', ''), ('source', '')):
+            with self.subTest(field=field, value=value):
+                doc = valid_report()
+                self.first(doc)[field] = value
+                self.assertNotEqual(report.validate(doc), [])
+
+    def test_the_type_and_source_follow_the_channel(self):
+        actor = report.evidence_reference({'channel': 'actor', 'identity_ref': 'owner'}, '2026-11-01T10:00:00Z')
+        observer = report.evidence_reference({'channel': 'observer', 'identity_ref': 'maz_observer'}, '2026-11-01T10:00:00Z')
+        self.assertEqual((actor['type'], observer['type']), ('request_response', 'observation'))
+        self.assertNotEqual(actor['source'], observer['source'])
+        self.assertEqual({actor['access_level'], observer['access_level']}, {'restricted'})
+
+    def test_the_digest_notices_a_change_of_the_content_and_ignores_the_id(self):
+        doc = valid_report()
+        self.assertEqual(report.changed_evidence(doc), [])
+        ev = self.first(doc)
+        ev['id'] = 'renamed'
+        self.assertEqual(report.changed_evidence(doc), [])
+        ev['identity_ref'] = 'someone-else'
+        self.assertEqual(report.changed_evidence(doc), ['renamed'])
+        ev['digest'] = report.evidence_digest(ev)  # it says the bytes are these, not that they are true
+        self.assertEqual(report.changed_evidence(doc), [])
 
 
 class EnvironmentBuildMeasure(unittest.TestCase):
@@ -1083,6 +1322,13 @@ class AbortAndCleanup(unittest.TestCase):
         self.assertIn('  - 殘留：container supabase_db_x', md)
 
 
+def repackaged(doc):
+    """doc with its evidence package computed again, as toolkit.scan does last (TK-EVD-001): for a test that
+    changes what a report holds and then asks whether the report is valid."""
+    doc['evidence_package'] = report.evidence_package(doc)
+    return doc
+
+
 def fixture(name):
     return json.loads((FIXTURES / f'{name}.json').read_text(encoding='utf-8'))
 
@@ -1189,7 +1435,7 @@ class CoverageRecord(unittest.TestCase):
                                states={k: 'insufficient_data' for k in ('effective_judgement_rate', 'tool_support_rate',
                                                                         'required_test_completion_rate')})
         doc['coverage'].update(changes)
-        return doc
+        return repackaged(doc)
 
     def test_a_zero_denominator_is_insufficient_data_never_full_coverage(self):
         self.assertEqual(self.problems(self.zero_denominator()), [])
@@ -1219,6 +1465,7 @@ class CoverageRecord(unittest.TestCase):
                                required_test_completion_rate=None,
                                states={'effective_judgement_rate': 'measured', 'tool_support_rate': 'measured',
                                        'required_test_completion_rate': 'insufficient_data'})
+        repackaged(doc)
         self.assertEqual(self.problems(doc), [])
         doc['coverage']['required_test_completion_rate'] = 1.0
         doc['coverage']['states']['required_test_completion_rate'] = 'measured'
@@ -1497,7 +1744,7 @@ class AllowedCases(unittest.TestCase):
         doc['requirements'][0]['confirmation']['expiry'] = '2027-05-01T00:00:00Z'
         e = doc['execution_records'][1]
         e.update(case_kind='allowed', checks={'access_granted': True})
-        return doc, e['test_id']
+        return repackaged(doc), e['test_id']
 
     def test_a_legitimate_exception_allows_only_the_tests_it_lists(self):
         # TK-DYN-003: the item's rule is deny; only its allowed tests are judged by allow (〈定義：確認清單〉 修改).
@@ -1601,7 +1848,7 @@ class EnvironmentInReport(unittest.TestCase):
         cov['required_test_completion_rate'] = 0.0
         cov['tables_and_policies']['judged'] = 0
         cov['claim'] = 'known_scope_only'
-        return doc
+        return repackaged(doc)
 
     def test_environment_schema_requires_all_four_fields_forbids_extras_and_checks_stage_presence(self):
         for missing in ('mode', 'profile_digest', 'unsupported', 'known_differences', 'isolation', 'test_data'):

@@ -1,4 +1,31 @@
 {
+  "toolkit_version": "0.1.0a0",
+  "scope": {"endpoints": ["/rest/v1/documents"], "resources": ["documents"], "allowed_operations": ["GET", "PATCH"], "data_scope": "synthetic sample data of samples/object-authz only"},
+  "evidence_package": [
+    {"item": "commit", "status": "present", "note": "commit"},
+    {"item": "build_artifact_digest", "status": "not_applicable", "note": "no build is run in this version; the source is the one the BuildRecipe pins"},
+    {"item": "container_image_digests", "status": "present", "note": "environment.service_images"},
+    {"item": "environment_differences", "status": "present", "note": "environment.known_differences"},
+    {"item": "requirement_test_finding_links", "status": "present", "note": "execution_records[].requirement_id, findings[].execution_record_ids"},
+    {"item": "threat_links", "status": "not_applicable", "note": "threat modelling is not part of this version (stage threat_planning is not_run)"},
+    {"item": "toolkit_version", "status": "present", "note": "toolkit_version"},
+    {"item": "rule_and_template_versions", "status": "present", "note": "coverage.inventory.rule, execution_records[].template_id, findings[].fingerprint_version"},
+    {"item": "model_and_prompt_versions", "status": "not_applicable", "note": "no model is called in this version"},
+    {"item": "identity_references", "status": "present", "note": "authorization_matrix, execution_records[].actor_ref"},
+    {"item": "synthetic_data_version", "status": "present", "note": "environment.seed_version, environment.test_data"},
+    {"item": "random_seed", "status": "not_applicable", "note": "no test of this version draws random input"},
+    {"item": "preconditions", "status": "present", "note": "execution_records[].checks"},
+    {"item": "requests_and_responses", "status": "present", "note": "execution_records[].evidence: method, path, status and row count; no body is kept, so nothing needs masking"},
+    {"item": "positive_control_and_state_difference", "status": "present", "note": "execution_records[].evidence: the owner's control request and the observer's states before and after"},
+    {"item": "error_records", "status": "present", "note": "execution_records[].error"},
+    {"item": "timing", "status": "present", "note": "execution_records[].started_at and ended_at, limits.elapsed_seconds"},
+    {"item": "cost", "status": "not_applicable", "note": "no model is called: nothing is billed"},
+    {"item": "retries", "status": "not_applicable", "note": "no request is retried in this version"},
+    {"item": "cancellation", "status": "present", "note": "no abort was requested; a cancelled case is named in execution_records[].result"},
+    {"item": "reproduction_steps", "status": "present", "note": "the requests of each finding's execution records, in order"},
+    {"item": "fix_and_regression", "status": "missing", "note": "this version writes no fix suggestion; the failed test is the regression test to run again"},
+    {"item": "limitations", "status": "present", "note": "coverage.claim, coverage.unsupported_items, environment.known_differences, stages"}
+  ],
   "schema_version": "1",
   "run_id": "run-20261101-0001",
   "id": "report-20261101-0002",
@@ -19,7 +46,7 @@
     "profile_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
     "unsupported": [],
     "known_differences": ["E1 local stack: no cloud network, real third-party identity or hosted-only limits; results here do not imply E2 or production (TK-ENV-007)"],
-    "test_data": {"synthetic_statement": {"method": "written by hand for this sample", "confirmed_by": "sample-maintainer", "confirmed_at": "2026-11-04T00:00:00Z"}, "domain_exceptions": []},
+    "seed_version": "2026-11-04.1", "service_images": [{"service": "db", "image": "supabase/postgres:17.6.1.054", "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}], "test_data": {"synthetic_statement": {"method": "written by hand for this sample", "confirmed_by": "sample-maintainer", "confirmed_at": "2026-11-04T00:00:00Z"}, "domain_exceptions": []},
     "isolation": {"outbound": "blocked", "method": "internal-network", "host_access": ["127.0.0.1:54321 -> kong:8000", "127.0.0.1:54322 -> db:5432"], "containers_checked": ["auth", "db", "kong", "rest"], "limits": ["containers share the host kernel: container isolation is not full isolation (TK-SBX-007)"]}
   },
   "cleanup": {"environment": "destroyed", "leftovers": []},
@@ -117,7 +144,7 @@
       },
       "evidence": [
         {
-          "id": "ev-0001",
+          "id": "ev-0001", "digest": "sha256:944bb0eee93505fffdef471931a79363cb2dcb4fe5d46890cf495c879210eef6", "type": "observation", "captured_at": "2026-11-01T10:00:01Z", "source": "the database, as the read-only observer role", "access_level": "restricted",
           "channel": "observer",
           "identity_ref": "observer",
           "point": "before",
@@ -131,7 +158,7 @@
           }
         },
         {
-          "id": "ev-0002",
+          "id": "ev-0002", "digest": "sha256:bbf892a66c4c6a85c1de6544e2d72f14084854ec601137e5074e30778d0b0056", "type": "request_response", "captured_at": "2026-11-01T10:00:01Z", "source": "the application's API, as the identity named", "access_level": "restricted",
           "channel": "actor",
           "identity_ref": "owner",
           "api_key_format": "anon-jwt",
@@ -145,7 +172,7 @@
           }
         },
         {
-          "id": "ev-0003",
+          "id": "ev-0003", "digest": "sha256:95a740129e6accd51e5ee69a6edf05a1deffa4bc27f15c54066cc029affec918", "type": "request_response", "captured_at": "2026-11-01T10:00:01Z", "source": "the application's API, as the identity named", "access_level": "restricted",
           "channel": "actor",
           "identity_ref": "same_tenant_non_owner",
           "api_key_format": "anon-jwt",
@@ -185,7 +212,7 @@
       },
       "evidence": [
         {
-          "id": "ev-0004",
+          "id": "ev-0004", "digest": "sha256:b70ddee70db7ee5d1cc7a7acd899af226b9b7e82bd2b2196826446d7fdc6db5f", "type": "request_response", "captured_at": "2026-11-01T10:00:01Z", "source": "the application's API, as the identity named", "access_level": "restricted",
           "channel": "actor",
           "identity_ref": "owner",
           "api_key_format": "anon-jwt",
@@ -200,7 +227,7 @@
           }
         },
         {
-          "id": "ev-0005",
+          "id": "ev-0005", "digest": "sha256:944bb0eee93505fffdef471931a79363cb2dcb4fe5d46890cf495c879210eef6", "type": "observation", "captured_at": "2026-11-01T10:00:01Z", "source": "the database, as the read-only observer role", "access_level": "restricted",
           "channel": "observer",
           "identity_ref": "observer",
           "point": "before",
@@ -214,7 +241,7 @@
           }
         },
         {
-          "id": "ev-0006",
+          "id": "ev-0006", "digest": "sha256:5184a2a585e3894309c3112b5bdb8a8bafa593cc48bcf948de24d0cf8d6caaf1", "type": "request_response", "captured_at": "2026-11-01T10:00:01Z", "source": "the application's API, as the identity named", "access_level": "restricted",
           "channel": "actor",
           "identity_ref": "other_tenant_user",
           "api_key_format": "anon-jwt",
