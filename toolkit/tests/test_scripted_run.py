@@ -361,6 +361,199 @@ class TheStacksLifecycle(unittest.TestCase):
         self.assertEqual(lifecycle.calls, ['reset', 'destroy'])
 
 
+def abort_after(prepare, abort, requests, reason='stopped by the operator (test)'):
+    """A `prepare` whose stack asks for the abort once this many actor requests of the cases have gone out."""
+    def prepared(project_dir):
+        ready = prepare(project_dir)
+        ops, made = ready.env, []
+        request = ops.request
+
+        def counted(*args, **kwargs):
+            answer = request(*args, **kwargs)
+            made.append(1)
+            if len(made) == requests:
+                abort.request(reason)
+            return answer
+        ops.request = counted
+        return ready
+    return prepared
+
+
+class AnAbortedRun(unittest.TestCase):
+    """〈定義：中止與清理〉 (TK-RUN-004, TK-RUN-005, TK-RUN-006): the control area stops a run without the test's
+    cooperation, in the order of the spec, and the report says so."""
+
+    DENIED = (403, None)
+
+    def plan(self, n=4):
+        return cases(*[('READ-other-tenant', f'CASE-{i}', {}) for i in range(1, n + 1)])
+
+    def aborted(self, requests, n=4, world=None, **options):
+        world = world or scripted.World(attempt=self.DENIED)
+        prepare, lifecycle = scripted.prepare_with(world, **options)
+        abort = scan.Abort()
+        rep = scan.run(self.plan(n), prepare=abort_after(prepare, abort, requests), abort=abort).report
+        self.assertEqual(report.validate(rep), [])
+        return rep, [e['result'] for e in rep['execution_records']], world, lifecycle
+
+    def test_an_abort_before_the_environment_is_ready_cancels_every_case_and_destroys_it(self):
+        prepare, lifecycle = scripted.prepare_with(scripted.World(attempt=self.DENIED))
+        abort = scan.Abort()
+        abort.request('stopped by the operator (before the start)')
+        rep = scan.run(self.plan(3), prepare=prepare, abort=abort).report
+        self.assertEqual(report.validate(rep), [])
+        self.assertEqual([e['result'] for e in rep['execution_records']], ['cancelled'] * 3)
+        self.assertEqual((rep['status'], rep['abort']['in_flight']), ('cancelled', None))
+        self.assertEqual(lifecycle.calls, ['destroy'])
+        self.assertEqual(rep['cleanup'], {'environment': 'destroyed', 'leftovers': []})
+
+    def test_the_case_in_flight_ends_at_its_next_request_and_the_later_ones_are_cancelled(self):
+        # A denial case makes three actor requests; the abort comes after the first request of the second case.
+        rep, results, world, _ = self.aborted(requests=4)
+        self.assertEqual(results, ['passed', 'error', 'cancelled', 'cancelled'])
+        self.assertEqual(rep['status'], 'cancelled')
+        in_flight = rep['execution_records'][1]
+        self.assertIn('outcome is unknown', in_flight['error'])
+        self.assertEqual(rep['abort']['in_flight'], in_flight['test_id'])
+        self.assertIn('not dispatched: the run was aborted', rep['execution_records'][2]['error'])
+        self.assertEqual(rep['findings'], [])
+        # Nothing of a case went out after the request: only the logouts that revoke the sessions.
+        after = world.http_calls[4:]
+        self.assertTrue(after)
+        self.assertTrue(all('/auth/v1/logout' in url for _, url, _, _ in after), after)
+
+    def test_the_record_has_the_reason_the_source_the_time_and_the_steps_in_order(self):
+        rep, _, _, _ = self.aborted(requests=4)
+        abort = rep['abort']
+        self.assertEqual((abort['source'], abort['reason']), ('operator', 'stopped by the operator (test)'))
+        self.assertRegex(abort['requested_at'], r'^\d{4}-\d\d-\d\dT')
+        self.assertEqual([s['step'] for s in abort['steps']],
+                         ['dispatch_stopped', 'credentials_revoked', 'in_flight_ended', 'evidence_kept',
+                          'in_flight_checked', 'environment_isolated'])  # TK-RUN-005, written here by hand
+        seconds = [s['seconds'] for s in abort['steps']]
+        self.assertEqual(seconds, sorted(seconds))
+        self.assertEqual(set(abort['seconds']), {'dispatch_stopped', 'in_flight_ended', 'environment_isolated'})
+        self.assertTrue(all(isinstance(v, float) for v in abort['seconds'].values()), abort['seconds'])
+        self.assertEqual(abort['limits_seconds'], {'dispatch_stopped': 60, 'in_flight_ended': 60,
+                                                   'environment_isolated': 360})
+        self.assertEqual(abort['over_limit'], [])
+        self.assertTrue(abort['not_covered'])
+
+    def test_the_sessions_are_logged_out_and_the_tokens_are_gone_before_the_stack_is_destroyed(self):
+        rep, _, world, lifecycle = self.aborted(requests=4)
+        self.assertEqual(set(rep['abort']['sessions'].values()), {'revoked'})
+        self.assertEqual(world.revoked, {f'token-{n}' for n in scripted.EMAILS})
+        self.assertEqual(lifecycle.calls, ['destroy'])
+
+    def test_a_logout_that_gets_no_answer_is_not_confirmed(self):
+        world = scripted.World(attempt=self.DENIED)
+        prepare, _ = scripted.prepare_with(world)
+        abort = scan.Abort()
+
+        def prepared(project_dir):
+            ready = prepare(project_dir)
+            world.http_error = environment.RequestFailed('connection refused')  # the API is gone by the abort
+            abort.request('stopped by the operator (test)')
+            return ready
+        rep = scan.run(self.plan(1), prepare=prepared, abort=abort).report
+        self.assertEqual(report.validate(rep), [])
+        self.assertEqual(set(rep['abort']['sessions'].values()), {'not_confirmed'})
+
+    def test_times_over_the_policys_limits_are_reported(self):
+        ticks = iter(range(0, 100_000, 100))  # every look at the clock is 100 s later
+        prepare, _ = scripted.prepare_with(scripted.World(attempt=self.DENIED))
+        abort = scan.Abort(clock=lambda: next(ticks))
+        abort.request('stopped by the operator (test)')
+        rep = scan.run(self.plan(1), prepare=prepare, abort=abort).report
+        self.assertEqual(report.validate(rep), [])
+        self.assertEqual(rep['abort']['over_limit'], ['dispatch_stopped', 'in_flight_ended', 'environment_isolated'])
+        self.assertIn('超過上限', scan.run(self.plan(1), prepare=prepare, abort=self.late()).markdown)
+
+    def late(self):
+        ticks = iter(range(0, 100_000, 100))
+        abort = scan.Abort(clock=lambda: next(ticks))
+        abort.request('stopped by the operator (test)')
+        return abort
+
+    def test_only_the_first_request_counts(self):
+        abort = scan.Abort()
+        self.assertTrue(abort.request('first', source='system'))
+        self.assertFalse(abort.request('second', source='operator'))
+        self.assertEqual((abort.reason, abort.source), ('first', 'system'))
+
+    def test_an_abort_with_no_case_left_to_dispatch_is_recorded_but_the_run_is_not_cancelled(self):
+        # The only case is in flight: it ends without an outcome, and nothing was left undispatched.
+        rep, results, _, _ = self.aborted(requests=3, n=1)
+        self.assertEqual(results, ['error'])
+        self.assertEqual(rep['status'], 'partial')
+        self.assertEqual((rep['abort']['source'], rep['abort']['in_flight']), ('operator', 'CASE-1'))
+
+    def test_a_run_whose_time_is_used_up_is_aborted_by_the_system(self):
+        ticks = iter(range(0, 100_000, 90))
+        prepare, _ = scripted.prepare_with(scripted.World(attempt=self.DENIED))
+        m = self.plan(4)
+        m['limits']['max_duration_seconds'] = 200
+        rep = scan.run(m, prepare=prepare, clock=lambda: next(ticks)).report
+        self.assertEqual(report.validate(rep), [])
+        results = [e['result'] for e in rep['execution_records']]
+        self.assertEqual(results[0], 'passed')
+        self.assertEqual(results[-1], 'cancelled')
+        self.assertNotIn('passed', results[1:])
+        self.assertEqual((rep['status'], rep['abort']['source']), ('cancelled', 'system'))
+        self.assertIn('time limit', rep['abort']['reason'])
+
+    def test_a_failed_reset_is_an_abort_by_the_system_and_the_later_cases_stay_blocked(self):
+        m = cases(('UPDATE-other-tenant', 'FIRST', {}), ('READ-other-tenant', 'SECOND', {}))
+        prepare, lifecycle = scripted.prepare_with(scripted.World(attempt=(403, None)), reset_fails=True)
+        rep = scan.run(m, prepare=prepare).report
+        self.assertEqual(report.validate(rep), [])
+        self.assertEqual(rep['execution_records'][1]['result'], 'blocked')  # TK-SBX-010, not cancelled
+        self.assertEqual(rep['status'], 'partial')
+        self.assertEqual(rep['abort']['source'], 'system')
+        self.assertIn('environment reset failed after FIRST', rep['abort']['reason'])
+        self.assertEqual(lifecycle.calls, ['reset', 'destroy'])
+
+    def test_a_run_that_is_not_aborted_has_no_abort_record(self):
+        rep, _, _ = run(self.plan(1), scripted.World(attempt=self.DENIED))
+        self.assertNotIn('abort', rep)
+        self.assertEqual(rep['cleanup'], {'environment': 'destroyed', 'leftovers': []})
+
+
+class WhenTheEnvironmentCannotBeDestroyed(unittest.TestCase):
+    """TK-ENV-003, TK-SBX-010: a destroy that leaves something behind is a platform anomaly in the report."""
+
+    def test_the_report_is_still_made_names_what_is_left_and_is_not_completed(self):
+        rep, by_id, _ = run(cases(('READ-other-tenant', 'ONLY', {})), scripted.World(attempt=(403, None)),
+                            leftovers=['container supabase_db_scripted'])
+        self.assertEqual(by_id['ONLY']['result'], 'passed')
+        self.assertEqual(rep['cleanup'], {'environment': 'destroy_failed', 'leftovers': ['container supabase_db_scripted']})
+        self.assertEqual(rep['status'], 'partial')
+        self.assertIn('platform anomaly', rep['status_reason'])
+        self.assertIn('container supabase_db_scripted', rep['status_reason'])
+
+    def test_a_destroy_that_raises_is_reported_the_same_way(self):
+        prepare, lifecycle = scripted.prepare_with(scripted.World(attempt=(403, None)))
+
+        def broken(env):
+            raise OSError('docker: command not found')
+        lifecycle.destroy = broken
+
+        def prepared(project_dir):
+            ready = prepare(project_dir)
+            ready.env._destroy = broken
+            return ready
+        rep = scan.run(cases(('READ-other-tenant', 'ONLY', {})), prepare=prepared).report
+        self.assertEqual(report.validate(rep), [])
+        self.assertEqual(rep['cleanup']['environment'], 'destroy_failed')
+        self.assertIn('command not found', rep['cleanup']['leftovers'][0])
+
+    def test_an_environment_outside_the_matrix_is_destroyed_and_says_so(self):
+        rep, _, lifecycle = run(cases(('READ-other-tenant', 'ONLY', {})), scripted.World(attempt=(403, None)),
+                                unsupported=['service rest img:0'])
+        self.assertEqual(lifecycle.calls, ['destroy'])
+        self.assertEqual(rep['cleanup'], {'environment': 'destroyed', 'leftovers': []})
+
+
 def passing_read(version='vulnerable'):
     """A one-test plan on a sample, answered the way a correct policy answers: the other tenant's read is denied."""
     m = manifest(version)

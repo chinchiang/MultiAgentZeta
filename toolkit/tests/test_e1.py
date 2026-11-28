@@ -583,9 +583,49 @@ class DestroyEnv(unittest.TestCase):
         self.assertIsInstance(result, e1.Ready, result)
         project_id = result.env.project_id
         self.assertTrue(leftovers(project_id)['containers'])
-        e1.destroy(result.env)
+        self.assertEqual(e1.destroy(result.env), [])  # TK-ENV-003: checked, nothing is left
         self.assertEqual(leftovers(project_id), {'containers': [], 'volumes': [], 'networks': []})
         self.assertFalse(result.env.usable)
+        self.assertEqual(result.env.relays, [])
+
+    def test_a_destroy_that_stops_nothing_names_what_is_left_and_the_environment_is_not_reused(self):
+        from unittest import mock
+        result = e1.prepare(SAMPLES / 'vulnerable')
+        self.assertIsInstance(result, e1.Ready, result)
+        env = result.env
+        try:
+            with mock.patch.object(e1, '_stop_stack', return_value=['supabase stop: exit 1: simulated']):
+                left = e1.destroy(env)
+            self.assertIn(f'container supabase_db_{env.project_id}', left)
+            self.assertIn(f'network {env.network}', left)
+            self.assertTrue(any(x.startswith('volume ') for x in left), left)
+            self.assertIn('while stopping: supabase stop: exit 1: simulated', left)
+            env.usable = False  # what the real stop does first
+            again = e1.reset(env)
+            self.assertEqual((type(again), again.step), (e1.Blocked, 'snapshot_reset'))  # TK-SBX-010
+        finally:
+            self.assertEqual(e1.destroy(env), [])
+
+    def test_logging_out_ends_the_sessions_refresh_tokens(self):
+        # 〈定義：中止與清理〉 撤銷測試憑證, against the real auth service.
+        from toolkit import environment
+        ready = environment.prepare(SAMPLES / 'vulnerable')
+        self.assertIsInstance(ready, e1.Ready, ready)
+        ops = ready.env
+        try:
+            env = ops._env
+            held = {name: dict(tokens) for name, tokens in env.tokens.items()}
+            self.assertTrue(held)
+            self.assertEqual(set(ops.revoke_sessions().values()), {'revoked'})
+            self.assertEqual(env.tokens, {})
+            for name, tokens in held.items():
+                with self.subTest(identity=name):
+                    status, _ = e1._http('POST', f'{env.api_url}/auth/v1/token?grant_type=refresh_token',
+                                         {'apikey': env.anon_key}, {'refresh_token': tokens['refresh_token']})
+                    self.assertNotEqual(status, 200)
+                    self.assertNotEqual(status, 0)  # the auth service answered: it refused
+        finally:
+            self.assertEqual(ops.destroy(), [])
 
 
 def failing_copy(d, version='vulnerable', recipe_change=None, file_change=None):
@@ -938,6 +978,55 @@ class ACommandThatDoesNotComplete(unittest.TestCase):
         with self.assertRaises(KeyboardInterrupt):
             e1.prepare(failing_copy(self.tmp.name), matrix=self.matrix)
         self.assertTrue(self.stopped())
+
+    def test_destroy_reports_nothing_left_when_docker_lists_nothing_of_the_stack(self):
+        self.run_commands(lambda cmd: (0, 'supabase_db_another-project\nbridge\n', ''))
+        env = self.started_env()
+        self.assertEqual(e1.destroy(env), [])
+        self.assertFalse(env.usable)
+        self.assertTrue(self.stopped())
+
+    def test_destroy_names_the_containers_volumes_and_network_still_listed(self):
+        def answer(cmd):
+            if cmd[1:2] == ['stop']:
+                return 1, '', 'failed to stop'
+            if cmd[:2] == ['docker', 'ps']:
+                self.assertIn('-a', cmd)  # a stopped container is still there
+                return 0, 'supabase_db_maz-never-started\nsupabase_db_other\n', ''
+            if cmd[:3] == ['docker', 'volume', 'ls']:
+                return 0, 'supabase_db_maz-never-started\n', ''
+            if cmd[:3] == ['docker', 'network', 'ls']:
+                return 0, 'bridge\nmaz_e1_maz-never-started\n', ''
+            return 0, '', ''
+        self.run_commands(answer)
+        left = e1.destroy(self.started_env())
+        self.assertEqual(left[:3], ['container supabase_db_maz-never-started', 'volume supabase_db_maz-never-started',
+                                    'network maz_e1_maz-never-started'])
+        self.assertTrue(any('while stopping: fake-supabase stop: exit 1' in x or 'stop: exit 1' in x for x in left), left)
+
+    def test_what_docker_cannot_list_is_not_known_to_be_gone(self):
+        import subprocess
+
+        def answer(cmd):
+            if cmd[:2] == ['docker', 'ps']:
+                raise subprocess.TimeoutExpired(cmd, 60)
+            if cmd[:3] == ['docker', 'volume', 'ls']:
+                return 1, '', 'Cannot connect to the Docker daemon'
+            return 0, '', ''
+        self.run_commands(answer)
+        left = e1.destroy(self.started_env())
+        self.assertTrue(any(x.startswith('containers not checked') for x in left), left)
+        self.assertTrue(any(x.startswith('volumes not checked') for x in left), left)
+
+    def test_a_stop_command_that_does_not_complete_does_not_raise_from_destroy(self):
+        import subprocess
+
+        def answer(cmd):
+            if cmd[1:2] == ['stop']:
+                raise subprocess.TimeoutExpired(cmd, 300)
+            return 0, '', ''
+        self.run_commands(answer)
+        self.assertEqual(e1.destroy(self.started_env()), [])  # nothing is listed: it is gone, however stop ended
 
     def test_a_reset_whose_database_command_fails_isolates_the_environment(self):
         def answer(cmd):

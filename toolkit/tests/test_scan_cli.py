@@ -122,6 +122,58 @@ class CommandLine(unittest.TestCase):
         self.assertEqual((code, out, self.written()), (3, '', []))
         self.assertIn('the container tool broke', err)
 
+    def signalling(self, world, sends):
+        """A `prepare` that sends this process the signal `sends` times once the stack is ready."""
+        import os
+        import signal
+        prepare, lifecycle = scripted.prepare_with(world)
+
+        def prepared(project_dir):
+            ready = prepare(project_dir)
+            for _ in range(sends):
+                os.kill(os.getpid(), signal.SIGTERM)
+            return ready
+        return prepared, lifecycle
+
+    def test_a_signal_aborts_the_run_and_the_report_is_still_written(self):
+        import signal
+        before = signal.getsignal(signal.SIGTERM)
+        m, world = passing_read()
+        prepare, lifecycle = self.signalling(world, sends=1)
+        code, out, err, _ = self.run_main(m, world, prepare=prepare)
+        self.assertEqual(code, 0)
+        self.assertIn('abort requested (SIGTERM)', err)
+        doc = json.loads((self.out / 'report.json').read_text(encoding='utf-8'))
+        self.assertEqual(report.validate(doc), [])
+        self.assertEqual(doc['status'], 'cancelled')
+        self.assertEqual({e['result'] for e in doc['execution_records']}, {'cancelled'})
+        self.assertEqual((doc['abort']['source'], doc['abort']['reason']), ('operator', 'stopped by the operator (SIGTERM)'))
+        self.assertIn('cancelled (已取消)', out)  # 已取消, written here by hand
+        self.assertEqual(lifecycle.calls, ['destroy'])
+        self.assertIs(signal.getsignal(signal.SIGTERM), before)  # the earlier handler is back
+
+    def test_a_second_signal_forces_the_stop_without_a_report_and_the_stack_is_destroyed(self):
+        m, world = passing_read()
+        prepare, lifecycle = scripted.prepare_with(world)
+
+        def prepared(project_dir):
+            import os
+            import signal
+            ready = prepare(project_dir)
+            request = ready.env.request
+
+            def then_signal(*args, **kwargs):  # twice, while a case is running
+                os.kill(os.getpid(), signal.SIGTERM)
+                os.kill(os.getpid(), signal.SIGTERM)
+                return request(*args, **kwargs)
+            ready.env.request = then_signal
+            return ready
+        code, out, err, _ = self.run_main(m, world, prepare=prepared)
+        self.assertEqual(code, 3)
+        self.assertIn('no report was written', err)
+        self.assertEqual(self.written(), [])
+        self.assertEqual(lifecycle.calls, ['destroy'])
+
     def test_no_credential_reaches_the_output_or_the_files(self):
         m = one_case('READ-other-tenant')
         code, out, err, world = self.run_main(m, scripted.World(attempt=(200, [{'title': 'MARK-A-ALICE-PRIVATE', 'body': 'b'}])))

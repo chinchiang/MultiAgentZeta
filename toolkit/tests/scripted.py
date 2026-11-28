@@ -89,15 +89,17 @@ class Transport:
 class Lifecycle:
     """e1's reset and destroy, recorded instead of touching Docker. reset_fails: the reset cannot restore the seed."""
 
-    def __init__(self, reset_fails=False):
-        self.calls, self.reset_fails = [], reset_fails
+    def __init__(self, reset_fails=False, leftovers=()):
+        self.calls, self.reset_fails, self.leftovers = [], reset_fails, list(leftovers)
 
     def reset(self, env):
         self.calls.append('reset')
         return e1.Blocked('snapshot_reset', 'scripted reset failed') if self.reset_fails else e1.Ready({}, env)
 
     def destroy(self, env):
+        """What is left of the stack, as e1.destroy returns it: nothing, unless leftovers were scripted."""
         self.calls.append('destroy')
+        return list(self.leftovers)
 
 
 def handles(api_keys=None):
@@ -118,9 +120,10 @@ DEFAULT_DIFFERENCES = (
 )
 
 
-def prepare_with(world, api_keys=None, reset_fails=False, unsupported=(), known_differences=DEFAULT_DIFFERENCES):
+def prepare_with(world, api_keys=None, reset_fails=False, unsupported=(), known_differences=DEFAULT_DIFFERENCES,
+                 leftovers=()):
     """A `prepare` for scan.run(): a ready stack whose transport is the world. Returns it and its lifecycle."""
-    lifecycle = Lifecycle(reset_fails)
+    lifecycle = Lifecycle(reset_fails, leftovers)
     profile = {'mode': 'E1',
                'identities': {n: {'login': 'ok', 'path': 'scripted'} for n in [*EMAILS, 'anonymous']},
                'unsupported': list(unsupported),

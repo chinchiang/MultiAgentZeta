@@ -68,7 +68,52 @@ def _cross_record_problems(doc):
             problems.append(f'findings/{i}: a confirmed finding needs a failed execution record; '
                             f'execution_record_ids {ids} do not include one')
     return (problems + _limit_problems(doc) + _requirement_problems(doc) + _approval_problems(doc)
-            + _review_problems(doc) + _environment_problems(doc) + _coverage_problems(doc))
+            + _review_problems(doc) + _environment_problems(doc) + _coverage_problems(doc) + _abort_problems(doc))
+
+
+ABORT_STEPS = ('dispatch_stopped', 'credentials_revoked', 'in_flight_ended', 'evidence_kept', 'in_flight_checked',
+               'environment_isolated')  # TK-RUN-005
+
+
+def _abort_problems(doc):
+    """〈定義：中止與清理〉 (TK-RUN-004, TK-RUN-005, TK-RUN-006, TK-ENV-003): a cleanup record exactly when an
+    environment was prepared; an environment that was not destroyed has its leftovers named and the run is
+    not completed; a cancelled run has an abort record and a cancelled case; the abort's steps are in the
+    order of TK-RUN-005 with times that do not go back, and over_limit is what the times and limits give."""
+    if not isinstance(doc, dict):
+        return []
+    problems = []
+    cleanup = doc.get('cleanup')
+    if ('cleanup' in doc) != ('environment' in doc):
+        problems.append('cleanup: present exactly when an environment was prepared (TK-ENV-003)')
+    if isinstance(cleanup, dict):
+        failed, left = cleanup.get('environment') == 'destroy_failed', cleanup.get('leftovers')
+        if failed != bool(left):
+            problems.append('cleanup: leftovers are named exactly when the environment was not destroyed (TK-ENV-003)')
+        if failed and doc.get('status') == 'completed':
+            problems.append("cleanup: status cannot be 'completed' when the environment was not destroyed (TK-ENV-003)")
+    abort = doc.get('abort')
+    if doc.get('status') == 'cancelled':
+        if not isinstance(abort, dict):
+            problems.append('abort: a cancelled run records who asked for the abort, why and when (TK-RUN-004)')
+        if not any(isinstance(e, dict) and e.get('result') == 'cancelled' for e in _list(doc, 'execution_records')):
+            problems.append('status: a cancelled run has at least one cancelled case (TK-RUN-005)')
+    if not isinstance(abort, dict):
+        return problems
+    steps = [s for s in abort.get('steps') or [] if isinstance(s, dict)]
+    order = [ABORT_STEPS.index(s['step']) for s in steps if s.get('step') in ABORT_STEPS]
+    if order != sorted(set(order)):
+        problems.append('abort: steps are in the order of TK-RUN-005, each once')
+    seconds = [s.get('seconds') for s in steps if isinstance(s.get('seconds'), (int, float))]
+    if seconds != sorted(seconds):
+        problems.append('abort: the time of a step is not before the step ahead of it (TK-RUN-005)')
+    measured, limits = abort.get('seconds'), abort.get('limits_seconds')
+    if isinstance(measured, dict) and isinstance(limits, dict):
+        over = [n for n, v in measured.items() if isinstance(v, (int, float)) and isinstance(limits.get(n), (int, float))
+                and v > limits[n]]
+        if sorted(over) != sorted(abort.get('over_limit') or []):
+            problems.append(f'abort: over_limit must be {sorted(over)}, the times above their limit (TK-RUN-006)')
+    return problems
 
 
 def _limit_problems(doc):
@@ -106,7 +151,7 @@ def _environment_problems(doc):
     has_env = 'environment' in doc
     problems = []
     if not has_env and (doc.get('status') in ('completed', 'partial')
-                        or stages.get('dynamic_execution') in ('completed', 'failed')):
+                        or stages.get('dynamic_execution') in ('completed', 'failed', 'cancelled')):
         problems.append('environment: required when status is completed/partial or dynamic_execution ran '
                         '(〈定義：核心資料物件與相依紀錄〉, TK-EVD-005)')
     if has_env and stages.get('dynamic_execution') == 'not_run':
@@ -445,6 +490,47 @@ def _isolation_lines(isolation):
             *[f'  - {_inline(x)}' for x in isolation['limits']]]
 
 
+CLEANUP_LABELS = {'destroyed': '已銷毀（查證後無殘留）', 'destroy_failed': '銷毀失敗（平台異常，環境不再使用）'}
+ABORT_SOURCE_LABELS = {'operator': '操作者', 'system': '系統'}
+ABORT_STEP_LABELS = {'dispatch_stopped': '停止派送', 'credentials_revoked': '撤銷測試工作階段',
+                     'in_flight_ended': '在途案例結束', 'evidence_kept': '保留已取得的證據',
+                     'in_flight_checked': '核對在途案例', 'environment_isolated': '環境隔離並銷毀'}
+ABORT_TIME_LABELS = {'dispatch_stopped': '派送停止時間', 'in_flight_ended': '程序終止時間（在途案例結束）',
+                     'environment_isolated': '環境隔離時間'}
+SESSION_LABELS = {'revoked': '已撤銷', 'not_confirmed': '未能確認'}
+
+
+def _cleanup_section(doc):
+    """〈定義：中止與清理〉: the abort, if there was one, with its steps and times (TK-RUN-004 to TK-RUN-006), and
+    whether the environment is gone (TK-ENV-003)."""
+    abort, cleanup = doc.get('abort'), doc.get('cleanup')
+    if not abort and not cleanup:
+        return []
+    lines = ['', '## 中止與清理', '']
+    if abort:
+        lines.append(f'- **中止（TK-RUN-004）**：由{ABORT_SOURCE_LABELS[abort["source"]]}觸發，'
+                     f'{_code(abort["requested_at"])}；原因：{_inline(abort["reason"])}')
+        lines.append('- **處理順序（TK-RUN-005）**：')
+        lines += [f'  {i}. {ABORT_STEP_LABELS[s["step"]]}：{_code(s["at"])}（第 {s["seconds"]:g} 秒）'
+                  for i, s in enumerate(abort['steps'], 1)]
+        lines.append('- **中止時間（TK-RUN-006）**：')
+        for name, label in ABORT_TIME_LABELS.items():
+            value, limit = abort['seconds'][name], abort['limits_seconds'][name]
+            shown = '未達到' if value is None else f'{value:g} 秒'
+            lines.append(f'  - {label}：{shown}（上限 {limit:g} 秒）' + ('，**超過上限**' if name in abort['over_limit'] else ''))
+        if abort['sessions']:
+            lines.append('- **測試工作階段**：' + '、'.join(f'{_code(n)} {SESSION_LABELS[v]}'
+                                                         for n, v in sorted(abort['sessions'].items())))
+        lines.append('- **在途案例**：' + (f'{_code(abort["in_flight"])} 未完成，結果未知' if abort['in_flight']
+                                         else '中止時沒有案例在執行'))
+        lines.append('- **中止未涵蓋的範圍**：')
+        lines += [f'  - {_inline(x)}' for x in abort['not_covered']]
+    if cleanup:
+        lines.append(f'- **環境清理（TK-ENV-003）**：{CLEANUP_LABELS[cleanup["environment"]]}')
+        lines += [f'  - 殘留：{_inline(x)}' for x in cleanup['leftovers']]
+    return lines
+
+
 def _environment_section(env):
     """〈定義：核心資料物件與相依紀錄〉 EnvironmentProfile: support-matrix warnings (TK-SCP-001) and known
     differences from E2 or production (TK-ENV-007, TK-EVD-005)."""
@@ -584,6 +670,7 @@ def render_markdown(doc):
         lines += _authorization_section(doc)
 
     lines += _environment_section(doc.get('environment'))
+    lines += _cleanup_section(doc)
     lines += _limits_section(doc['limits'])
 
     if doc.get('authorization_matrix'):
