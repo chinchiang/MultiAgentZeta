@@ -268,6 +268,20 @@ class VulnerableRunEnv(unittest.TestCase):
     def test_report_is_valid(self):
         self.assertEqual(report.validate(self.report), [])
 
+    def test_the_environment_build_is_measured_part_by_part(self):
+        # 〈定義：環境建置的量測〉 on a real stack: everything that was attempted completed, the write cases were
+        # each followed by a recovery, and every identity was logged in again after each.
+        measure = self.report['environment_build']
+        for part in ('build', 'initialization', 'test_data'):
+            self.assertEqual(measure[part], {'attempts': 1, 'successes': 1}, part)
+        resets = measure['recovery']['attempts']
+        self.assertGreater(resets, 0)
+        self.assertEqual(measure['recovery']['successes'], resets)
+        self.assertEqual(measure['health'], {'attempts': resets + 1, 'successes': resets + 1})
+        self.assertEqual(sorted(measure['authentication']), ['other_tenant_user', 'owner', 'same_tenant_non_owner'])
+        for name, count in measure['authentication'].items():
+            self.assertEqual(count, {'attempts': resets + 1, 'successes': resets + 1}, name)
+
     def test_run_is_completed(self):
         self.assertEqual(self.report['status'], 'completed')
 
@@ -1946,6 +1960,26 @@ class UnsupportedIdentity(unittest.TestCase):
         rep = scan.run(m).report
         self.assertEqual(report.validate(rep), [])
         self.assertFalse({g for g in self.gaps(rep) if g.startswith('identity:')})
+
+    def test_a_run_blocked_at_the_build_reports_what_was_attempted(self):
+        # 〈定義：環境建置的量測〉: the build failed, nothing after it was attempted.
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            rep = scan.run(manifest_for_recipe_change(d, lambda r: r['source_build'].update(tools=['no-such-tool']))).report
+        self.assertEqual(report.validate(rep), [])
+        measure = rep['environment_build']
+        self.assertEqual(measure['build'], {'attempts': 1, 'successes': 0})
+        self.assertEqual({measure[p]['attempts'] for p in ('initialization', 'test_data', 'health', 'recovery')}, {0})
+        self.assertEqual({c['attempts'] for c in measure['authentication'].values()}, {0})
+        self.assertEqual(sorted(measure['authentication']), ['other_tenant_user', 'owner', 'same_tenant_non_owner'])
+
+    def test_a_run_whose_recipe_cannot_be_used_reports_that_nothing_was_attempted(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            rep = scan.run(manifest_for_recipe_change(d, lambda r: r.pop('health'))).report
+        self.assertEqual(report.validate(rep), [])
+        self.assertEqual({rep['environment_build'][p]['attempts'] for p in ('build', 'initialization', 'recovery')}, {0})
+        self.assertEqual(rep['environment_build']['authentication'], {})
 
     def test_the_gap_stays_when_the_environment_is_blocked(self):
         import tempfile

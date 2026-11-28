@@ -249,6 +249,17 @@
       "description": "〈定義：故障注入〉 (TK-VAL-001): present, and true, on a run of the toolkit's own acceptance. Only such a run has execution records with a fault.",
       "const": true
     },
+    "environment_build": {
+      "description": "〈定義：環境建置的量測〉 (TK-ENV-006): what the preparation of the environment and its resets attempted and completed, each part counted on its own and authentication per test identity. Present whenever the environment was asked for. A part with no attempt was not reached. These numbers are not part of any coverage or detection rate.",
+      "type": "object", "additionalProperties": false,
+      "required": ["build", "initialization", "test_data", "authentication", "health", "recovery"],
+      "properties": {
+        "build": {"$ref": "#/$defs/attempts"}, "initialization": {"$ref": "#/$defs/attempts"},
+        "test_data": {"$ref": "#/$defs/attempts"}, "health": {"$ref": "#/$defs/attempts"},
+        "recovery": {"$ref": "#/$defs/attempts"},
+        "authentication": {"type": "object", "additionalProperties": {"$ref": "#/$defs/attempts"}}
+      }
+    },
     "cleanup": {
       "description": "〈定義：中止與清理〉 銷毀的查證 (TK-ENV-003, TK-SBX-010): whether the environment was found gone after it was destroyed, and what was still there when it was not. Present whenever an environment was prepared.",
       "type": "object", "additionalProperties": false,
@@ -289,6 +300,11 @@
   },
   "$defs": {
     "text": {"type": "string", "minLength": 1},
+    "attempts": {
+      "description": "〈定義：環境建置的量測〉: how often a part was attempted and how often it completed.",
+      "type": "object", "additionalProperties": false, "required": ["attempts", "successes"],
+      "properties": {"attempts": {"type": "integer", "minimum": 0}, "successes": {"type": "integer", "minimum": 0}}
+    },
     "abort_times": {
       "description": "TK-RUN-006: seconds from the abort request until dispatch stopped, the case in flight ended and the environment was isolated; null for a time that was not reached.",
       "type": "object", "additionalProperties": false,
