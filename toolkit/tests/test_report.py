@@ -850,6 +850,32 @@ class Faults(unittest.TestCase):
             with self.subTest(fault=fault):
                 self.assertEqual(report.validate(self.faulted_report(fault)), [])
 
+    def test_a_faulted_record_is_never_a_verdict(self):
+        """〈定義：故障注入〉: a fault makes its case undeterminable."""
+        for result in ('passed', 'failed'):
+            with self.subTest(result=result):
+                doc = self.faulted_report()
+                self.faulted_record(doc)['result'] = result
+                self.assertTrue(any('result' in p for p in report.validate(doc)), report.validate(doc))
+
+    def test_a_fault_belongs_to_a_self_validation_run(self):
+        doc = self.faulted_report()
+        self.assertIs(doc['self_validation'], True)
+        del doc['self_validation']
+        self.assertTrue(any('self-validation' in p for p in report.validate(doc)))
+        doc['self_validation'] = False
+        self.assertNotEqual(report.validate(doc), [])
+
+    def test_the_injection_is_marked_on_its_evidence(self):
+        doc = self.faulted_report()
+        ex = self.faulted_record(doc)
+        ex['evidence'] = [{'id': f"{ex['id']}-ev1", 'channel': 'actor', 'identity_ref': 'other_tenant_user',
+                           'api_key_format': 'anon-jwt', 'injection': 'failed',
+                           'request': {'method': 'POST', 'path': '/auth/v1/logout?scope=global'}}]
+        self.assertEqual(report.validate(doc), [])
+        ex['evidence'][0]['injection'] = 'maybe'
+        self.assertNotEqual(report.validate(doc), [])
+
     def test_unknown_fault_is_rejected(self):
         for fault in ('network-down', ''):
             with self.subTest(fault=fault):

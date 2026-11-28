@@ -174,6 +174,23 @@ class CommandLine(unittest.TestCase):
         self.assertEqual(self.written(), [])
         self.assertEqual(lifecycle.calls, ['destroy'])
 
+    def test_a_fault_is_taken_only_with_the_self_validation_flag(self):
+        m, world = passing_read()
+        m['tests'] = [dict(m['tests'][0], fault='observer-timeout')]
+        code, out, _, _ = self.run_main(m, world)
+        self.assertEqual(code, 0)
+        self.assertIn('blocked', out)
+        self.assertIn('self-validation', out)
+        prepare, _ = scripted.prepare_with(world)
+        stdout, err = io.StringIO(), io.StringIO()
+        other = self.work / 'self-validation'
+        code = scan.main(['--manifest', str(self.manifest_file(m)), '--out', str(other), '--self-validation'],
+                         stdout, err, prepare=prepare)
+        self.assertEqual((code, err.getvalue()), (0, ''))
+        doc = json.loads((other / 'report.json').read_text(encoding='utf-8'))
+        self.assertIs(doc['self_validation'], True)
+        self.assertEqual([(e['result'], e['fault']) for e in doc['execution_records']], [('blocked', 'observer-timeout')])
+
     def test_no_credential_reaches_the_output_or_the_files(self):
         m = one_case('READ-other-tenant')
         code, out, err, world = self.run_main(m, scripted.World(attempt=(200, [{'title': 'MARK-A-ALICE-PRIVATE', 'body': 'b'}])))

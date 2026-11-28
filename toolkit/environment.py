@@ -43,6 +43,15 @@ class ApiKeyUnavailable(Exception):
     request goes out with an empty key (TK-DYN-004, TK-IDN-003; 〈定義：測試結果〉 受阻)."""
 
 
+class InjectionFailed(Exception):
+    """A fault of a self-validation run could not be applied (〈定義：故障注入〉): its case is blocked, with the
+    evidence of the attempt, and is never judged as if the fault were in place."""
+
+    def __init__(self, message, evidence=None):
+        super().__init__(message)
+        self.evidence = evidence
+
+
 class Aborted(Exception):
     """The run was aborted (TK-RUN-004): a request or observer read that had not gone out yet is not made, and
     the case it belonged to ends without a known outcome (〈定義：中止與清理〉)."""
@@ -69,6 +78,7 @@ class Operations:
         self.requests = 0  # actor requests and observer reads made for the run's cases
         self.before_request = None  # set by scan.run(): called before each one, raises Aborted once the run is aborted
         self._reset, self._destroy = lifecycle.reset, lifecycle.destroy  # not the module: no provisioning step is reachable
+        self._relogin = lifecycle.relogin
 
     @property
     def observer_role(self):
@@ -130,39 +140,51 @@ class Operations:
         return observer.document_row_state(self._env, marker, self._transport)
 
     def inject(self, fault, actor_ref, key_format, timeout):
-        """Apply a fault of a test, if it has one. Returns a function that undoes what can be undone.
-        key_format is the API key format the api-key-missing fault removes."""
+        """Apply a fault of a test, if it has one (〈定義：故障注入〉). Returns (undo, evidence): the function that
+        undoes what can be undone, and the evidence of the injection when it was a request. Raises
+        InjectionFailed when the fault could not be applied. key_format is the API key format the
+        api-key-missing fault removes."""
         env = self._env
         if fault == 'session-revoked':
-            self.request(actor_ref, 'POST', '/auth/v1/logout?scope=global', timeout=timeout)
-            return lambda: None  # the actor stays logged out for the rest of the run
-        if fault == 'observer-unavailable':
-            saved = env.observer['password']
-            env.observer['password'] = 'wrong-' + secrets.token_hex(8)
-
-            def restore():
-                env.observer['password'] = saved
-            return restore
-        if fault == 'observer-timeout':  # a query time limit no read can meet (TK-IDN-009)
-            env.observer['timeout_seconds'] = 0.000001
-
-            def no_limit_override():
-                env.observer.pop('timeout_seconds', None)
-            return no_limit_override
+            return self._revoke_session(actor_ref, timeout)
+        if fault in observer.OBSERVER_FAULTS:  # the observer's login is the observer component's to change (TK-IDN-005)
+            return observer.inject(env, fault), None
         if fault == 'api-unreachable':  # every data API request of this case is refused, the owner's control included
             saved_url, env.api_url = env.api_url, closed_local_url()
 
             def reconnect():
                 env.api_url = saved_url
-            return reconnect
+            return reconnect, None
         if fault == 'api-key-missing':  # the environment lacks an API key format (TK-DYN-004)
             saved_key = env.api_keys.pop(key_format, None)
 
             def restore_key():
                 if saved_key is not None:
                     env.api_keys[key_format] = saved_key
-            return restore_key
-        return lambda: None
+            return restore_key, None
+        return (lambda: None), None
+
+    LOGOUT = '/auth/v1/logout?scope=global'
+
+    def _revoke_session(self, actor_ref, timeout):
+        """The session-revoked fault: log the actor out. Whatever comes of it, the actor gets a new session
+        when the case is over, so the fault stays within its case: a logout that timed out may still have
+        reached the auth service."""
+        evidence = {'channel': 'actor', 'identity_ref': actor_ref, 'api_key_format': 'anon-jwt',
+                    'request': {'method': 'POST', 'path': self.LOGOUT}}
+
+        def new_session():
+            self._relogin(self._env, actor_ref)
+        try:
+            status, _ = self.request(actor_ref, 'POST', self.LOGOUT, timeout=timeout)
+        except (RequestTimeout, RequestFailed) as e:
+            new_session()
+            raise InjectionFailed(f'the logout did not complete: {e}', {**evidence, 'injection': 'failed'}) from e
+        evidence['response'] = {'status': status, 'rows': None}
+        if status != 204:
+            new_session()
+            raise InjectionFailed(f'the logout was answered with HTTP {status}', {**evidence, 'injection': 'failed'})
+        return new_session, {**evidence, 'injection': 'applied'}
 
     def reset(self):
         """Reset the stack to its seed (e1.reset). Returns e1.Blocked when it cannot, else None."""

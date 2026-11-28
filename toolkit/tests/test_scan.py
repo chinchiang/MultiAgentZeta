@@ -1923,9 +1923,10 @@ class UndeterminableCasesEnv(unittest.TestCase):
             dict(read, test_id='READ-api-unreachable', fault='api-unreachable'),
             # The logout that injects this fault uses the test's time limit, so the injection itself times out.
             dict(read, test_id='READ-injection-timeout', fault='session-revoked', limits={'timeout_seconds': 0.000001}),
-            dict(read, test_id='READ-session-revoked', fault='session-revoked'),  # last: the actor stays logged out
+            dict(read, test_id='READ-session-revoked', fault='session-revoked'),
+            dict(read, test_id='READ-after-the-faults'),  # 〈定義：故障注入〉: the actor has a session again
         ]
-        cls.report = scan.run(m).report
+        cls.report = scan.run(m, self_validation=True).report
         cls.by_id = {e['test_id']: e for e in cls.report['execution_records']}
 
     def test_report_is_valid_and_partial(self):
@@ -1961,11 +1962,22 @@ class UndeterminableCasesEnv(unittest.TestCase):
         e = self.by_id['READ-session-revoked']
         self.assertEqual(e['checks']['resource_and_control'], True)
 
-    def test_failed_injection_is_an_execution_error_of_its_case_only(self):
+    def test_failed_injection_blocks_its_case_only_and_keeps_the_evidence_of_the_attempt(self):
         e = self.by_id['READ-injection-timeout']
-        self.assertEqual((e['result'], e['fault']), ('error', 'session-revoked'))
+        self.assertEqual((e['result'], e['fault']), ('blocked', 'session-revoked'))
+        self.assertIn('fault injection failed', e['error'])
         self.assertIn('/auth/v1/logout', e['error'])  # the injection step failed, not the case's own requests
+        self.assertEqual([ev.get('injection') for ev in e['evidence']], ['failed'])
         self.assertIn('READ-session-revoked', self.by_id)  # later cases still ran
+
+    def test_the_revoked_session_shows_its_injection_and_the_actor_is_back_afterwards(self):
+        e = self.by_id['READ-session-revoked']
+        self.assertEqual((e['evidence'][0]['injection'], e['evidence'][0]['response']['status']), ('applied', 204))
+        after = self.by_id['READ-after-the-faults']
+        self.assertEqual((after['result'], after['checks']['identity']), ('passed', True))
+
+    def test_the_report_says_it_is_a_self_validation_run(self):
+        self.assertIs(self.report['self_validation'], True)
 
     def test_timeout_is_an_execution_error(self):
         e = self.by_id['READ-timeout']
@@ -1978,6 +1990,21 @@ class UndeterminableCasesEnv(unittest.TestCase):
                          ('completed', 'completed', 'completed'))
 
 
+class AScanInjectsNothing(unittest.TestCase):
+    """〈定義：故障注入〉: preflight refuses a scan whose plan carries a fault, before any environment is started."""
+
+    def test_a_fault_in_the_plan_of_a_scan_blocks_the_run_in_preflight(self):
+        m = manifest('patched')
+        m['tests'] = [dict(m['tests'][0], fault='api-unreachable')]
+
+        def never(project_dir):
+            raise AssertionError('the environment must not be started')
+        rep = scan.run(m, prepare=never).report
+        self.assertEqual(report.validate(rep), [])
+        self.assertEqual(rep['status'], 'blocked')
+        self.assertIn('self-validation', rep['status_reason'])
+
+
 @needs_env
 class FaultsMakeRunsPartialEnv(unittest.TestCase):
     """TK-RUN-002: each network or observation failure on its own makes the run partial, not completed,
@@ -1987,7 +2014,7 @@ class FaultsMakeRunsPartialEnv(unittest.TestCase):
         m = manifest('patched')
         read = next(t for t in m['tests'] if t['test_id'] == 'READ-other-tenant')
         m['tests'] = [dict(read, test_id='READ-normal'), dict(read, test_id='READ-faulted', **faulted)]
-        rep = scan.run(m).report
+        rep = scan.run(m, self_validation=True).report
         self.assertEqual(report.validate(rep), [])
         self.assertEqual(rep['status'], 'partial')
         by_id = {e['test_id']: e for e in rep['execution_records']}
@@ -2006,7 +2033,7 @@ class FaultsMakeRunsPartialEnv(unittest.TestCase):
 
     def test_failed_injection(self):
         e = self.run_with({'fault': 'session-revoked', 'limits': {'timeout_seconds': 0.000001}})
-        self.assertEqual(e['result'], 'error')
+        self.assertEqual(e['result'], 'blocked')  # 〈定義：故障注入〉 注入失敗
         self.assertIn('/auth/v1/logout', e['error'])
 
 
@@ -2033,7 +2060,7 @@ class ApiKeyMissingEnv(unittest.TestCase):
                  fault_api_key='anon-jwt'),
             dict(other, test_id='OTHER-normal'),
         ]
-        cls.report = scan.run(m).report
+        cls.report = scan.run(m, self_validation=True).report
         cls.by_id = {e['test_id']: e for e in cls.report['execution_records']}
 
     def assert_blocked_before_any_request(self, test_id, missing_format):
@@ -2055,7 +2082,10 @@ class ApiKeyMissingEnv(unittest.TestCase):
     def test_a_format_no_request_of_the_case_uses_does_not_block_it(self):
         e = self.by_id['OWNER-AS-ACTOR']
         self.assertNotIn('API key', e['error'] or '')
-        self.assertTrue(e['evidence'])
+        self.assertTrue(e['evidence'])  # its requests went out
+        # 〈定義：故障注入〉: a fault that changed nothing leaves no verdict on a case that carries it.
+        self.assertEqual(e['result'], 'blocked')
+        self.assertIn('had no effect', e['error'])
 
     def test_cases_with_their_keys_are_judged_as_before(self):
         self.assertEqual((self.by_id['ANON-normal']['result'], self.by_id['OTHER-normal']['result']),

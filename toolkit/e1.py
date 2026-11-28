@@ -514,20 +514,38 @@ def _login(env, name, email, password):
 
 def _check_auth(env):
     for ident in env.recipe['auth']['identities']:
-        name, email = ident['name'], ident.get('email')
-        if not email:
-            continue
-        password = secrets.token_urlsafe(24)  # per-environment, held in memory only
-        updated = _psql(env, f"update auth.users set encrypted_password = extensions.crypt('{password}', "
-                             f"extensions.gen_salt('bf')) where email = '{email}' returning id;")
-        if not updated.strip():
-            raise _Stop(Blocked('auth', f'{name}: account {email} not found in the seeded data'))
-        tokens = _login(env, name, email, password)
-        status, refreshed = _http('POST', f'{env.api_url}/auth/v1/token?grant_type=refresh_token',
-                                  {'apikey': env.anon_key}, {'refresh_token': tokens['refresh_token']})
-        if status != 200 or 'access_token' not in (refreshed or {}):
-            raise _Stop(Blocked('auth', f'{name}: token refresh failed (HTTP {status})'))
-        env.tokens[name] = {'access_token': refreshed['access_token'], 'refresh_token': refreshed['refresh_token']}
+        if ident.get('email'):
+            _open_session(env, ident['name'], ident['email'])
+
+
+def _open_session(env, name, email):
+    """Give the identity a new password, log it in and keep its refreshed session."""
+    password = secrets.token_urlsafe(24)  # per-environment, held in memory only
+    updated = _psql(env, f"update auth.users set encrypted_password = extensions.crypt('{password}', "
+                         f"extensions.gen_salt('bf')) where email = '{email}' returning id;")
+    if not updated.strip():
+        raise _Stop(Blocked('auth', f'{name}: account {email} not found in the seeded data'))
+    tokens = _login(env, name, email, password)
+    status, refreshed = _http('POST', f'{env.api_url}/auth/v1/token?grant_type=refresh_token',
+                              {'apikey': env.anon_key}, {'refresh_token': tokens['refresh_token']})
+    if status != 200 or 'access_token' not in (refreshed or {}):
+        raise _Stop(Blocked('auth', f'{name}: token refresh failed (HTTP {status})'))
+    env.tokens[name] = {'access_token': refreshed['access_token'], 'refresh_token': refreshed['refresh_token']}
+
+
+def relogin(env, name):
+    """〈定義：故障注入〉 影響限於該案例: give an identity whose session a fault ended a new one. Returns Blocked when
+    it cannot; the identity then has no session at all, so a later case that needs it is blocked at its identity
+    check instead of running with a session nobody can vouch for."""
+    email = next((i.get('email') for i in env.recipe['auth']['identities'] if i['name'] == name), None)
+    env.tokens.pop(name, None)
+    if not email:
+        return None  # an anonymous identity has no session to give back
+    try:
+        _step('auth', _open_session, env, name, email)
+    except _Stop as stop:
+        return stop.blocked
+    return None
 
 
 def _headers(env, identity):

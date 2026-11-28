@@ -89,12 +89,19 @@ class Transport:
 class Lifecycle:
     """e1's reset and destroy, recorded instead of touching Docker. reset_fails: the reset cannot restore the seed."""
 
-    def __init__(self, reset_fails=False, leftovers=()):
-        self.calls, self.reset_fails, self.leftovers = [], reset_fails, list(leftovers)
+    def __init__(self, reset_fails=False, leftovers=(), world=None):
+        self.calls, self.reset_fails, self.leftovers, self.world = [], reset_fails, list(leftovers), world
 
     def reset(self, env):
         self.calls.append('reset')
         return e1.Blocked('snapshot_reset', 'scripted reset failed') if self.reset_fails else e1.Ready({}, env)
+
+    def relogin(self, env, name):
+        """A new session for the identity, as e1.relogin gives one."""
+        self.calls.append(f'relogin {name}')
+        if self.world is not None:
+            self.world.revoked.discard(f'token-{name}')
+        env.tokens[name] = {'access_token': f'token-{name}', 'refresh_token': 'r'}
 
     def destroy(self, env):
         """What is left of the stack, as e1.destroy returns it: nothing, unless leftovers were scripted."""
@@ -123,7 +130,7 @@ DEFAULT_DIFFERENCES = (
 def prepare_with(world, api_keys=None, reset_fails=False, unsupported=(), known_differences=DEFAULT_DIFFERENCES,
                  leftovers=()):
     """A `prepare` for scan.run(): a ready stack whose transport is the world. Returns it and its lifecycle."""
-    lifecycle = Lifecycle(reset_fails, leftovers)
+    lifecycle = Lifecycle(reset_fails, leftovers, world)
     profile = {'mode': 'E1',
                'identities': {n: {'login': 'ok', 'path': 'scripted'} for n in [*EMAILS, 'anonymous']},
                'unsupported': list(unsupported),

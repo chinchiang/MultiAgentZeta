@@ -92,6 +92,10 @@ def _abort_problems(doc):
             problems.append('cleanup: leftovers are named exactly when the environment was not destroyed (TK-ENV-003)')
         if failed and doc.get('status') == 'completed':
             problems.append("cleanup: status cannot be 'completed' when the environment was not destroyed (TK-ENV-003)")
+    if doc.get('self_validation') is not True and any(isinstance(e, dict) and 'fault' in e
+                                                      for e in _list(doc, 'execution_records')):
+        problems.append('execution_records: a fault is injected in a self-validation run only; the report of such '
+                        'a run says self_validation (〈定義：故障注入〉)')
     abort = doc.get('abort')
     if doc.get('status') == 'cancelled':
         if not isinstance(abort, dict):
@@ -633,6 +637,10 @@ def _shown(value, default=''):
     return default if value is None else value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
 
 
+# 〈定義：故障注入〉: what a reader must know before reading the results of such a run.
+SELF_VALIDATION_NOTE = '工具包自我驗證（含故障注入，不是對應用的掃描結果）'
+
+
 def render_markdown(doc):
     """Markdown for human review, generated from a valid JSON report. Raises ValueError if invalid."""
     problems = validate(doc)
@@ -645,6 +653,8 @@ def render_markdown(doc):
              + (f'；原因：{_inline(doc["status_reason"])}' if doc.get('status_reason') else ''),
              f'- **受測提交**：{commit_text}',
              f'- **報告建立時間**：{_inline(doc["created_at"])}']
+    if doc.get('self_validation'):
+        lines.append(f'- **執行類型**：{SELF_VALIDATION_NOTE}')
     if doc.get('environment'):
         lines.append(f'- **環境模式**：{_inline(doc["environment"].get("mode", ""))}')
     if doc['status'] == 'completed':
