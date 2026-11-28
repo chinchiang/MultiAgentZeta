@@ -1160,6 +1160,14 @@ def run(manifest, prepare=environment.prepare, clock=time.monotonic, abort=None,
                     executions.append(_execution(state, test, started, 'untested', f'not dispatched: {short}'))
                     undispatched += 1
                     continue
+                not_logged_in = [ref for ref in _test_identities(test)
+                                 if prepared.profile['identities'].get(ref, {}).get('login') == 'blocked']
+                if not_logged_in:  # TK-ENV-005: blocked with its identity; no other identity or login stands in
+                    reasons = '; '.join(f'{ref}: {prepared.profile["identities"][ref]["reason"]}' for ref in not_logged_in)
+                    executions.append(_execution(state, test, started, 'blocked',
+                                                 f'test identity not logged in ({reasons})',
+                                                 approval_id=precheck.approval_id))
+                    continue
                 denial = _case_kind(test) == item_rule.DENIAL
                 undo = None
                 try:

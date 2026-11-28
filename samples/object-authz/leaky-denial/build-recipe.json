@@ -78,15 +78,18 @@
       },
       {
         "name": "owner",
-        "email": "alice@tenant-a.test"
+        "email": "alice@tenant-a.test",
+        "login": "password"
       },
       {
         "name": "same_tenant_non_owner",
-        "email": "bob@tenant-a.test"
+        "email": "bob@tenant-a.test",
+        "login": "password"
       },
       {
         "name": "other_tenant_user",
-        "email": "carol@tenant-b.test"
+        "email": "carol@tenant-b.test",
+        "login": "password"
       }
     ],
     "token_transport": "bearer-header",

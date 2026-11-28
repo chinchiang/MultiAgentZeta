@@ -240,6 +240,27 @@ class PrepareVulnerableEnv(unittest.TestCase):
                 with self.subTest(port=port), self.assertRaises(OSError):
                     socket.create_connection((host_address, port), timeout=3).close()
 
+    def test_the_build_left_row_level_security_the_policies_and_the_project_files_as_they_were(self):
+        # TK-ENV-005, on the real stack: what the migrations set up is what is there after the whole preparation.
+        import subprocess
+        env = self.result.env
+
+        def query(sql):
+            return subprocess.run(['docker', 'exec', f'supabase_db_{env.project_id}', 'psql', '-U', 'postgres', '-At', '-c', sql],
+                                  capture_output=True, text=True).stdout.split('\n')
+        without_rls = [t for t in query("select relname from pg_class c join pg_namespace n on n.oid = c.relnamespace "
+                                        "where n.nspname = 'public' and c.relkind = 'r' and not c.relrowsecurity") if t]
+        self.assertEqual(without_rls, [])
+        from toolkit import extract
+        files = {p.name: p.read_text(encoding='utf-8') for p in (SAMPLES / 'vulnerable' / 'supabase' / 'migrations').glob('*.sql')}
+        declared = sorted(f['name'] for f in extract.extract_facts(files)['facts'] if f['kind'] == 'policy')
+        in_database = sorted(p for p in query("select policyname from pg_policies where schemaname = 'public'") if p)
+        self.assertEqual(in_database, declared)
+        tracked = subprocess.run(['git', 'status', '--porcelain', '--untracked-files=no', '--', str(SAMPLES / 'vulnerable')],
+                                 capture_output=True, text=True, cwd=REPO).stdout
+        self.assertEqual(tracked, '')  # no file of the project was edited (config.toml, migrations, seed)
+        self.assertEqual({i['login'] for i in self.profile['identities'].values()}, {'ok', 'none'})
+
     def test_the_stack_reaches_nothing_outside_by_address_or_by_name(self):
         # TK-SBX-004 negative case, from inside the application's own container. The control is a container on
         # Docker's default network: where that one reaches the outside, the failure below is the network's doing.
@@ -892,6 +913,124 @@ class DeploymentInformation(unittest.TestCase):
                 self.assertEqual(recipe['deployment'], {'environment_variables': [], 'test_substitutes': []})
 
 
+class TheBuildLeavesTheSecurityControlsAlone(unittest.TestCase):
+    """TK-ENV-005, 〈定義：認證與登入方式〉: a whole preparation, with every command and every SQL statement it sends
+    recorded instead of run. It logs in only the identities whose login is automated, puts nothing in the place
+    of the others, and changes no security control to get the stack running."""
+
+    MARKERS = ['MARK-A-ALICE-PRIVATE', 'MARK-A-ALICE-SHARED', 'MARK-A-ALICE-SHARED-TO-B', 'MARK-B-CAROL-PRIVATE']
+    # What a build may never send: anything that weakens or rewrites the application's own access control.
+    FORBIDDEN = (r'disable\s+row\s+level', r'no\s+force\s+row\s+level', r'\b(create|alter|drop)\s+policy',
+                 r'\balter\s+table', r'\bdrop\s+table', r'\btruncate\b', r'\bdelete\s+from\b',
+                 r'\bgrant\b[^;]*\bto\s+(anon|authenticated|public|service_role)\b', r'\brevoke\b',
+                 r'\balter\s+role', r'\bset\s+(session\s+)?role\b', r'security\s+definer', r'\bmfa\b', r'auth\.config',
+                 r'\binsert\s+into\b')
+
+    def prepare(self, recipe_change=None):
+        from unittest import mock
+        ACommandThatDoesNotComplete.setUp(self)
+        src = failing_copy(self.tmp.name, recipe_change=recipe_change)
+        self.before = {p.relative_to(src).as_posix(): p.read_bytes() for p in src.rglob('*') if p.is_file()}
+        self.sql, self.logins = [], []
+
+        def psql(env, sql):
+            self.sql.append(sql)
+            if 'pg_extension' in sql:
+                return 'pgcrypto\n'
+            if 'select title from public.documents' in sql:
+                return '\n'.join(self.MARKERS) + '\n'
+            if 'update auth.users' in sql:
+                return 'user-id\n'
+            return '1\n'
+
+        def http(method, url, headers=None, body=None, timeout=15):
+            if 'grant_type=password' in url:
+                self.logins.append(body['email'])
+            if '/auth/v1/token' in url:
+                return 200, {'access_token': 'access', 'refresh_token': 'refresh'}
+            if 'title=eq.' in url:
+                return 200, [{'title': url.split('title=eq.', 1)[1]}]
+            return 200, {}
+
+        def answer(cmd):
+            if cmd[1:2] == ['status']:
+                return 0, '{"API_URL": "http://127.0.0.1:54321", "ANON_KEY": "anon"}', ''
+            if cmd[:3] == ['docker', 'inspect', '-f']:
+                return 0, json.dumps({'maz_e1_maz-failure-sample': {'IPAddress': '172.18.0.2'}}), ''
+            if cmd[1:2] == ['--version']:
+                return 0, '2.122.0\n', ''
+            return ACommandThatDoesNotComplete.inspected(self, cmd) or (0, '', '')
+        ACommandThatDoesNotComplete.run_commands(self, answer)
+        with mock.patch.object(e1, '_psql', psql), mock.patch.object(e1, '_http', http):
+            result = e1.prepare(src, matrix={**self.matrix, 'services': {}})
+        self.after = {p.relative_to(src).as_posix(): p.read_bytes() for p in src.rglob('*') if p.is_file()}
+        self.assertIsInstance(result, e1.Ready, result)
+        return result
+
+    def test_no_statement_of_the_build_touches_the_applications_access_control(self):
+        import re
+        self.prepare()
+        self.assertTrue(self.sql)
+        for sql in self.sql:
+            for pattern in self.FORBIDDEN:
+                with self.subTest(pattern=pattern):
+                    self.assertIsNone(re.search(pattern, sql, re.I), sql)
+        # What it does write: the observer's own role, and the password of each test account, nothing else.
+        writes = [sql for sql in self.sql if re.search(r'\b(update|create|drop|grant)\b', sql, re.I)]
+        for sql in writes:
+            self.assertTrue('maz_observer' in sql or re.fullmatch(
+                r"update auth\.users set encrypted_password = extensions\.crypt\('[^']+', extensions\.gen_salt\('bf'\)\) "
+                r"where email = '[^']+@[^']+\.test' returning id;", sql.strip()), sql)
+
+    def test_the_build_runs_only_its_own_commands_and_edits_no_file_of_the_project(self):
+        self.prepare()
+        allowed = {('fake-supabase', 'start'), ('fake-supabase', 'status'), ('fake-supabase', '--version'),
+                   ('docker', 'network'), ('docker', 'inspect'), ('docker', 'ps'), ('docker', 'image'),
+                   ('docker', 'version')}
+        for cmd in self.commands:
+            self.assertIn((Path(cmd[0]).name, cmd[1]), allowed, cmd)
+        self.assertEqual(self.after, self.before)  # config.toml, the migrations and the seed are byte for byte the same
+        self.assertIn('supabase/config.toml', self.before)
+
+    def test_an_identity_that_needs_a_person_to_log_in_is_blocked_and_nothing_stands_in_for_it(self):
+        def needs_sso(r):
+            next(i for i in r['auth']['identities'] if i['name'] == 'same_tenant_non_owner')['login'] = 'sso'
+        result = self.prepare(needs_sso)
+        self.assertNotIn('same_tenant_non_owner', result.env.tokens)
+        self.assertEqual(sorted(result.env.tokens), ['other_tenant_user', 'owner'])
+        self.assertNotIn('bob@tenant-a.test', self.logins)
+        self.assertFalse([sql for sql in self.sql if 'bob@tenant-a.test' in sql])  # its password is not reset either
+        identity = result.profile['identities']['same_tenant_non_owner']
+        self.assertEqual(identity['login'], 'blocked')
+        self.assertIn("'sso'", identity['reason'])
+        self.assertEqual(result.profile['identities']['owner']['login'], 'ok')
+        self.assertIsNone(e1.relogin(result.env, 'same_tenant_non_owner'))
+        self.assertNotIn('same_tenant_non_owner', result.env.tokens)
+
+    def test_every_way_of_logging_in_but_the_password_is_left_to_a_person(self):
+        for login in ('sso', 'oauth', 'mfa', 'manual', 'magic-link', 'PASSWORD'):
+            with self.subTest(login=login):
+                self.assertIn('not automated', e1.login_problem({'name': 'x', 'email': 'x@t.test', 'login': login}))
+        self.assertIsNone(e1.login_problem({'name': 'x', 'email': 'x@t.test', 'login': 'password'}))
+        self.assertIsNone(e1.login_problem({'name': 'anonymous'}))
+
+    def test_an_identity_that_does_not_state_its_login_blocks_auth_when_the_recipe_is_read(self):
+        recipe = full_recipe()
+        recipe['auth']['identities'] = [{'name': 'owner', 'email': 'alice@tenant-a.test'}]
+        with tempfile.TemporaryDirectory() as d:
+            write_recipe(d, recipe)
+            result = e1.prepare(Path(d))
+        self.assertEqual((type(result), result.step), (e1.Blocked, 'auth'))
+        self.assertIn('owner', result.reason)
+        self.assertIn('not guessed', result.reason)
+
+    def test_the_profile_says_which_production_authentication_risks_were_not_verified(self):
+        result = self.prepare()
+        text = ' '.join(result.profile['known_differences'])
+        for word in ('SSO', 'OAuth', 'multi-factor', 'third-party identities', 'TK-ENV-005'):
+            self.assertIn(word, text)
+
+
 class TestDataMustBeSynthetic(unittest.TestCase):
     """TK-SBX-011, TK-SBX-012: when the recipe is read, its test data needs the statement that it is synthetic,
     accounts in the reserved domains and a seed file inside the source under test; otherwise test_data is
@@ -958,7 +1097,7 @@ class TestDataMustBeSynthetic(unittest.TestCase):
 
     def test_the_email_of_an_identity_is_checked_like_an_account(self):
         self.assert_test_data_blocked(
-            lambda r: r['auth'].update(identities=[{'name': 'owner', 'email': 'alice@gmail.com'}]),
+            lambda r: r['auth'].update(identities=[{'name': 'owner', 'email': 'alice@gmail.com', 'login': 'password'}]),
             'outside the reserved domains')
 
     EXCEPTION = {'account': 'billing@partner.io', 'reason': 'the payment sandbox only mails real domains',
