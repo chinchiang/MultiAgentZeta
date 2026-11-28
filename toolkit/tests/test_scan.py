@@ -210,6 +210,49 @@ def run_once(version):
 
 
 @needs_env
+class AbortedRunEnv(unittest.TestCase):
+    """〈定義：中止與清理〉 on a real stack (TK-RUN-004 to TK-RUN-006, TK-ENV-003): a run aborted while a case is in
+    flight ends cancelled, with its three times measured, and nothing of its stack is left."""
+
+    def test_an_abort_in_flight_cancels_the_rest_and_leaves_no_stack(self):
+        import subprocess
+        import sys
+        abort = scan.Abort()
+
+        def prepare(project_dir):
+            ready = environment.prepare(project_dir)
+            if isinstance(ready, e1.Ready):
+                ops, made = ready.env, []
+                request = ops.request
+
+                def counted(*args, **kwargs):
+                    answer = request(*args, **kwargs)
+                    made.append(1)
+                    if len(made) == 4:  # inside the second case
+                        abort.request('stopped by the operator (environment test)')
+                    return answer
+                ops.request = counted
+            return ready
+        rep = scan.run(shared_manifest('vulnerable'), prepare=prepare, abort=abort).report
+        self.assertEqual(report.validate(rep), [])
+        self.assertEqual(rep['status'], 'cancelled')
+        counts = {r: sum(e['result'] == r for e in rep['execution_records']) for r in ('cancelled', 'error')}
+        self.assertGreater(counts['cancelled'], 0)
+        self.assertEqual(counts['error'], 1)  # the case in flight
+        self.assertTrue(rep['abort']['in_flight'])
+        self.assertEqual(set(rep['abort']['sessions'].values()), {'revoked'})
+        self.assertEqual([s['step'] for s in rep['abort']['steps']],
+                         ['dispatch_stopped', 'credentials_revoked', 'in_flight_ended', 'evidence_kept',
+                          'in_flight_checked', 'environment_isolated'])
+        self.assertEqual(rep['abort']['over_limit'], [])
+        self.assertEqual(rep['cleanup'], {'environment': 'destroyed', 'leftovers': []})
+        names = subprocess.run(['docker', 'ps', '-a', '--format', '{{.Names}}'], capture_output=True, text=True).stdout
+        self.assertNotIn('maz-object-authz-vulnerable', names)
+        # TK-RUN-006: the measured times, for the policy's limits to be set from.
+        print('MEASURE abort ' + json.dumps(rep['abort']['seconds'], sort_keys=True), file=sys.stderr, flush=True)
+
+
+@needs_env
 class VulnerableRunEnv(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

@@ -62,7 +62,7 @@
         "properties": {
           "stage": {"enum": ["preflight", "static_analysis", "model_review", "threat_planning",
                              "dynamic_execution", "judgement_report"]},
-          "status": {"enum": ["completed", "failed", "blocked", "not_run"]},
+          "status": {"enum": ["completed", "failed", "blocked", "cancelled", "not_run"]},
           "reason": {"$ref": "#/$defs/text"}
         },
         "if": {"properties": {"status": {"not": {"const": "completed"}}}},
@@ -225,12 +225,54 @@
       "enum": ["pending", "running", "completed", "partial", "blocked", "failed", "cancelled"]
     },
     "status_reason": {"description": "Why the run is not completed.", "$ref": "#/$defs/text"},
+    "cleanup": {
+      "description": "〈定義：中止與清理〉 銷毀的查證 (TK-ENV-003, TK-SBX-010): whether the environment was found gone after it was destroyed, and what was still there when it was not. Present whenever an environment was prepared.",
+      "type": "object", "additionalProperties": false,
+      "required": ["environment", "leftovers"],
+      "properties": {
+        "environment": {"enum": ["destroyed", "destroy_failed"]},
+        "leftovers": {"type": "array", "items": {"$ref": "#/$defs/text"}}
+      }
+    },
+    "abort": {
+      "description": "〈定義：中止與清理〉 (TK-RUN-004, TK-RUN-005, TK-RUN-006): who asked the run to stop, why and when; the steps in the order they were done, each with its time; the three measured times against the policy's limits; and what this version's abort does not cover (TK-EVD-014).",
+      "type": "object", "additionalProperties": false,
+      "required": ["source", "reason", "requested_at", "steps", "sessions", "in_flight", "seconds", "limits_seconds",
+                   "over_limit", "not_covered"],
+      "properties": {
+        "source": {"enum": ["operator", "system"]},
+        "reason": {"$ref": "#/$defs/text"},
+        "requested_at": {"$ref": "#/$defs/text"},
+        "steps": {
+          "type": "array", "minItems": 1,
+          "items": {"type": "object", "additionalProperties": false, "required": ["step", "at", "seconds"],
+                    "properties": {"step": {"enum": ["dispatch_stopped", "credentials_revoked", "in_flight_ended",
+                                                     "evidence_kept", "in_flight_checked", "environment_isolated"]},
+                                   "at": {"$ref": "#/$defs/text"},
+                                   "seconds": {"type": "number", "minimum": 0}}}
+        },
+        "sessions": {"type": "object", "additionalProperties": {"enum": ["revoked", "not_confirmed"]}},
+        "in_flight": {"type": ["string", "null"]},
+        "seconds": {"$ref": "#/$defs/abort_times"},
+        "limits_seconds": {"$ref": "#/$defs/abort_times"},
+        "over_limit": {"type": "array", "items": {"enum": ["dispatch_stopped", "in_flight_ended", "environment_isolated"]}},
+        "not_covered": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/text"}}
+      }
+    },
     "execution_records": {"type": "array", "items": {"$ref": "#/$defs/execution_record"}},
     "findings": {"type": "array", "items": {"$ref": "#/$defs/finding"}},
     "coverage": {"$ref": "#/$defs/coverage"}
   },
   "$defs": {
     "text": {"type": "string", "minLength": 1},
+    "abort_times": {
+      "description": "TK-RUN-006: seconds from the abort request until dispatch stopped, the case in flight ended and the environment was isolated; null for a time that was not reached.",
+      "type": "object", "additionalProperties": false,
+      "required": ["dispatch_stopped", "in_flight_ended", "environment_isolated"],
+      "properties": {"dispatch_stopped": {"type": ["number", "null"], "minimum": 0},
+                     "in_flight_ended": {"type": ["number", "null"], "minimum": 0},
+                     "environment_isolated": {"type": ["number", "null"], "minimum": 0}}
+    },
     "common": {
       "description": "〈定義：共用欄位〉 plus the commit the record is bound to (TK-DAT-001).",
       "type": "object",

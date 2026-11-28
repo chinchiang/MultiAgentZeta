@@ -9,6 +9,7 @@ import hashlib
 import json
 import re
 import secrets
+import signal
 import string
 import time
 from pathlib import Path
@@ -355,6 +356,75 @@ def _record_finding(state, findings, test, ex):
 # 〈定義：執行限制的執行〉: the most requests a case makes, actor requests and observer reads together, so that a
 # case is dispatched only when the run can afford all of it. A denial case: the owner's control operation,
 # the identity check, the attempt, and the observer's reads before and after. An allowed case: the read.
+# 〈定義：中止與清理〉 中止時間: the policy's upper bounds, in seconds from the abort request. They follow from the
+# toolkit's own timeouts (one request or observer read; stopping the stack) and are to be set from measurement.
+ABORT_LIMITS = {'dispatch_stopped': 60, 'in_flight_ended': 60, 'environment_isolated': 360}
+ABORT_STEPS = ('dispatch_stopped', 'credentials_revoked', 'in_flight_ended', 'evidence_kept', 'in_flight_checked',
+               'environment_isolated')  # TK-RUN-005, in this order
+
+
+class Abort:
+    """The control area's stop signal for one run (TK-RUN-004, 〈定義：中止與清理〉). request() may be called from a
+    signal handler or by the run itself; only the first request counts, with its reason, source and time.
+    Nothing here waits for a test or a model: the run looks at it before each case and before each request."""
+
+    def __init__(self, clock=time.monotonic):
+        self.clock = clock
+        self.reason = self.source = self.requested_at = None
+        self.undispatched = 'cancelled'  # result of the cases not dispatched after it
+        self._t0 = None
+        self.steps = {}  # step -> (wall time, seconds since the request)
+        self.sessions = {}
+        self.in_flight = None  # test_id of the case that was running when dispatch stopped
+
+    @property
+    def requested(self):
+        return self._t0 is not None
+
+    def request(self, reason, source='operator', undispatched='cancelled'):
+        if self.requested:
+            return False
+        self.reason, self.source, self.undispatched = reason, source, undispatched
+        self.requested_at, self._t0 = _now(), self.clock()
+        return True
+
+    def mark(self, step):
+        """Record when a step of the abort was done; the first time only."""
+        if step not in self.steps:
+            self.steps[step] = (_now(), round(max(0.0, self.clock() - self._t0), 3))
+
+    def record(self):
+        """The report's abort record: what was asked, the steps in the order they were done, and the three
+        measured times against the policy's limits (TK-RUN-006)."""
+        steps = [{'step': s, 'at': self.steps[s][0], 'seconds': self.steps[s][1]} for s in ABORT_STEPS if s in self.steps]
+        measured = {name: self.steps[name][1] if name in self.steps else None for name in ABORT_LIMITS}
+        return {'source': self.source, 'reason': self.reason, 'requested_at': self.requested_at, 'steps': steps,
+                'sessions': dict(self.sessions), 'in_flight': self.in_flight,
+                'seconds': measured, 'limits_seconds': dict(ABORT_LIMITS),
+                'over_limit': [n for n, v in measured.items() if v is not None and v > ABORT_LIMITS[n]],
+                'not_covered': list(ABORT_NOT_COVERED)}
+
+
+ABORT_NOT_COVERED = (
+    'no separate test process exists in this version: the case in flight ends at its next request, it is not killed',
+    'a lapsed policy, unexpected outbound connections and resource overuse other than time have no detector that '
+    'could trigger an abort (authorization and confirmation are checked in preflight only; outbound connections '
+    'are blocked for the whole stack; resource limits are not set, TK-SBX-003)',
+    'access tokens stay valid until they expire wherever the same signing secret is used: logging out ends the '
+    'session and its refresh token, and the tokens are dropped from memory',
+)
+
+
+def _stop_dispatch(ops, abort):
+    """Steps 1 and 2 of TK-RUN-005, once: no further case or request goes out, and the test sessions are
+    logged out."""
+    if 'dispatch_stopped' in abort.steps:
+        return
+    abort.mark('dispatch_stopped')
+    abort.sessions = ops.revoke_sessions()
+    abort.mark('credentials_revoked')
+
+
 CASE_REQUESTS = {item_rule.DENIAL: 5, item_rule.ALLOWED: 1}
 FAULT_REQUESTS = {'session-revoked': 1}  # the logout that revokes the session
 CONCURRENCY = 1  # cases run one after another
@@ -373,10 +443,17 @@ def _limit_reached(state, test):
         return (f'request limit: the case needs up to {need} requests and {used} of max_requests '
                 f'{limits["max_requests"]} are used')
     elapsed, seconds = state.elapsed(), need * _timeout(test)
+    if elapsed >= limits['max_duration_seconds']:
+        return _TimeUsedUp(f'time limit: max_duration_seconds {limits["max_duration_seconds"]} has passed')
     if elapsed + seconds > limits['max_duration_seconds']:
         return (f'time limit: the case may take {seconds:g} s and {elapsed:.0f} s of max_duration_seconds '
                 f'{limits["max_duration_seconds"]} have passed')
     return None
+
+
+class _TimeUsedUp(str):
+    """The run's time limit has passed altogether: no later case can fit either, so the system aborts the run
+    (TK-RUN-004 資源超限) instead of looking at every remaining case."""
 
 
 def _limits_report(state):
@@ -977,13 +1054,16 @@ def _environment_report(profile):
     }
 
 
-def run(manifest, prepare=environment.prepare, clock=time.monotonic):
+def run(manifest, prepare=environment.prepare, clock=time.monotonic, abort=None):
     """Run the manifest's tests against its project and return the report and its Markdown.
 
     A run that cannot start (source digest mismatch, BuildRecipe step blocked) is
     reported with status blocked and the reason; every planned test is blocked.
-    clock() gives seconds; the run's time limit is measured with it, from here on.
+    clock() gives seconds; the run's time limit is measured with it, from here on. abort is the control
+    area's stop signal (Abort): once requested, no further case is dispatched and the run ends as
+    〈定義：中止與清理〉 says, with a report.
     """
+    abort = abort or Abort(clock)
     run_start = datetime.now(timezone.utc)
     run_id = f'run-{run_start:%Y%m%d%H%M%S}-{secrets.token_hex(3)}'
     state = _RunState(manifest, _Records(run_id, _commit(manifest)), clock=clock, started=clock())
@@ -997,6 +1077,13 @@ def run(manifest, prepare=environment.prepare, clock=time.monotonic):
                                f'{prepared.reason}', stage='dynamic_execution')
     ops = prepared.env  # the operations on the stack (toolkit.environment), not its handles
     ops.request_limit = manifest['limits']['max_requests']
+
+    def stop_if_aborted():  # before every request and observer read of a case
+        if abort.requested:
+            _stop_dispatch(ops, abort)
+            raise environment.Aborted(abort.reason)
+    ops.before_request = stop_if_aborted
+    cleanup = None
     executions, findings = [], []
     stopped = None  # reason the remaining tests cannot run
     undispatched = 0  # cases the run's limits left no room for
@@ -1008,7 +1095,14 @@ def run(manifest, prepare=environment.prepare, clock=time.monotonic):
                 if not precheck.runnable or stopped:
                     executions.append(_execution(state, test, started, *precheck.outcome(stopped)))
                     continue
-                short = _limit_reached(state, test)
+                short = None if abort.requested else _limit_reached(state, test)
+                if isinstance(short, _TimeUsedUp):
+                    abort.request(str(short), source='system')  # TK-RUN-004 資源超限
+                if abort.requested:  # TK-RUN-005 step 1: nothing is dispatched after the request
+                    _stop_dispatch(ops, abort)
+                    executions.append(_execution(state, test, started, 'cancelled',
+                                                 f'not dispatched: the run was aborted ({abort.reason})'))
+                    continue
                 if short:  # TK-BUD-003: limited before dispatch; the case stays in the denominator, untested
                     executions.append(_execution(state, test, started, 'untested', f'not dispatched: {short}'))
                     undispatched += 1
@@ -1035,6 +1129,10 @@ def run(manifest, prepare=environment.prepare, clock=time.monotonic):
                     result, checks, error = 'blocked', None, f'API key unavailable: {e}'
                 except environment.LimitReached as e:  # the count before dispatch should have held the case back
                     result, checks, error = 'error', None, f'request limit reached inside the case: {e}'
+                except environment.Aborted:  # TK-RUN-005 step 5: what it did before the abort is not known
+                    result, checks, error = 'error', None, ('aborted in flight: the case did not finish and its '
+                                                            'outcome is unknown')
+                    abort.in_flight = test['test_id']
                 finally:
                     if undo:
                         undo()
@@ -1050,12 +1148,21 @@ def run(manifest, prepare=environment.prepare, clock=time.monotonic):
                 executions.append(ex)
                 if result == 'failed' and denial:  # a failed allowed case is a broken permitted access, not a leak
                     _record_finding(state, findings, test, ex)
-                if denial and DENIAL_TEMPLATES[test['template_id']]['writes']:
+                if denial and DENIAL_TEMPLATES[test['template_id']]['writes'] and not abort.requested:
                     reset = ops.reset()
                     if reset:
                         stopped = f'environment reset failed after {test["test_id"]}: {reset.reason}'
+                        # TK-RUN-004 清理失敗: an abort by the system; TK-SBX-010 has the later cases blocked
+                        abort.request(stopped, source='system', undispatched='blocked')
+                        _stop_dispatch(ops, abort)
     finally:
-        ops.destroy()
+        if abort.requested:
+            _stop_dispatch(ops, abort)
+            for step in ('in_flight_ended', 'evidence_kept', 'in_flight_checked'):
+                abort.mark(step)  # the case in flight has ended; the records made so far go into the report
+        cleanup = _clean_up(ops)
+        if abort.requested:
+            abort.mark('environment_isolated')
     if env_report['unsupported']:
         reason = 'environment outside support matrix (TK-SCP-001): ' + '; '.join(env_report['unsupported'])
         state.gaps = state.gaps + [{'scope': f'environment:{u}', 'reason': 'version outside support matrix (TK-SCP-001)'}
@@ -1066,19 +1173,39 @@ def run(manifest, prepare=environment.prepare, clock=time.monotonic):
         return _finish(state, executions, [], status='blocked', reason=reason,
                        stages=_stages(preflight={'status': 'completed'},
                                       dynamic_execution={'status': 'blocked', 'reason': reason}),
-                       environment=env_report, matrix=_authorization_matrix(prepared))
+                       environment=env_report, matrix=_authorization_matrix(prepared), cleanup=cleanup,
+                       abort=abort.record() if abort.requested else None)
     definite = all(e['result'] in ('passed', 'failed') for e in executions)
-    dynamic = ({'status': 'failed', 'reason': f'stopped, environment isolated: {stopped}'} if stopped
-               else {'status': 'completed'})
-    indefinite = 'some tests have no definite result'
-    if undispatched:
-        indefinite += f'; {undispatched} not dispatched because an execution limit was reached (TK-BUD-003)'
-    return _finish(state, executions, findings,
-                   status='completed' if definite else 'partial',
-                   reason='' if definite else indefinite,
+    cancelled = sum(e['result'] == 'cancelled' for e in executions)
+    aborted = f'aborted by the {abort.source}: {abort.reason}' if abort.requested else ''
+    if cancelled:  # TK-RUN-005 step 6: a run that left cases undispatched is cancelled, whatever the others say
+        status, reason = 'cancelled', f'{aborted}; {cancelled} cases were not dispatched'
+        dynamic = {'status': 'cancelled', 'reason': aborted}
+    else:
+        dynamic = ({'status': 'failed', 'reason': f'stopped, environment isolated: {stopped}'} if stopped
+                   else {'status': 'completed'})
+        reason = 'some tests have no definite result'
+        if undispatched:
+            reason += f'; {undispatched} not dispatched because an execution limit was reached (TK-BUD-003)'
+        status, reason = ('completed', '') if definite else ('partial', reason)
+    if cleanup['environment'] != 'destroyed':  # TK-ENV-003: a platform anomaly, never a completed run
+        anomaly = 'platform anomaly: the environment was not destroyed (' + '; '.join(cleanup['leftovers']) + ')'
+        status, reason = ('partial' if status == 'completed' else status), '; '.join(x for x in (reason, anomaly) if x)
+    return _finish(state, executions, findings, status=status, reason=reason,
                    stages=_stages(preflight={'status': 'completed'}, dynamic_execution=dynamic),
                    environment=env_report,
-                   matrix=_authorization_matrix(prepared))
+                   matrix=_authorization_matrix(prepared), cleanup=cleanup,
+                   abort=abort.record() if abort.requested else None)
+
+
+def _clean_up(ops):
+    """Destroy the environment and say whether it is gone (TK-ENV-003, 〈定義：中止與清理〉). A destroy that
+    cannot be carried out is a leftover too: the report is still made."""
+    try:
+        left = ops.destroy()
+    except (RuntimeError, OSError) as e:
+        left = [f'destroy did not complete: {type(e).__name__}: {e}']
+    return {'environment': 'destroy_failed' if left else 'destroyed', 'leftovers': left}
 
 
 def _item_version(listed, test):
@@ -1184,7 +1311,7 @@ def _cases(state, executions, inv):
     return cases
 
 
-def _finish(state, executions, findings, status, reason, stages, environment, matrix):
+def _finish(state, executions, findings, status, reason, stages, environment, matrix, cleanup=None, abort=None):
     manifest, records, listed = state.manifest, state.records, state.listed
     inv = _inventory(state, stages)
     env_supported = not (environment and environment['unsupported'])
@@ -1208,6 +1335,10 @@ def _finish(state, executions, findings, status, reason, stages, environment, ma
         doc['status_reason'] = reason + _handover_note(listed)
     if environment:
         doc['environment'] = environment
+    if cleanup:
+        doc['cleanup'] = cleanup
+    if abort:
+        doc['abort'] = abort
     if listed.ref:
         doc['confirmation_list'] = dict(listed.ref)
     if state.granted.ref:
@@ -1268,6 +1399,37 @@ def _output_directory(path, manifest):
     return directory
 
 
+ABORT_SIGNALS = ('SIGINT', 'SIGTERM')
+
+
+def _abort_on_signals(abort, err):
+    """〈定義：中止與清理〉 操作者中止: the first SIGINT or SIGTERM asks the run to abort, and the run ends with a
+    report; a second one forces it to stop at once, without a report (the stack is still stopped). Returns
+    the function that puts the earlier handlers back. Outside the main thread no handler can be set."""
+    asked = []
+
+    def handle(number, frame):
+        name = signal.Signals(number).name
+        asked.append(name)
+        if len(asked) == 1:
+            abort.request(f'stopped by the operator ({name})', source='operator')  # keeps an earlier request, if any
+            print(f'abort requested ({name}): no further case is dispatched; the report follows. '
+                  f'Send it again to force the run to stop without a report.', file=err)
+        else:
+            raise KeyboardInterrupt
+    earlier = {}
+    for name in ABORT_SIGNALS:
+        try:
+            earlier[name] = signal.signal(getattr(signal, name), handle)
+        except (ValueError, OSError, AttributeError):
+            pass
+
+    def restore():
+        for name, handler in earlier.items():
+            signal.signal(getattr(signal, name), handler)
+    return restore
+
+
 def main(argv, out, err, prepare=environment.prepare):
     """The command line of one scan run (〈定義：命令列入口〉): read the ScanManifest, run it, and write the
     JSON report and the Markdown made from it (TK-EVD-003) to the output directory. Everything about the run
@@ -1284,8 +1446,10 @@ def main(argv, out, err, prepare=environment.prepare):
     except _Refused as e:
         print(f'not started: {e}', file=err)
         return EXIT_REFUSED
+    abort = Abort()
+    restore = _abort_on_signals(abort, err)
     try:
-        done = run(manifest, prepare=prepare)
+        done = run(manifest, prepare=prepare, abort=abort)
         # Exclusive creation: a report that appeared during the run is not overwritten either.
         with open(directory / REPORT_JSON, 'x', encoding='utf-8', newline='\n') as f:
             f.write(json.dumps(done.report, ensure_ascii=False, indent=2) + '\n')
@@ -1294,6 +1458,11 @@ def main(argv, out, err, prepare=environment.prepare):
     except (RuntimeError, OSError) as e:
         print(f'failed: {type(e).__name__}: {e}', file=err)
         return EXIT_TOOL_ERROR
+    except KeyboardInterrupt:  # the second signal: the stack was stopped on the way out, no report is made
+        print('interrupted: the run was forced to stop; no report was written', file=err)
+        return EXIT_TOOL_ERROR
+    finally:
+        restore()
     status = done.report['status']
     print(f'run {done.report["run_id"]}: {status} ({report.RUN_LABELS[status]})', file=out)
     if done.report.get('status_reason'):

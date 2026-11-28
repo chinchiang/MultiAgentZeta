@@ -253,7 +253,7 @@ class Validate(unittest.TestCase):
     def test_every_run_status_of_the_spec_is_accepted(self):
         for status in self.RUN_STATUSES:
             with self.subTest(status=status):
-                doc = valid_report()
+                doc = cancelled_report() if status == 'cancelled' else valid_report()
                 doc['status'] = status
                 self.assertEqual(report.validate(doc), [])
 
@@ -681,7 +681,7 @@ class RenderMarkdown(unittest.TestCase):
     def test_run_status_is_shown_with_its_spec_name(self):
         for status, label in self.RUN_LABELS.items():
             with self.subTest(status=status):
-                doc = valid_report()
+                doc = cancelled_report() if status == 'cancelled' else valid_report()
                 doc['status'] = status
                 self.assertIn(label, report.render_markdown(doc))
 
@@ -877,6 +877,129 @@ COVERAGE_FIELDS = ('inventory_source', 'inventory', 'denominator', 'executed', '
                    'untested', 'cancelled', 'unsupported', 'unsupported_items', 'effective_judgement_rate',
                    'tool_support_rate', 'required_test_completion_rate', 'states', 'claim', 'tables_and_policies',
                    'excluded', 'rejected_exclusions')
+
+
+def abort_record(**changes):
+    """An abort as toolkit.scan records it: asked by the operator, its six steps in order, within the limits."""
+    steps = ('dispatch_stopped', 'credentials_revoked', 'in_flight_ended', 'evidence_kept', 'in_flight_checked',
+             'environment_isolated')
+    record = {'source': 'operator', 'reason': 'stopped by the operator (SIGINT)', 'requested_at': '2026-11-02T08:00:05Z',
+              'steps': [{'step': s, 'at': f'2026-11-02T08:00:0{6 + i}Z', 'seconds': 1.0 + i} for i, s in enumerate(steps)],
+              'sessions': {'owner': 'revoked', 'other_tenant_user': 'not_confirmed'}, 'in_flight': None,
+              'seconds': {'dispatch_stopped': 1.0, 'in_flight_ended': 3.0, 'environment_isolated': 6.0},
+              'limits_seconds': {'dispatch_stopped': 60, 'in_flight_ended': 60, 'environment_isolated': 360},
+              'over_limit': [], 'not_covered': ['no separate test process exists in this version']}
+    record.update(changes)
+    return record
+
+
+def cancelled_report():
+    """A run the operator aborted before its last case: that case is cancelled and the run is cancelled."""
+    doc = fixture('report-partial-fault')
+    record = doc['execution_records'][-1]
+    assert record['result'] == 'blocked'
+    record['result'] = 'cancelled'
+    doc['coverage'].update(blocked=doc['coverage']['blocked'] - 1, cancelled=1)
+    doc['status'], doc['status_reason'] = 'cancelled', 'aborted by the operator; 1 cases were not dispatched'
+    for stage in doc['stages']:
+        if stage['stage'] == 'dynamic_execution':
+            stage.update(status='cancelled', reason='aborted by the operator')
+    doc['abort'] = abort_record()
+    return doc
+
+
+class AbortAndCleanup(unittest.TestCase):
+    """〈定義：中止與清理〉 in the report (TK-RUN-004, TK-RUN-005, TK-RUN-006, TK-ENV-003)."""
+
+    def problems(self, doc, word):
+        return [p for p in report.validate(doc) if word in p]
+
+    def test_a_cancelled_run_with_its_abort_record_is_valid(self):
+        self.assertEqual(report.validate(cancelled_report()), [])
+
+    def test_a_cancelled_run_needs_an_abort_record_and_a_cancelled_case(self):
+        doc = cancelled_report()
+        del doc['abort']
+        self.assertTrue(self.problems(doc, 'abort'))
+        doc = cancelled_report()
+        doc['execution_records'][-1]['result'] = 'blocked'
+        doc['coverage'].update(blocked=doc['coverage']['blocked'] + 1, cancelled=0)
+        self.assertTrue(self.problems(doc, 'cancelled case'))
+
+    def test_the_steps_are_in_the_order_of_the_spec_and_time_does_not_go_back(self):
+        doc = cancelled_report()
+        doc['abort']['steps'][0], doc['abort']['steps'][1] = doc['abort']['steps'][1], doc['abort']['steps'][0]
+        self.assertTrue(self.problems(doc, 'order of TK-RUN-005'))
+        doc = cancelled_report()
+        doc['abort']['steps'].append(dict(doc['abort']['steps'][0]))
+        self.assertTrue(self.problems(doc, 'order of TK-RUN-005'))
+        doc = cancelled_report()
+        doc['abort']['steps'][3]['seconds'] = 0.5
+        self.assertTrue(self.problems(doc, 'not before'))
+
+    def test_over_limit_is_what_the_times_and_limits_give(self):
+        doc = cancelled_report()
+        doc['abort']['seconds']['environment_isolated'] = 400.0
+        self.assertTrue(self.problems(doc, 'over_limit'))
+        doc['abort']['over_limit'] = ['environment_isolated']
+        self.assertEqual(report.validate(doc), [])
+        doc['abort']['over_limit'] = ['environment_isolated', 'dispatch_stopped']
+        self.assertTrue(self.problems(doc, 'over_limit'))
+
+    def test_the_abort_record_takes_no_other_field_and_no_other_value(self):
+        for field, value in (('source', 'model'), ('observer_password', 'secret'), ('not_covered', []),
+                             ('sessions', {'owner': 'token-abc'}), ('steps', [])):
+            with self.subTest(field=field):
+                doc = cancelled_report()
+                doc['abort'][field] = value
+                self.assertNotEqual(report.validate(doc), [])
+
+    def test_a_cleanup_record_goes_with_the_environment(self):
+        doc = valid_report()
+        del doc['cleanup']
+        self.assertTrue(self.problems(doc, 'cleanup'))
+        doc = fixture('report-blocked-no-commit')
+        self.assertNotIn('environment', doc)
+        doc['cleanup'] = {'environment': 'destroyed', 'leftovers': []}
+        self.assertTrue(self.problems(doc, 'cleanup'))
+
+    def test_an_environment_that_was_not_destroyed_names_what_is_left_and_the_run_is_not_completed(self):
+        doc = valid_report()
+        doc['cleanup'] = {'environment': 'destroy_failed', 'leftovers': ['container supabase_db_x']}
+        self.assertTrue(self.problems(doc, "cannot be 'completed'"))
+        doc = fixture('report-partial-fault')
+        doc['cleanup'] = {'environment': 'destroy_failed', 'leftovers': ['container supabase_db_x']}
+        self.assertEqual(report.validate(doc), [])
+        doc['cleanup']['leftovers'] = []
+        self.assertTrue(self.problems(doc, 'leftovers'))
+        doc['cleanup'] = {'environment': 'destroyed', 'leftovers': ['container supabase_db_x']}
+        self.assertTrue(self.problems(doc, 'leftovers'))
+
+    def test_markdown_shows_the_abort_its_steps_its_times_and_the_cleanup(self):
+        doc = cancelled_report()
+        doc['abort'].update(in_flight='READ-other-tenant <!-- x', over_limit=['environment_isolated'])
+        doc['abort']['seconds']['environment_isolated'] = 400.0
+        doc['abort']['steps'][-1]['seconds'] = 400.0
+        md = report.render_markdown(doc)
+        self.assertIn('- **整體執行狀態**：已取消（`cancelled`）', md)
+        self.assertIn('- **中止（TK-RUN-004）**：由操作者觸發，`2026-11-02T08:00:05Z`；原因：stopped by the operator (SIGINT)', md)
+        self.assertIn('  1. 停止派送：`2026-11-02T08:00:06Z`（第 1 秒）', md)
+        self.assertIn('  2. 撤銷測試工作階段：', md)
+        self.assertIn('  6. 環境隔離並銷毀：', md)
+        self.assertIn('  - 派送停止時間：1 秒（上限 60 秒）', md)
+        self.assertIn('  - 環境隔離時間：400 秒（上限 360 秒），**超過上限**', md)
+        self.assertIn('`other_tenant_user` 未能確認、`owner` 已撤銷', md)
+        self.assertIn('未完成，結果未知', md)
+        self.assertNotIn('<!--', re.sub(r'(`+).*?\1', '', md))
+        self.assertIn('- **環境清理（TK-ENV-003）**：已銷毀（查證後無殘留）', md)
+        self.assertNotIn('全面通過', md)
+
+    def test_markdown_names_what_a_failed_destroy_left(self):
+        doc = fixture('report-partial-fault')
+        doc['cleanup'] = {'environment': 'destroy_failed', 'leftovers': ['container supabase_db_x']}
+        md = report.render_markdown(doc)
+        self.assertIn('- **環境清理（TK-ENV-003）**：銷毀失敗（平台異常，環境不再使用）', md)
+        self.assertIn('  - 殘留：container supabase_db_x', md)
 
 
 def fixture(name):

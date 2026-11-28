@@ -715,24 +715,55 @@ def _reset(env, matrix):
 
 
 def _stop_stack(env):
+    """Stop the stack, remove its network and close the relays. Returns what the commands said went wrong, as
+    text; whether anything is left is for _leftovers() to say."""
     env.usable = False
+    said = []
     try:
-        _run([env.cli, 'stop', '--no-backup', '--workdir', str(env.project_dir)], timeout=300)
-        _run(['docker', 'network', 'rm', env.network], timeout=60)
+        for cmd, timeout in (([env.cli, 'stop', '--no-backup', '--workdir', str(env.project_dir)], 300),
+                             (['docker', 'network', 'rm', env.network], 60)):
+            try:
+                r = _run(cmd, timeout=timeout)
+                if r.returncode:
+                    said.append(f'{Path(cmd[0]).name} {cmd[1]}: exit {r.returncode}: {_tail(r.stdout + r.stderr, 5)}')
+            except _CommandFailed as e:
+                said.append(str(e))
     finally:
         _close_relays(env)
+    return said
 
 
 def _stop_quietly(env):
     """Stop the stack on a failure path. The environment is marked unusable first, and a stop command that
     does not complete does not replace the failure being handled."""
     env.usable = False
-    try:
-        _stop_stack(env)
-    except _CommandFailed:
-        pass
+    _stop_stack(env)
+
+
+def _leftovers(env):
+    """〈定義：中止與清理〉 銷毀的查證: the containers, volumes and network of this stack that Docker still lists.
+    What cannot be listed is reported as not checked: a stack that cannot be seen is not known to be gone."""
+    suffix, found = '_' + env.project_id, []
+    for kind, args, mine in (
+            ('container', ['ps', '-a', '--format', '{{.Names}}'], lambda n: n.startswith('supabase_') and n.endswith(suffix)),
+            ('volume', ['volume', 'ls', '--format', '{{.Name}}'], lambda n: n.startswith('supabase_') and n.endswith(suffix)),
+            ('network', ['network', 'ls', '--format', '{{.Name}}'], lambda n: n == env.network)):
+        try:
+            r = _run(['docker', *args], timeout=60)
+        except _CommandFailed as e:
+            found.append(f'{kind}s not checked: {e}')
+            continue
+        if r.returncode:
+            found.append(f'{kind}s not checked: docker exit {r.returncode}')
+            continue
+        found += [f'{kind} {n}' for n in sorted(r.stdout.split()) if mine(n)]
+    return found
 
 
 def destroy(env):
-    """Stop the stack and remove its containers and volumes."""
-    _stop_stack(env)
+    """Stop the stack, remove its containers, volumes and network, and check that they are gone (TK-ENV-003,
+    〈定義：中止與清理〉). Returns what is left, as text: an empty list means the environment no longer exists.
+    Whatever is left, the environment is never used again (TK-SBX-010)."""
+    said = _stop_stack(env)
+    left = _leftovers(env)
+    return left + [f'while stopping: {x}' for x in said] if left else []

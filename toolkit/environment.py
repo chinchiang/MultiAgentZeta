@@ -43,6 +43,11 @@ class ApiKeyUnavailable(Exception):
     request goes out with an empty key (TK-DYN-004, TK-IDN-003; 〈定義：測試結果〉 受阻)."""
 
 
+class Aborted(Exception):
+    """The run was aborted (TK-RUN-004): a request or observer read that had not gone out yet is not made, and
+    the case it belonged to ends without a known outcome (〈定義：中止與清理〉)."""
+
+
 def _reject_nonstandard_json_constant(token):
     raise ValueError(f'non-RFC-8259 JSON constant: {token}')
 
@@ -62,6 +67,7 @@ class Operations:
         self._env, self._transport = env, transport
         self.request_limit = None  # 執行限制 max_requests, set by scan.run(); None counts without a limit
         self.requests = 0  # actor requests and observer reads made for the run's cases
+        self.before_request = None  # set by scan.run(): called before each one, raises Aborted once the run is aborted
         self._reset, self._destroy = lifecycle.reset, lifecycle.destroy  # not the module: no provisioning step is reachable
 
     @property
@@ -88,6 +94,8 @@ class Operations:
 
     def _count(self, what):
         """Count one request or observer read before it is made; refuse the one past the limit (TK-BUD-003)."""
+        if self.before_request:
+            self.before_request()
         if self.request_limit is not None and self.requests >= self.request_limit:
             raise LimitReached(f'{what} not made: the run has used its {self.request_limit} requests')
         self.requests += 1
@@ -161,8 +169,26 @@ class Operations:
         result = self._reset(self._env)
         return result if isinstance(result, e1.Blocked) else None
 
+    def revoke_sessions(self, timeout=15):
+        """〈定義：中止與清理〉 撤銷測試憑證: log every identity's session out and drop the tokens from
+        memory. Returns {identity: 'revoked' | 'not_confirmed'}; a logout the auth service did
+        not answer is not confirmed. These requests are the run's own, not a case's: they are not counted."""
+        env, outcome = self._env, {}
+        for name, tokens in sorted(env.tokens.items()):
+            headers = {'apikey': env.anon_key or next(iter(env.api_keys.values()), ''),
+                       'Authorization': 'Bearer ' + tokens['access_token']}
+            try:
+                status, _ = self._transport.http('POST', env.api_url + '/auth/v1/logout?scope=global', headers, None, timeout)
+                # 204: logged out. 401 or 403: the session was already gone (a session-revoked case ended it).
+                outcome[name] = 'revoked' if status in (204, 401, 403) else 'not_confirmed'
+            except (RequestTimeout, RequestFailed):
+                outcome[name] = 'not_confirmed'
+        env.tokens.clear()
+        return outcome
+
     def destroy(self):
-        self._destroy(self._env)
+        """Destroy the stack (e1.destroy). Returns what is left of it, as text; an empty list when nothing is."""
+        return list(self._destroy(self._env) or [])
 
 
 def prepare(project_dir):
