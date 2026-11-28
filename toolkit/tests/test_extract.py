@@ -10,7 +10,7 @@ from pathlib import Path
 from toolkit import extract
 
 SAMPLES = Path(__file__).resolve().parents[2] / 'samples' / 'object-authz'
-SAMPLE_VERSIONS = ('vulnerable', 'patched', 'legit', 'lax-update-policy')
+SAMPLE_VERSIONS = ('vulnerable', 'patched', 'legit', 'lax-update-policy', 'leaky-denial', 'side-effect-on-denial')
 SCHEMA = 'supabase/migrations/20261031000001_schema.sql'
 DOCUMENT_POLICIES = 'supabase/migrations/20261031000002_document_policies.sql'
 TABLES = ['public.announcements', 'public.document_shares', 'public.documents', 'public.memberships',
@@ -65,6 +65,11 @@ DOCUMENT_POLICY_NAMES = {
     # Its file header mentions CREATE POLICY in a comment; that is not a policy.
     'lax-update-policy': ['owners read documents', 'members create own documents', 'tenant members update documents',
                           'owners delete documents'],
+    # The policies of the patched version by name; what differs is a function the read policy calls, and a trigger.
+    'leaky-denial': ['owners read documents', 'members create own documents', 'owners update documents',
+                     'owners delete documents'],
+    'side-effect-on-denial': ['owners read documents', 'members create own documents', 'owners update documents',
+                              'owners delete documents'],
 }
 
 
@@ -83,7 +88,7 @@ class PoliciesOfTheSamples(unittest.TestCase):
                                  DOCUMENT_POLICY_NAMES[version])
                 self.assertEqual({f['table'] for f in found if f['source']['file'] == DOCUMENT_POLICIES},
                                  {'public.documents'})
-        self.assertEqual([len(policies(v)) for v in SAMPLE_VERSIONS], [9, 9, 10, 9])
+        self.assertEqual([len(policies(v)) for v in SAMPLE_VERSIONS], [9, 9, 10, 9, 9, 9])
 
     def test_source_lines(self):
         found = policies('vulnerable')

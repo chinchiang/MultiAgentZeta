@@ -16,6 +16,8 @@ from toolkit import e1
 
 REPO = Path(__file__).resolve().parents[2]
 SAMPLES = REPO / 'samples' / 'object-authz'
+# TK-VAL-001: every version of the sample. The last two each break one check of a denial case and nothing else.
+SAMPLE_VERSIONS = ('vulnerable', 'patched', 'legit', 'lax-update-policy', 'leaky-denial', 'side-effect-on-denial')
 ENV_TESTS = os.environ.get('MAZ_ENV_TESTS') == '1'
 needs_env = unittest.skipUnless(ENV_TESTS, 'environment test: set MAZ_ENV_TESTS=1 (starts a real Supabase stack)')
 
@@ -490,7 +492,7 @@ class SampleVersions(unittest.TestCase):
     def test_shared_schema_and_seed_are_identical(self):
         for rel in self.SHARED:
             with self.subTest(file=rel):
-                contents = {v: (SAMPLES / v / rel).read_bytes() for v in ('vulnerable', 'patched', 'legit', 'lax-update-policy')}
+                contents = {v: (SAMPLES / v / rel).read_bytes() for v in SAMPLE_VERSIONS}
                 self.assertEqual(len(set(contents.values())), 1, rel)
 
 
@@ -864,9 +866,11 @@ class RecipeValuesInDatabaseCommands(unittest.TestCase):
                 self.assertIn('identities', result.reason)
 
     def test_the_recipes_of_the_samples_are_accepted(self):
-        for version in ('vulnerable', 'patched', 'legit', 'lax-update-policy'):
+        for version in SAMPLE_VERSIONS:
             with self.subTest(version=version):
                 recipe, blocked = e1.load_recipe(SAMPLES / version)
+                self.assertEqual(recipe['sample'], f'object-authz/{version}')
+                self.assertEqual(recipe['source_build']['source_digest'], e1.source_digest(SAMPLES / version))
                 self.assertIsNone(blocked)
                 self.assertTrue(recipe['observer']['select_on'])
                 self.assertTrue(recipe['test_data']['related_resources'])
