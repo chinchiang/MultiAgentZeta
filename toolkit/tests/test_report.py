@@ -934,6 +934,61 @@ def cancelled_report():
     return doc
 
 
+class EnvironmentBuildMeasure(unittest.TestCase):
+    """〈定義：環境建置的量測〉 in the report (TK-ENV-006)."""
+
+    def test_the_example_reports_carry_it_exactly_when_the_environment_was_asked_for(self):
+        self.assertIn('environment_build', valid_report())
+        blocked = fixture('report-blocked-no-commit')
+        self.assertNotIn('environment_build', blocked)
+        self.assertEqual(report.validate(blocked), [])
+        blocked['environment_build'] = valid_report()['environment_build']
+        self.assertTrue(any('environment_build' in p for p in report.validate(blocked)))
+        doc = valid_report()
+        del doc['environment_build']
+        self.assertTrue(any('environment_build' in p for p in report.validate(doc)))
+
+    def test_every_part_is_required_and_no_other_is_taken(self):
+        for part in ('build', 'initialization', 'test_data', 'authentication', 'health', 'recovery'):
+            with self.subTest(part=part):
+                doc = valid_report()
+                del doc['environment_build'][part]
+                self.assertNotEqual(report.validate(doc), [])
+        doc = valid_report()
+        doc['environment_build']['detection_rate'] = 1  # nothing else is mixed in
+        self.assertNotEqual(report.validate(doc), [])
+
+    def test_successes_never_exceed_attempts(self):
+        doc = valid_report()
+        doc['environment_build']['build'] = {'attempts': 1, 'successes': 2}
+        self.assertTrue(any('environment_build/build' in p for p in report.validate(doc)))
+        doc = valid_report()
+        doc['environment_build']['authentication']['owner'] = {'attempts': 0, 'successes': 1}
+        self.assertTrue(any('environment_build/authentication/owner' in p for p in report.validate(doc)))
+
+    def test_markdown_lists_each_part_on_its_own_and_authentication_per_identity(self):
+        doc = fixture('report-partial-fault')
+        doc['environment_build']['health'] = {'attempts': 2, 'successes': 1}
+        md = report.render_markdown(doc)
+        section = md.split('## 環境建置量測', 1)[1].split('\n## ', 1)[0]
+        self.assertIn('不併入覆蓋比率與漏洞檢出率', section)
+        self.assertIn('- **建置成功率（來源與建置）**：成功 1／嘗試 1', section)
+        self.assertIn('- **初始化成功率（服務初始化）**：成功 1／嘗試 1', section)
+        self.assertIn('- **測試資料**：成功 1／嘗試 1', section)
+        self.assertIn('- **各角色的認證成功率**：', section)
+        self.assertIn('  - `other_tenant_user`：成功 2／嘗試 2', section)
+        self.assertIn('  - `owner`：成功 1／嘗試 1', section)
+        self.assertIn('- **健康檢查**：成功 1／嘗試 2', section)
+        self.assertIn('- **復原成功率（快照與重置）**：未嘗試', section)
+        self.assertNotIn('%', section)  # counts, never a rate over nothing
+
+    def test_the_coverage_rates_do_not_depend_on_it(self):
+        doc, changed = valid_report(), valid_report()
+        changed['environment_build']['build'] = {'attempts': 5, 'successes': 0}
+        self.assertEqual(report.validate(changed), [])
+        self.assertEqual(changed['coverage'], doc['coverage'])
+
+
 class AbortAndCleanup(unittest.TestCase):
     """〈定義：中止與清理〉 in the report (TK-RUN-004, TK-RUN-005, TK-RUN-006, TK-ENV-003)."""
 

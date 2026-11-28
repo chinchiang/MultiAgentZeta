@@ -583,6 +583,10 @@ class ResetEnv(unittest.TestCase):
             after = e1.reset(env)
             self.assertIsInstance(after, e1.Ready, after)
             self.assertEqual(document_titles(env.project_id), SEED_MARKERS)
+            # 〈定義：環境建置的量測〉: one recovery, and every identity logged in a second time.
+            self.assertEqual(env.measure['recovery'], {'attempts': 1, 'successes': 1})
+            self.assertEqual(set(map(str, env.measure['authentication'].values())), {str({'attempts': 2, 'successes': 2})})
+            self.assertEqual(env.measure['health'], {'attempts': 2, 'successes': 2})
             self.assertTrue(all(o['ok'] for o in after.profile['health']['legit_operations']))
             self.assertEqual(after.profile['identities']['owner']['login'], 'ok')
             self.assertEqual(published_bindings(env.project_id), [])
@@ -1029,6 +1033,98 @@ class TheBuildLeavesTheSecurityControlsAlone(unittest.TestCase):
         text = ' '.join(result.profile['known_differences'])
         for word in ('SSO', 'OAuth', 'multi-factor', 'third-party identities', 'TK-ENV-005'):
             self.assertIn(word, text)
+
+
+class WhatAPreparationAttempted(unittest.TestCase):
+    """〈定義：環境建置的量測〉 (TK-ENV-006): build, initialization, test data, authentication per identity, health
+    and recovery are counted each on their own; a part that was not reached has no attempt."""
+
+    ONE, FAILED, NONE = ({'attempts': 1, 'successes': 1}, {'attempts': 1, 'successes': 0},
+                         {'attempts': 0, 'successes': 0})
+    prepare = TheBuildLeavesTheSecurityControlsAlone.prepare
+    MARKERS = TheBuildLeavesTheSecurityControlsAlone.MARKERS
+
+    def test_a_preparation_that_succeeds_counts_each_part_once_and_each_identity_on_its_own(self):
+        measure = self.prepare().env.measure
+        self.assertEqual({part: measure[part] for part in ('build', 'initialization', 'test_data', 'health')},
+                         dict.fromkeys(('build', 'initialization', 'test_data', 'health'), self.ONE))
+        self.assertEqual(measure['authentication'], dict.fromkeys(('owner', 'same_tenant_non_owner', 'other_tenant_user'),
+                                                                  self.ONE))
+        self.assertEqual(measure['recovery'], self.NONE)  # no reset was asked for
+
+    def test_an_identity_the_toolkit_does_not_log_in_has_no_authentication_count(self):
+        def needs_sso(r):
+            next(i for i in r['auth']['identities'] if i['name'] == 'same_tenant_non_owner')['login'] = 'sso'
+        self.assertEqual(sorted(self.prepare(needs_sso).env.measure['authentication']), ['other_tenant_user', 'owner'])
+
+    def test_a_new_session_after_a_fault_is_another_attempt_of_that_identity_only(self):
+        from unittest import mock
+        result = self.prepare()
+        with mock.patch.object(e1, '_psql', lambda env, sql: 'user-id\n'), \
+                mock.patch.object(e1, '_http', lambda *a, **k: (200, {'access_token': 'a', 'refresh_token': 'r'})):
+            self.assertIsNone(e1.relogin(result.env, 'owner'))
+        with mock.patch.object(e1, '_psql', lambda env, sql: ''):  # the account is gone
+            self.assertIsInstance(e1.relogin(result.env, 'owner'), e1.Blocked)
+        auth = result.env.measure['authentication']
+        self.assertEqual(auth['owner'], {'attempts': 3, 'successes': 2})
+        self.assertEqual(auth['other_tenant_user'], self.ONE)
+
+    def blocked_measure(self, recipe_change=None, file_change=None, psql=None, http=None):
+        from unittest import mock
+        ACommandThatDoesNotComplete.setUp(self)
+        src = failing_copy(self.tmp.name, recipe_change=recipe_change, file_change=file_change)
+
+        def answer(cmd):
+            if cmd[1:2] == ['status']:
+                return 0, '{"API_URL": "http://127.0.0.1:54321", "ANON_KEY": "anon"}', ''
+            if cmd[:3] == ['docker', 'inspect', '-f']:
+                return 0, json.dumps({'maz_e1_maz-failure-sample': {'IPAddress': '172.18.0.2'}}), ''
+            return ACommandThatDoesNotComplete.inspected(self, cmd) or (0, '', '')
+        ACommandThatDoesNotComplete.run_commands(self, answer)
+        with mock.patch.object(e1, '_psql', psql or (lambda env, sql: 'pgcrypto\n')), \
+                mock.patch.object(e1, '_http', http or (lambda *a, **k: (500, None))):
+            result = e1.prepare(src, matrix={**self.matrix, 'services': {}})
+        self.assertIsInstance(result, e1.Blocked, result)
+        return result
+
+    def test_a_recipe_that_cannot_be_used_attempted_nothing(self):
+        result = self.blocked_measure(lambda r: r.pop('health'))
+        self.assertEqual(result.step, 'recipe')
+        self.assertIsNone(result.measure)
+
+    def test_blocked_at_the_build_the_later_parts_were_not_attempted(self):
+        result = self.blocked_measure(lambda r: r['source_build'].update(tools=['no-such-tool']))
+        self.assertEqual(result.step, 'source_build')
+        self.assertEqual(result.measure['build'], self.FAILED)
+        for part in ('initialization', 'test_data', 'health', 'recovery'):
+            self.assertEqual(result.measure[part], self.NONE, part)
+        self.assertEqual(set(map(str, result.measure['authentication'].values())), {str(self.NONE)})
+
+    def test_blocked_at_the_initialization(self):
+        result = self.blocked_measure(lambda r: r['service_init'].update(migrations=['not-on-disk.sql']))
+        self.assertEqual(result.step, 'service_init')
+        self.assertEqual((result.measure['build'], result.measure['initialization'], result.measure['test_data']),
+                         (self.ONE, self.FAILED, self.NONE))
+
+    def test_blocked_at_the_test_data(self):
+        result = self.blocked_measure()  # no seeded marker is found
+        self.assertEqual(result.step, 'test_data')
+        self.assertEqual((result.measure['initialization'], result.measure['test_data'], result.measure['health']),
+                         (self.ONE, self.FAILED, self.NONE))
+
+    def test_blocked_at_the_authentication_of_one_identity(self):
+        def psql(env, sql):
+            if 'select title from public.documents' in sql:
+                return '\n'.join(self.MARKERS) + '\n'
+            if 'update auth.users' in sql:
+                return '' if 'bob@' in sql else 'user-id\n'  # bob's account is missing
+            return 'pgcrypto\n' if 'pg_extension' in sql else '1\n'
+        result = self.blocked_measure(psql=psql, http=lambda *a, **k: (200, {'access_token': 'a', 'refresh_token': 'r'}))
+        self.assertEqual(result.step, 'auth')
+        auth = result.measure['authentication']
+        self.assertEqual((auth['owner'], auth['same_tenant_non_owner'], auth['other_tenant_user']),
+                         (self.ONE, self.FAILED, self.NONE))
+        self.assertEqual((result.measure['test_data'], result.measure['health']), (self.ONE, self.NONE))
 
 
 class TestDataMustBeSynthetic(unittest.TestCase):

@@ -92,6 +92,18 @@ def _abort_problems(doc):
             problems.append('cleanup: leftovers are named exactly when the environment was not destroyed (TK-ENV-003)')
         if failed and doc.get('status') == 'completed':
             problems.append("cleanup: status cannot be 'completed' when the environment was not destroyed (TK-ENV-003)")
+    stages = {s.get('stage'): s.get('status') for s in _list(doc, 'stages') if isinstance(s, dict)}
+    if ('environment_build' in doc) != (stages.get('dynamic_execution') not in (None, 'not_run')):
+        problems.append('environment_build: present exactly when the environment was asked for, that is when '
+                        'dynamic_execution is not not_run (〈定義：環境建置的量測〉)')
+    measure = doc.get('environment_build')
+    if isinstance(measure, dict):
+        counts = {**{k: v for k, v in measure.items() if k != 'authentication'},
+                  **{f'authentication/{n}': v for n, v in (measure.get('authentication') or {}).items()}}
+        problems += [f'environment_build/{name}: successes cannot exceed attempts (TK-ENV-006)'
+                     for name, c in counts.items()
+                     if isinstance(c, dict) and isinstance(c.get('attempts'), int) and isinstance(c.get('successes'), int)
+                     and c['successes'] > c['attempts']]
     if doc.get('self_validation') is not True and any(isinstance(e, dict) and 'fault' in e
                                                       for e in _list(doc, 'execution_records')):
         problems.append('execution_records: a fault is injected in a self-validation run only; the report of such '
@@ -516,6 +528,32 @@ ABORT_TIME_LABELS = {'dispatch_stopped': '派送停止時間', 'in_flight_ended'
 SESSION_LABELS = {'revoked': '已撤銷', 'not_confirmed': '未能確認'}
 
 
+BUILD_PART_LABELS = {'build': '建置成功率（來源與建置）', 'initialization': '初始化成功率（服務初始化）',
+                     'test_data': '測試資料', 'health': '健康檢查', 'recovery': '復原成功率（快照與重置）'}
+BUILD_PART_ORDER = ('build', 'initialization', 'test_data', 'authentication', 'health', 'recovery')
+
+
+def _attempts(count):
+    """成功 n／嘗試 m, or that the part was not reached: a part without an attempt has no rate."""
+    return f'成功 {count["successes"]}／嘗試 {count["attempts"]}' if count['attempts'] else '未嘗試'
+
+
+def _build_measure_section(measure):
+    """〈定義：環境建置的量測〉 (TK-ENV-006): each part on its own line, authentication per identity; never mixed into
+    the coverage or any detection rate."""
+    if not measure:
+        return []
+    lines = ['', '## 環境建置量測', '',
+             '各項分開計算，不併入覆蓋比率與漏洞檢出率（TK-ENV-006）；沒有走到的步驟記為未嘗試，不算進分母。', '']
+    for part in BUILD_PART_ORDER:
+        if part == 'authentication':
+            lines.append('- **各角色的認證成功率**：' + ('' if measure['authentication'] else '（沒有由工具登入的身分）'))
+            lines += [f'  - {_code(name)}：{_attempts(count)}' for name, count in sorted(measure['authentication'].items())]
+        else:
+            lines.append(f'- **{BUILD_PART_LABELS[part]}**：{_attempts(measure[part])}')
+    return lines
+
+
 def _cleanup_section(doc):
     """〈定義：中止與清理〉: the abort, if there was one, with its steps and times (TK-RUN-004 to TK-RUN-006), and
     whether the environment is gone (TK-ENV-003)."""
@@ -692,6 +730,7 @@ def render_markdown(doc):
         lines += _authorization_section(doc)
 
     lines += _environment_section(doc.get('environment'))
+    lines += _build_measure_section(doc.get('environment_build'))
     lines += _cleanup_section(doc)
     lines += _limits_section(doc['limits'])
 

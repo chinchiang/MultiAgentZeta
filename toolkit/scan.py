@@ -1127,7 +1127,8 @@ def run(manifest, prepare=environment.prepare, clock=time.monotonic, abort=None,
     prepared = prepare(project)
     if isinstance(prepared, e1.Blocked):
         return _blocked(state, f'environment blocked at BuildRecipe step {prepared.step}: '
-                               f'{prepared.reason}', stage='dynamic_execution')
+                               f'{prepared.reason}', stage='dynamic_execution',
+                        measure=prepared.measure or e1.new_measure())  # an unusable recipe: nothing was attempted
     ops = prepared.env  # the operations on the stack (toolkit.environment), not its handles
     ops.request_limit = manifest['limits']['max_requests']
 
@@ -1246,7 +1247,7 @@ def run(manifest, prepare=environment.prepare, clock=time.monotonic, abort=None,
                        stages=_stages(preflight={'status': 'completed'},
                                       dynamic_execution={'status': 'blocked', 'reason': reason}),
                        environment=env_report, matrix=_authorization_matrix(prepared), cleanup=cleanup,
-                       abort=abort.record() if abort.requested else None)
+                       abort=abort.record() if abort.requested else None, measure=ops.build_measure())
     definite = all(e['result'] in ('passed', 'failed') for e in executions)
     cancelled = sum(e['result'] == 'cancelled' for e in executions)
     aborted = f'aborted by the {abort.source}: {abort.reason}' if abort.requested else ''
@@ -1267,7 +1268,7 @@ def run(manifest, prepare=environment.prepare, clock=time.monotonic, abort=None,
                    stages=_stages(preflight={'status': 'completed'}, dynamic_execution=dynamic),
                    environment=env_report,
                    matrix=_authorization_matrix(prepared), cleanup=cleanup,
-                   abort=abort.record() if abort.requested else None)
+                   abort=abort.record() if abort.requested else None, measure=ops.build_measure())
 
 
 def _clean_up(ops):
@@ -1313,7 +1314,7 @@ def _requirements(manifest, listed):
     return [item_rule.requirement(i) for i in used.values()]
 
 
-def _blocked(state, reason, stage='preflight'):
+def _blocked(state, reason, stage='preflight', measure=None):
     """Every planned test blocked at `stage`, or held by its own precheck; later stages do not run
     (〈定義：工作階段〉)."""
     now = _now()
@@ -1326,7 +1327,7 @@ def _blocked(state, reason, stage='preflight'):
     else:
         stages = _stages(preflight={'status': 'completed'}, dynamic_execution={'status': 'blocked', 'reason': reason})
     return _finish(state, executions, [], status='blocked', reason=reason, stages=stages,
-                   environment=None, matrix=[])
+                   environment=None, matrix=[], measure=measure)
 
 
 NOT_IMPLEMENTED = {'status': 'not_run', 'reason': 'stage not implemented in this toolkit version'}
@@ -1383,7 +1384,8 @@ def _cases(state, executions, inv):
     return cases
 
 
-def _finish(state, executions, findings, status, reason, stages, environment, matrix, cleanup=None, abort=None):
+def _finish(state, executions, findings, status, reason, stages, environment, matrix, cleanup=None, abort=None,
+            measure=None):
     manifest, records, listed = state.manifest, state.records, state.listed
     inv = _inventory(state, stages)
     env_supported = not (environment and environment['unsupported'])
@@ -1409,6 +1411,8 @@ def _finish(state, executions, findings, status, reason, stages, environment, ma
         doc['environment'] = environment
     if cleanup:
         doc['cleanup'] = cleanup
+    if measure is not None:  # 〈定義：環境建置的量測〉: a record of its own, apart from the coverage (TK-ENV-006)
+        doc['environment_build'] = measure
     if abort:
         doc['abort'] = abort
     if listed.ref:

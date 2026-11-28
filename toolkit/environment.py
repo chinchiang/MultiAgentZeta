@@ -14,6 +14,7 @@ The provisioning identity (migrations, seed, reset) stays in e1 and is not reach
 transport (toolkit.transport) is the seam: the real adapter is urllib and `docker exec`, a scripted one
 answers from a test (tests/scripted.py). Tokens and the observer's password never leave the control area.
 """
+import copy
 import json
 import secrets
 import socket
@@ -207,6 +208,10 @@ class Operations:
                 outcome[name] = 'not_confirmed'
         env.tokens.clear()
         return outcome
+
+    def build_measure(self):
+        """〈定義：環境建置的量測〉: what the preparation and every reset attempted and completed so far."""
+        return copy.deepcopy(self._env.measure)
 
     def destroy(self):
         """Destroy the stack (e1.destroy). Returns what is left of it, as text; an empty list when nothing is."""

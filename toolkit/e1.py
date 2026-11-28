@@ -14,6 +14,7 @@ the live handles (API URL, per-identity tokens) and never leaves the control are
 Runs where Docker runs (WSL/Linux). The Supabase CLI is found via MAZ_SUPABASE_BIN
 or PATH and must match the support matrix's binary digest.
 """
+import copy
 import hashlib
 import json
 import os
@@ -50,10 +51,32 @@ USER_PATH = ('password grant at /auth/v1/token -> access token in the Authorizat
 
 @dataclass(frozen=True)
 class Blocked:
-    """Preparation stopped; step names the BuildRecipe step that failed. detail keeps tool output."""
+    """Preparation stopped; step names the BuildRecipe step that failed. detail keeps tool output. measure is
+    what was attempted up to there (〈定義：環境建置的量測〉); None when the recipe itself could not be used."""
     step: str
     reason: str
     detail: str = ''
+    measure: dict | None = None
+
+
+# 〈定義：環境建置的量測〉 (TK-ENV-006): the parts of a preparation that are counted, each on its own.
+MEASURED = ('build', 'initialization', 'test_data', 'health', 'recovery')
+
+
+def new_measure(recipe=None):
+    """Nothing attempted yet: attempts and successes of each part, and of each identity the toolkit logs in."""
+    identities = [i['name'] for i in (recipe or {}).get('auth', {}).get('identities', [])
+                  if i.get('email') and not login_problem(i)]
+    return {**{part: {'attempts': 0, 'successes': 0} for part in MEASURED},
+            'authentication': {name: {'attempts': 0, 'successes': 0} for name in identities}}
+
+
+def _measured(count, action, *args):
+    """Run one counted attempt: it is a success only if the action returns."""
+    count['attempts'] += 1
+    result = action(*args)
+    count['successes'] += 1
+    return result
 
 
 @dataclass
@@ -70,6 +93,7 @@ class Environment:
     api_keys: dict = field(default_factory=dict)  # public API key format -> key
     usable: bool = True
     relays: list = field(default_factory=list)  # forward.Relay: the host's way into the internal network
+    measure: dict = field(default_factory=lambda: new_measure())  # 〈定義：環境建置的量測〉, over prepare and resets
     isolation: dict = field(default_factory=dict)  # 〈定義：E1 隔離〉: what was checked after the last start
 
     @property
@@ -631,7 +655,8 @@ def _check_auth(env):
     (〈定義：認證與登入方式〉)."""
     for ident in env.recipe['auth']['identities']:
         if ident.get('email') and not login_problem(ident):
-            _open_session(env, ident['name'], ident['email'])
+            count = env.measure['authentication'].setdefault(ident['name'], {'attempts': 0, 'successes': 0})
+            _measured(count, _open_session, env, ident['name'], ident['email'])
 
 
 def _open_session(env, name, email):
@@ -658,8 +683,9 @@ def relogin(env, name):
     env.tokens.pop(name, None)
     if not email or login_problem(identity):
         return None  # an anonymous identity, or one the toolkit does not log in, has no session to give back
+    count = env.measure['authentication'].setdefault(name, {'attempts': 0, 'successes': 0})
     try:
-        _step('auth', _open_session, env, name, email)
+        _measured(count, _step, 'auth', _open_session, env, name, email)
     except _Stop as stop:
         return stop.blocked
     return None
@@ -803,21 +829,25 @@ def prepare(project_dir, matrix=None):
     if blocked:
         return blocked
     matrix = load_matrix(matrix)
-    env = None
+    env, measure = None, new_measure(recipe)
     try:
-        tools = _check_source(project_dir, recipe, matrix)
+        tools = _measured(measure['build'], _check_source, project_dir, recipe, matrix)
+
+        measure['initialization']['attempts'] += 1
         _check_migrations(project_dir, recipe)
-        env = Environment(project_dir, _project_config(project_dir)['project_id'], recipe, tools['supabase-cli'])
+        env = Environment(project_dir, _project_config(project_dir)['project_id'], recipe, tools['supabase-cli'],
+                          measure=measure)
         _step('service_init', _start, env)
-        _step('test_data', _check_test_data, env)
+        measure['initialization']['successes'] += 1
+        _measured(measure['test_data'], _step, 'test_data', _check_test_data, env)
         _step('auth', _create_observer, env)
         _step('auth', _check_auth, env)
-        health = _step('health', _check_health, env)
+        health = _measured(measure['health'], _step, 'health', _check_health, env)
         return Ready(_step('health', _profile, env, tools, matrix, health), env)
     except _Stop as stop:
         if env is not None:
             _stop_quietly(env)
-        return stop.blocked
+        return Blocked(stop.blocked.step, stop.blocked.reason, stop.blocked.detail, copy.deepcopy(measure))
     except BaseException:  # an interrupt (Ctrl-C) too: a started stack is never left running (TK-ENV-003)
         if env is not None:
             _stop_quietly(env)
@@ -836,10 +866,10 @@ def reset(env, matrix=None):
         return Blocked('snapshot_reset', 'environment was isolated earlier and must not be reused')
     matrix = load_matrix(matrix)
     try:
-        return _step('snapshot_reset', _reset, env, matrix)
+        return _measured(env.measure['recovery'], _step, 'snapshot_reset', _reset, env, matrix)
     except _Stop as stop:  # TK-SBX-010: whatever failed, the environment is isolated and not reused
         _stop_quietly(env)
-        return Blocked('snapshot_reset', stop.blocked.reason, stop.blocked.detail)
+        return Blocked('snapshot_reset', stop.blocked.reason, stop.blocked.detail, copy.deepcopy(env.measure))
     except BaseException:
         _stop_quietly(env)
         raise
@@ -859,7 +889,7 @@ def _reset(env, matrix):
     env.tokens.clear()
     _create_observer(env)
     _check_auth(env)
-    health = _check_health(env)
+    health = _measured(env.measure['health'], _check_health, env)
     return Ready(_profile(env, {'supabase-cli': env.cli}, matrix, health), env)
 
 
