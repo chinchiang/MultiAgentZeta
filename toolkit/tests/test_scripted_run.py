@@ -34,8 +34,10 @@ def cases(*specs):
 
 
 def run(m, world, **options):
+    """Run the plan against the world. A plan with a fault to inject is run as the self-validation run it is
+    (〈定義：故障注入〉); any other plan as a scan."""
     prepare, lifecycle = scripted.prepare_with(world, **options)
-    rep = scan.run(m, prepare=prepare).report
+    rep = scan.run(m, prepare=prepare, self_validation=any('fault' in t for t in m['tests'])).report
     assert report.validate(rep) == [], report.validate(rep)
     return rep, {e['test_id']: e for e in rep['execution_records']}, lifecycle
 
@@ -413,10 +415,124 @@ class AFaultIsUndoneForTheNextCase(unittest.TestCase):
                 self.assertIn(error, by_id['FAULTED']['error'])
                 self.assertEqual(by_id['NORMAL']['result'], 'passed')
 
-    def test_a_revoked_session_blocks_the_identity_check_and_stays_revoked(self):
-        by_id = self.faulted_then_normal('session-revoked')
-        self.assertEqual((by_id['FAULTED']['result'], by_id['FAULTED']['checks']['identity']), ('blocked', False))
-        self.assertEqual(by_id['NORMAL']['result'], 'blocked')  # the actor is logged out for the rest of the run
+    def test_a_revoked_session_blocks_its_case_and_the_actor_has_a_session_again_afterwards(self):
+        m = cases(('READ-other-tenant', 'FAULTED', {'fault': 'session-revoked'}), ('READ-other-tenant', 'NORMAL', {}))
+        rep, by_id, lifecycle = run(m, scripted.World(attempt=(403, None)))
+        faulted = by_id['FAULTED']
+        self.assertEqual((faulted['result'], faulted['checks']['identity']), ('blocked', False))
+        logout = faulted['evidence'][0]
+        self.assertEqual((logout['injection'], logout['request']['path'], logout['response']['status']),
+                         ('applied', '/auth/v1/logout?scope=global', 204))
+        self.assertEqual(by_id['NORMAL']['result'], 'passed')  # 〈定義：故障注入〉: the fault stays within its case
+        self.assertTrue(by_id['NORMAL']['checks']['identity'])
+        self.assertIn('relogin other_tenant_user', lifecycle.calls)
+
+    def injection_that_fails(self, **world):
+        m = cases(('READ-other-tenant', 'FAULTED', {'fault': 'session-revoked'}), ('READ-other-tenant', 'NORMAL', {}))
+        w = scripted.World(attempt=(403, None))
+        prepare, lifecycle = scripted.prepare_with(w)
+
+        def prepared(project_dir):
+            ready = prepare(project_dir)
+            http = ready.env._transport.http
+
+            def failing_logout(method, url, headers, body, timeout):
+                if '/auth/v1/logout' in url:
+                    if world.get('status'):
+                        return world['status'], b''
+                    raise environment.RequestTimeout('POST /auth/v1/logout: timed out')
+                return http(method, url, headers, body, timeout)
+            ready.env._transport = type('T', (), {'http': staticmethod(failing_logout),
+                                                  'docker_exec': ready.env._transport.docker_exec})()
+            return ready
+        rep = scan.run(m, prepare=prepared, self_validation=True).report
+        self.assertEqual(report.validate(rep), [])
+        return {e['test_id']: e for e in rep['execution_records']}, lifecycle
+
+    def test_a_logout_that_does_not_complete_blocks_its_case_with_the_evidence_of_the_attempt(self):
+        by_id, lifecycle = self.injection_that_fails()
+        faulted = by_id['FAULTED']
+        self.assertEqual(faulted['result'], 'blocked')
+        self.assertIn('fault injection failed', faulted['error'])
+        self.assertIn('did not complete', faulted['error'])
+        self.assertEqual([(ev['injection'], 'response' in ev) for ev in faulted['evidence']], [('failed', False)])
+        # The logout may have reached the auth service all the same: the actor gets a new session.
+        self.assertIn('relogin other_tenant_user', lifecycle.calls)
+        self.assertEqual(by_id['NORMAL']['result'], 'passed')
+
+    def test_a_logout_that_is_refused_blocks_its_case(self):
+        by_id, _ = self.injection_that_fails(status=500)
+        faulted = by_id['FAULTED']
+        self.assertEqual(faulted['result'], 'blocked')
+        self.assertIn('HTTP 500', faulted['error'])
+        self.assertEqual(faulted['evidence'][0]['response']['status'], 500)
+        self.assertEqual(by_id['NORMAL']['result'], 'passed')
+
+    def test_an_observer_fault_without_an_observer_role_blocks_its_case_and_the_run_goes_on(self):
+        m = cases(('READ-other-tenant', 'FAULTED', {'fault': 'observer-unavailable'}),
+                  ('READ-other-tenant', 'TIMEOUT', {'fault': 'observer-timeout'}))
+        prepare, _ = scripted.prepare_with(scripted.World(attempt=(403, None)))
+
+        def prepared(project_dir):
+            ready = prepare(project_dir)
+            ready.env._env.observer.clear()
+            return ready
+        rep = scan.run(m, prepare=prepared, self_validation=True).report
+        self.assertEqual(report.validate(rep), [])
+        for e in rep['execution_records']:
+            with self.subTest(test=e['test_id']):
+                self.assertEqual(e['result'], 'blocked')
+                self.assertIn('no observer role', e['error'])
+
+    def test_a_fault_that_had_no_effect_is_blocked_not_judged(self):
+        # The logout is answered 204 but the session goes on working: the case would pass as if nothing was injected.
+        m = cases(('READ-other-tenant', 'FAULTED', {'fault': 'session-revoked'}))
+        world = scripted.World(attempt=(403, None))
+        prepare, _ = scripted.prepare_with(world)
+
+        def prepared(project_dir):
+            ready = prepare(project_dir)
+            world.revoked = type('Never', (set,), {'add': lambda self, x: None})()
+            return ready
+        rep = scan.run(m, prepare=prepared, self_validation=True).report
+        self.assertEqual(report.validate(rep), [])
+        record = rep['execution_records'][0]
+        self.assertEqual(record['result'], 'blocked')
+        self.assertIn('had no effect', record['error'])
+        self.assertEqual(rep['findings'], [])
+
+
+class FaultsAreForSelfValidationRunsOnly(unittest.TestCase):
+    """〈定義：故障注入〉 (TK-VAL-001): a scan injects nothing; a ScanManifest cannot make a run a self-validation run."""
+
+    def test_a_scan_whose_plan_carries_a_fault_is_blocked_in_preflight_and_starts_nothing(self):
+        for field, value in (('fault', 'session-revoked'), ('fault_api_key', 'anon-jwt')):
+            with self.subTest(field=field):
+                world = scripted.World(attempt=(403, None))
+                prepare, lifecycle = scripted.prepare_with(world)
+                rep = scan.run(one_case('READ-other-tenant', **{field: value}), prepare=prepare).report
+                self.assertEqual(report.validate(rep), [])
+                self.assertEqual(rep['status'], 'blocked')
+                self.assertIn('self-validation runs of the toolkit only', rep['status_reason'])
+                self.assertIn('READ-other-tenant', rep['status_reason'])
+                self.assertEqual((world.http_calls, lifecycle.calls), ([], []))
+                self.assertNotIn('self_validation', rep)
+
+    def test_a_manifest_field_does_not_turn_self_validation_on(self):
+        m = one_case('READ-other-tenant', fault='session-revoked')
+        m['self_validation'] = True
+        prepare, _ = scripted.prepare_with(scripted.World(attempt=(403, None)))
+        self.assertEqual(scan.run(m, prepare=prepare).report['status'], 'blocked')
+
+    def test_a_self_validation_run_says_so_in_the_report_and_the_markdown(self):
+        rep, _, _ = run(one_case('READ-other-tenant', fault='observer-timeout'), scripted.World(attempt=(403, None)))
+        self.assertIs(rep['self_validation'], True)
+        self.assertIn('- **執行類型**：工具包自我驗證（含故障注入，不是對應用的掃描結果）', report.render_markdown(rep))
+
+    def test_a_scan_does_not_say_it(self):
+        rep, _, _ = run(one_case('READ-other-tenant'), scripted.World(attempt=(403, None)))
+        self.assertNotIn('self_validation', rep)
+        self.assertNotIn('執行類型', report.render_markdown(rep))
 
 
 class ChannelsAndIdentities(unittest.TestCase):

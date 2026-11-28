@@ -225,6 +225,10 @@
       "enum": ["pending", "running", "completed", "partial", "blocked", "failed", "cancelled"]
     },
     "status_reason": {"description": "Why the run is not completed.", "$ref": "#/$defs/text"},
+    "self_validation": {
+      "description": "〈定義：故障注入〉 (TK-VAL-001): present, and true, on a run of the toolkit's own acceptance. Only such a run has execution records with a fault.",
+      "const": true
+    },
     "cleanup": {
       "description": "〈定義：中止與清理〉 銷毀的查證 (TK-ENV-003, TK-SBX-010): whether the environment was found gone after it was destroyed, and what was still there when it was not. Present whenever an environment was prepared.",
       "type": "object", "additionalProperties": false,
@@ -297,6 +301,9 @@
     "execution_record": {
       "allOf": [
         {"$ref": "#/$defs/common"},
+        {"description": "〈定義：故障注入〉: a case with an injected fault is undeterminable; it is never passed or failed.",
+         "if": {"required": ["fault"]},
+         "then": {"properties": {"result": {"not": {"enum": ["passed", "failed"]}}}}},
         {
           "description": "TK-DYN-001: a passed denial case carries all four checks.",
           "if": {"properties": {"result": {"const": "passed"}, "case_kind": {"not": {"const": "allowed"}}},
@@ -369,7 +376,7 @@
           "$ref": "#/$defs/text"
         },
         "fault": {
-          "description": "TK-VAL-001: the fault a self-validation run injected to make the case undeterminable.",
+          "description": "〈定義：故障注入〉 (TK-VAL-001): the fault a self-validation run injected to make the case undeterminable. Such a record is blocked or an execution error, never a verdict (see the allOf of execution_record).",
           "enum": ["session-revoked", "observer-unavailable", "observer-timeout", "api-unreachable", "api-key-missing"]
         },
         "result": {
@@ -389,6 +396,10 @@
         "point": {
           "description": "TK-IDN-010: when the observation was made: before 執行前, after 執行後, after_background 背景工作完成後.",
           "enum": ["before", "after", "after_background"]
+        },
+        "injection": {
+          "description": "〈定義：故障注入〉: this request was the injection of the case's fault; applied 已注入, failed 注入失敗.",
+          "enum": ["applied", "failed"]
         },
         "api_key_format": {
           "description": "TK-DYN-004: the API key format of an actor request: anon-jwt (legacy anon JWT) or publishable (sb_publishable_).",

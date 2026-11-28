@@ -112,6 +112,7 @@ class _RunState:
     clock: object = time.monotonic  # seconds; the run's time limit is measured with it
     started: float = 0.0  # clock() when the run began
     requests: int = 0  # actor requests and observer reads the run's cases made (執行限制 max_requests)
+    self_validation: bool = False  # 〈定義：故障注入〉: only such a run takes tests with a fault
 
     def elapsed(self):
         return max(0.0, self.clock() - self.started)
@@ -969,6 +970,7 @@ def _resource_problems(resources):
 
 
 TEMPLATE_OVERRIDES = ('policy_template', 'policy_template_path')
+FAULT_FIELDS = ('fault', 'fault_api_key')
 
 
 def _template_override_problems(manifest):
@@ -1018,6 +1020,11 @@ def _preflight(state, now):
     overrides = _template_override_problems(manifest) + _s1_problems(manifest)
     if overrides:
         return 'nothing was started: ' + '; '.join(overrides)
+    faulted = [str(t.get('test_id')) for t in _planned_tests(manifest)
+               if isinstance(t, dict) and any(name in t for name in FAULT_FIELDS)]
+    if faulted and not state.self_validation:  # 〈定義：故障注入〉: a scan of an application injects nothing
+        return ('nothing was started: tests ' + ', '.join(faulted) + ' carry a fault to inject; faults are injected in '
+                'self-validation runs of the toolkit only, not in a scan')
     project = manifest['target']['project']
     pinned, actual = manifest['target']['source_digest'], e1.source_digest(project)
     if pinned != actual:
@@ -1071,19 +1078,22 @@ def _environment_report(profile):
     }
 
 
-def run(manifest, prepare=environment.prepare, clock=time.monotonic, abort=None):
+def run(manifest, prepare=environment.prepare, clock=time.monotonic, abort=None, self_validation=False):
     """Run the manifest's tests against its project and return the report and its Markdown.
 
     A run that cannot start (source digest mismatch, BuildRecipe step blocked) is
     reported with status blocked and the reason; every planned test is blocked.
     clock() gives seconds; the run's time limit is measured with it, from here on. abort is the control
     area's stop signal (Abort): once requested, no further case is dispatched and the run ends as
-    〈定義：中止與清理〉 says, with a report.
+    〈定義：中止與清理〉 says, with a report. self_validation marks a run of the toolkit's own acceptance
+    (TK-VAL-001): only then may a test carry a fault to inject (〈定義：故障注入〉). It is not a field of the
+    ScanManifest, so the plan of a scan cannot turn it on.
     """
     abort = abort or Abort(clock)
     run_start = datetime.now(timezone.utc)
     run_id = f'run-{run_start:%Y%m%d%H%M%S}-{secrets.token_hex(3)}'
-    state = _RunState(manifest, _Records(run_id, _commit(manifest)), clock=clock, started=clock())
+    state = _RunState(manifest, _Records(run_id, _commit(manifest)), clock=clock, started=clock(),
+                      self_validation=self_validation)
     problem = _preflight(state, run_start)
     if problem:
         return _blocked(state, problem, stage='preflight')
@@ -1128,8 +1138,10 @@ def run(manifest, prepare=environment.prepare, clock=time.monotonic, abort=None)
                 undo = None
                 try:
                     # Inside the case's handling: a failed injection is that case's error, not the run's (TK-RUN-001).
-                    undo = ops.inject(test.get('fault'), test['actor_ref'],
-                                               test.get('fault_api_key') or test.get('api_key', 'anon-jwt'), _timeout(test))
+                    undo, injected = ops.inject(test.get('fault'), test['actor_ref'],
+                                                test.get('fault_api_key') or test.get('api_key', 'anon-jwt'), _timeout(test))
+                    if injected:
+                        evidence.append(injected)
                     _check_api_keys(ops, test, denial)
                     if denial:
                         result, checks = _denial_case(ops, test, evidence)
@@ -1144,6 +1156,10 @@ def run(manifest, prepare=environment.prepare, clock=time.monotonic, abort=None)
                     result, checks, error = 'error', None, f'request failed: {e}'
                 except environment.ApiKeyUnavailable as e:
                     result, checks, error = 'blocked', None, f'API key unavailable: {e}'
+                except environment.InjectionFailed as e:  # 〈定義：故障注入〉: never judged as if the fault were there
+                    result, checks, error = 'blocked', None, f'fault injection failed: {e}'
+                    if e.evidence:
+                        evidence.append(e.evidence)
                 except environment.LimitReached as e:  # the count before dispatch should have held the case back
                     result, checks, error = 'error', None, f'request limit reached inside the case: {e}'
                 except environment.Aborted:  # TK-RUN-005 step 5: what it did before the abort is not known
@@ -1151,9 +1167,14 @@ def run(manifest, prepare=environment.prepare, clock=time.monotonic, abort=None)
                                                             'outcome is unknown')
                     abort.in_flight = test['test_id']
                 finally:
-                    if undo:
+                    if undo and not abort.requested:  # an aborted run is about to destroy the stack
                         undo()
                     state.requests = ops.requests
+                if test.get('fault') and result in ('passed', 'failed'):
+                    # 〈定義：故障注入〉: a fault makes its case undeterminable. A verdict means the fault was not
+                    # in place, and what was judged is not what the test set out to try.
+                    result, error = 'blocked', (f'the injected fault {test["fault"]} had no effect: the case was '
+                                                f'judged {result} as if without it')
                 ex = _execution(state, test, started, result, error,
                                 approval_id=precheck.approval_id)  # it ran under this approval
                 if test.get('fault'):
@@ -1341,7 +1362,7 @@ def _finish(state, executions, findings, status, reason, stages, environment, ma
         inventory={'rule': inv['rule'], 'supported_version': extract.SUPPORTED_VERSION, 'loaded': inv['loaded'],
                    'completeness': inv['completeness'], 'unresolved': inv['unresolved']},
         unsupported_items=[dict(u) for u in inv['unsupported_items']], **numbers)
-    doc = {'schema_version': '1', 'run_id': records.run_id, 'id': f'report-{records.run_id}', 'created_at': _now(),
+    doc = {'schema_version': '1', 'run_id': records.run_id, **({'self_validation': True} if state.self_validation else {}), 'id': f'report-{records.run_id}', 'created_at': _now(),
            'source_id': SOURCE_ID, 'commit': records.commit, 'status': status,
            'manifest': {'id': manifest.get('id'), 'digest': _digest(manifest)},
            'stages': stages, 'requirements': _requirements(manifest, listed), 'authorization_matrix': matrix,
@@ -1454,6 +1475,8 @@ def main(argv, out, err, prepare=environment.prepare):
     what failed goes to err; no credential is printed or written (TK-IDN-005). Returns the exit status."""
     parser = argparse.ArgumentParser(prog='scan_run.py', description='Run one scan from a ScanManifest.')
     parser.add_argument('--manifest', required=True, help='the ScanManifest, a JSON file')
+    parser.add_argument('--self-validation', action='store_true',
+                        help="a run of the toolkit's own acceptance: only such a run takes tests with a fault to inject")
     parser.add_argument('--out', required=True, help='directory for report.json and report.md, outside the '
                                                      'source under test; an earlier report is not overwritten')
     args = parser.parse_args(argv)
@@ -1466,7 +1489,7 @@ def main(argv, out, err, prepare=environment.prepare):
     abort = Abort()
     restore = _abort_on_signals(abort, err)
     try:
-        done = run(manifest, prepare=prepare, abort=abort)
+        done = run(manifest, prepare=prepare, abort=abort, self_validation=args.self_validation)
         # Exclusive creation: a report that appeared during the run is not overwritten either.
         with open(directory / REPORT_JSON, 'x', encoding='utf-8', newline='\n') as f:
             f.write(json.dumps(done.report, ensure_ascii=False, indent=2) + '\n')

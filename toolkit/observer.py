@@ -6,6 +6,7 @@ address on the toolkit network, where the image checks the role's password.
 """
 import hashlib
 import re
+import secrets
 import subprocess
 
 from toolkit import transport as real_transport
@@ -19,6 +20,33 @@ class ObservationFailed(Exception):
 
 # Time limit of one observer query; env.observer['timeout_seconds'] overrides it (self-validation, TK-VAL-001).
 QUERY_TIMEOUT_SECONDS = 60
+
+
+OBSERVER_FAULTS = ('observer-unavailable', 'observer-timeout')
+
+
+def inject(env, fault):
+    """〈定義：故障注入〉: make the observer unable to read, for one case of a self-validation run, and return the
+    function that undoes it. The observer's login is changed here and nowhere else: a run never reads or
+    rewrites the password (TK-IDN-005). Without an observer role there is nothing to inject into, which is a
+    missing observation capability like any other (TK-IDN-009)."""
+    obs = env.observer
+    if not obs or 'password' not in obs:
+        raise ObservationFailed(f'no observer role in this environment; the fault {fault} cannot be injected')
+    if fault == 'observer-unavailable':
+        saved = obs['password']
+        obs['password'] = 'wrong-' + secrets.token_hex(8)
+
+        def restore():
+            obs['password'] = saved
+        return restore
+    if fault == 'observer-timeout':  # a query time limit no read can meet (TK-IDN-009)
+        obs['timeout_seconds'] = 0.000001
+
+        def no_limit_override():
+            obs.pop('timeout_seconds', None)
+        return no_limit_override
+    raise ValueError(f'not an observer fault: {fault}')
 
 
 def _query(env, sql, transport):
