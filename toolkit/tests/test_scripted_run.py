@@ -63,6 +63,72 @@ class JudgementOnTheResponseAndTheState(unittest.TestCase):
         self.assertEqual(cases['UPDATE-other-tenant']['result'], 'passed')
 
 
+class ADenialAnsweredOutsideTheContract(unittest.TestCase):
+    """〈定義：測試結果〉 拒絕案例的契約外回應 and 〈定義：問題狀態〉 (TK-DYN-001, TK-DYN-002): without a disclosure or a
+    change, an answer of the application outside the contract fails check 4 and its finding is 證據待補; an
+    answer nothing can be judged from is an execution error; a disclosure or a change is 已確認."""
+
+    LEAK = (200, [{'title': 'MARK-A-ALICE-PRIVATE', 'body': 'b'}])
+
+    def outcome(self, attempt, test_id='READ-other-tenant', **world):
+        rep, by_id, _ = run(one_case(test_id), scripted.World(attempt=attempt, **world))
+        return rep, by_id[test_id]
+
+    def test_an_answer_of_the_application_outside_the_contract_is_a_failure_with_evidence_pending(self):
+        for attempt in ((500, {'message': 'boom'}), (500, None), (302, None), (400, b'<html>bad</html>'),
+                        (204, None)):
+            with self.subTest(attempt=attempt):
+                rep, record = self.outcome(attempt)
+                self.assertEqual(record['result'], 'failed')
+                self.assertEqual((record['checks']['no_disclosure_or_change'], record['checks']['response_and_side_effects']),
+                                 (True, False))
+                self.assertEqual([f['status'] for f in rep['findings']], ['evidence_pending'])
+                self.assertEqual(rep['findings'][0]['execution_record_ids'], [record['id']])
+
+    def test_a_backend_that_is_not_available_is_an_execution_error_without_a_finding(self):
+        for status in (502, 503, 504):
+            with self.subTest(status=status):
+                rep, record = self.outcome((status, None))
+                self.assertEqual((record['result'], rep['findings']), ('error', []))
+
+    def test_a_200_that_cannot_be_read_as_the_contracts_collection_is_an_execution_error(self):
+        for body in (None, {'message': 'not a list'}, b'<html>ok</html>'):
+            with self.subTest(body=body):
+                rep, record = self.outcome((200, body))
+                self.assertEqual((record['result'], rep['findings']), ('error', []))
+
+    def test_a_disclosure_is_confirmed_whatever_the_status(self):
+        rep, record = self.outcome(self.LEAK)
+        self.assertEqual((record['result'], [f['status'] for f in rep['findings']]), ('failed', ['confirmed']))
+
+    def test_a_change_behind_an_answer_outside_the_contract_is_confirmed(self):
+        rep, record = self.outcome((500, None), test_id='UPDATE-other-tenant', mutates=True)
+        self.assertEqual((record['result'], [f['status'] for f in rep['findings']]), ('failed', ['confirmed']))
+
+    def test_one_finding_with_both_kinds_of_record_is_confirmed(self):
+        # The same attempt with the two API key formats is one finding: the first answer is only outside the
+        # contract, the second discloses the row.
+        m = cases(('READ-anonymous-anon-jwt', 'JWT', {}), ('READ-anonymous-publishable', 'PUBLISHABLE', {}))
+        world = scripted.World(attempt=(500, None))
+        prepare, _ = scripted.prepare_with(world)
+
+        def prepared(project_dir):
+            ready = prepare(project_dir)
+            request, made = ready.env.request, []
+
+            def then_leak(*args, **kwargs):
+                made.append(1)
+                if len(made) == 4:  # the second case begins
+                    world.attempt = self.LEAK
+                return request(*args, **kwargs)
+            ready.env.request = then_leak
+            return ready
+        rep = scan.run(m, prepare=prepared).report
+        self.assertEqual(report.validate(rep), [])
+        self.assertEqual([e['result'] for e in rep['execution_records']], ['failed', 'failed'])
+        self.assertEqual([(f['status'], len(f['execution_record_ids'])) for f in rep['findings']], [('confirmed', 2)])
+
+
 class AnAllowedCaseWithoutAJudgeableAnswer(unittest.TestCase):
     """〈定義：測試結果〉 允許案例: the access is granted (passed), refused by the application (failed), or the
     reply cannot be judged (execution error); only a real refusal is a failed test."""
@@ -250,7 +316,8 @@ class TheRequestCountStopsWhatTheEstimateMissed(unittest.TestCase):
 
 
 class WhenTheObserverCannotRead(unittest.TestCase):
-    """TK-IDN-009: a read that failed or cannot be trusted is no read; the case is blocked, never passed on the
+    """TK-IDN-009 and 〈定義：測試結果〉 受阻 (its note on a failed observation): a read that failed or cannot be
+    trusted is a missing observation capability, not a tool error; the case is blocked, never passed on the
     actor's refusal alone."""
 
     def blocked_by(self, **world):
@@ -272,6 +339,33 @@ class WhenTheObserverCannotRead(unittest.TestCase):
     def test_output_that_is_not_text(self):
         error = UnicodeDecodeError('utf-8', b'\xff', 0, 1, 'invalid start byte')
         self.assertIn('not text', self.blocked_by(observer_error=error))
+
+
+class TheStageStatusWhenCasesDoNotFinish(unittest.TestCase):
+    """〈定義：工作階段〉 (its note on stage and run status, TK-RUN-001, TK-RUN-002): a dynamic execution stage that
+    ran is completed whatever its cases say; a blocked or errored case shows in its result and in the run's
+    status, partial."""
+
+    def stage(self, rep):
+        return next(s for s in rep['stages'] if s['stage'] == 'dynamic_execution')
+
+    def test_a_blocked_case_leaves_the_stage_completed_and_the_run_partial(self):
+        world = scripted.World(attempt=(403, None), observer_error=subprocess.TimeoutExpired('psql', 60))
+        rep, by_id, _ = run(one_case('READ-other-tenant'), world)
+        self.assertEqual(by_id['READ-other-tenant']['result'], 'blocked')
+        self.assertEqual((self.stage(rep)['status'], rep['status']), ('completed', 'partial'))
+
+    def test_an_errored_case_leaves_the_stage_completed_and_the_run_partial(self):
+        world = scripted.World(http_error=environment.RequestTimeout('GET /rest/v1/documents: timed out'))
+        rep, by_id, _ = run(one_case('READ-other-tenant'), world)
+        self.assertEqual(by_id['READ-other-tenant']['result'], 'error')
+        self.assertEqual((self.stage(rep)['status'], rep['status']), ('completed', 'partial'))
+
+    def test_a_reset_that_fails_makes_the_stage_failed(self):
+        m = cases(('UPDATE-other-tenant', 'FIRST', {}), ('READ-other-tenant', 'SECOND', {}))
+        prepare, _ = scripted.prepare_with(scripted.World(attempt=(403, None)), reset_fails=True)
+        rep = scan.run(m, prepare=prepare).report
+        self.assertEqual((self.stage(rep)['status'], rep['status']), ('failed', 'partial'))
 
 
 class WhenARequestFails(unittest.TestCase):

@@ -772,6 +772,34 @@ class ObserverRoleEnv(unittest.TestCase):
                 self.assertFalse(ok, out)
                 self.assertIn('permission denied', out)
 
+    def test_observer_cannot_lock_rows_or_the_table(self):
+        # TK-IDN-010: the role holds SELECT only, and every lock beyond the one a plain read takes needs more.
+        row_locks = [f'select title from public.documents {clause}'
+                     for clause in ('for update', 'for no key update', 'for share', 'for key share')]
+        table_locks = [f'begin; lock table public.documents in {mode} mode; commit'
+                       for mode in ('row share', 'row exclusive', 'share update exclusive', 'share',
+                                    'share row exclusive', 'exclusive', 'access exclusive')]
+        for sql in row_locks + table_locks:
+            with self.subTest(sql=sql):
+                ok, out = self.query(sql)
+                self.assertFalse(ok, out)
+                self.assertIn('permission denied', out)
+
+    def locks_on_documents(self):
+        """Locks on the judged table that Postgres lists right now, read by the provisioning identity."""
+        return sorted(e1._psql(self.env, "select l.mode || ' ' || l.granted from pg_locks l join pg_class c "
+                                         "on c.oid = l.relation where c.oid = 'public.documents'::regclass "
+                                         "and l.pid <> pg_backend_pid();").splitlines())
+
+    def test_an_observation_leaves_no_lock_on_the_judged_table(self):
+        # TK-IDN-010: the lock state of the data under test is the same before and after the template's read.
+        from toolkit import observer
+        before = self.locks_on_documents()
+        state = observer.document_row_state(self.env, 'MARK-A-ALICE-PRIVATE')
+        self.assertTrue(state['resource_exists'], state)
+        self.assertEqual(self.locks_on_documents(), before)
+        self.assertEqual(before, [])
+
     def test_observer_is_not_privileged_and_cannot_become_service_role(self):
         ok, out = self.query("select rolsuper, rolcreaterole, rolcreatedb from pg_roles where rolname = current_user")
         self.assertEqual((ok, out), (True, 'f|f|f'))

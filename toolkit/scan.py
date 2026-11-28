@@ -303,7 +303,10 @@ def _denial_case(ops, test, evidence):
     if disclosed or changed or side_effect:
         return 'failed', checks
     if not response_ok:
-        return 'error', checks
+        # 〈定義：測試結果〉 拒絕案例的契約外回應: no answer the contract can judge is an execution error; any other
+        # answer outside the contract is the application's own, and check 4 does not hold.
+        unjudgeable = status in BACKEND_UNAVAILABLE or (status == 200 and not isinstance(data, list))
+        return ('error' if unjudgeable else 'failed'), checks
     return 'passed', checks
 
 
@@ -336,20 +339,34 @@ def _allowed_case(ops, test, evidence):
     return ('passed' if granted else 'failed'), {'access_granted': granted}
 
 
+def _side_effect(ex):
+    """Whether the observer saw the table change between its two reads of a denial case (TK-DYN-001 第 4 項)."""
+    seen = {ev['point']: ev['observation'].get('table_digest') for ev in ex['evidence'] if ev.get('channel') == 'observer'}
+    return seen.get('before') != seen.get('after')
+
+
 def _record_finding(state, findings, test, ex):
     """The FindingRecord of a failed denial case. A run has one finding per fingerprint, fingerprint version and
     requirement version (〈定義：覆核紀錄〉 項目): a case that fails on a finding the run already has, such as the
-    same attempt with the other API key format, adds its execution record to that finding."""
+    same attempt with the other API key format, adds its execution record to that finding.
+
+    〈定義：問題狀態〉: a disclosure or a state change proves the requirement was violated (已確認, as far as the
+    confirmation item allows); an answer outside the contract without either points at a risk and proves
+    nothing (證據待補). A finding with both kinds of record has the proof."""
     fingerprint, version = _fingerprint(test), _item_version(state.listed, test)
+    proven = not ex['checks']['no_disclosure_or_change'] or _side_effect(ex)
+    status = item_rule.finding_cap(state.listed.item(test)) if proven else 'evidence_pending'
     for f in findings:
         if (f['fingerprint'], f['fingerprint_version'], f['requirement_version']) == (fingerprint, FINGERPRINT_VERSION,
                                                                                     version):
             f['execution_record_ids'].append(ex['id'])
+            if proven:
+                f['status'] = status
             return
     findings.append(state.records.new('finding', fingerprint=fingerprint, fingerprint_version=FINGERPRINT_VERSION,
                                       requirement_id=test['requirement_id'], requirement_version=version,
                                       root_cause='object-ownership-not-enforced',
-                                      status=item_rule.finding_cap(state.listed.item(test)),
+                                      status=status,
                                       evidence_type='dynamic', execution_record_ids=[ex['id']]))
 
 
