@@ -119,7 +119,8 @@ def reviewed_list(source, accepted=ACCEPTED, s1=(S1_PUBLIC,), resources=None, ex
     return {'path': str(path), 'digest': confirmation.write(path, doc, source)}
 
 
-SAMPLE_IDS = [f'object-authz/{v}' for v in ('vulnerable', 'patched', 'legit', 'lax-update-policy')]
+SAMPLE_IDS = [f'object-authz/{v}' for v in ('vulnerable', 'patched', 'legit', 'lax-update-policy', 'leaky-denial',
+                                             'side-effect-on-denial')]
 # 〈定義：測試授權紀錄〉 of these tests: every sample version in E1 and every operation of the test templates,
 # DELETE on documents through an extra approval, so the delete cases of the E1 runs run under one.
 DELETE_APPROVAL = {'approval_id': 'APR-DELETE', 'operations': [{'resource': 'documents', 'methods': ['DELETE']}],
@@ -1988,6 +1989,75 @@ class UndeterminableCasesEnv(unittest.TestCase):
         stages = {s['stage']: s['status'] for s in self.report['stages']}
         self.assertEqual((stages['preflight'], stages['dynamic_execution'], stages['judgement_report']),
                          ('completed', 'completed', 'completed'))
+
+
+@needs_env
+class EachCheckFailingAloneEnv(unittest.TestCase):
+    """TK-DYN-001, TK-DYN-002, TK-VAL-001: each of the four checks of a denial case, failing on its own on a real
+    stack, keeps the case from passing. Checks 1 and 2 are the premises of a test and fail by how the test is
+    set up, on the patched sample; checks 3 and 4 are the application's doing and each has a sample of its own."""
+
+    ORDER = ('resource_and_control', 'identity', 'no_disclosure_or_change', 'response_and_side_effects')
+
+    def only(self, version, test_id, self_validation=False, **changes):
+        m = manifest(version)
+        test = next(t for t in m['tests'] if t['test_id'] == test_id)
+        m['tests'] = [dict(test, **changes)]
+        rep = scan.run(m, self_validation=self_validation).report
+        self.assertEqual(report.validate(rep), [])
+        return rep, rep['execution_records'][0]
+
+    def assert_fails_alone(self, record, failing):
+        """Every check before the failing one held, the failing one did not, and every later one that was
+        reached held too."""
+        checks = record['checks']
+        at = self.ORDER.index(failing)
+        self.assertEqual([checks[name] for name in self.ORDER[:at]], [True] * at, checks)
+        self.assertIs(checks[failing], False, checks)
+        return [checks[name] for name in self.ORDER[at + 1:]]
+
+    def test_1_a_control_operation_that_fails_blocks_the_case(self):
+        # The test names as owner an identity that does not own the document: its control read finds nothing.
+        rep, record = self.only('patched', 'READ-other-tenant', owner_ref='same_tenant_non_owner')
+        self.assertEqual(record['result'], 'blocked')
+        self.assert_fails_alone(record, 'resource_and_control')
+        self.assertEqual(rep['findings'], [])
+        # The attempt was never made: the only actor request is the control.
+        self.assertEqual([ev['identity_ref'] for ev in record['evidence'] if ev['channel'] == 'actor'],
+                         ['same_tenant_non_owner'])
+
+    def test_2_an_actor_without_a_valid_identity_blocks_the_case(self):
+        rep, record = self.only('patched', 'READ-other-tenant', self_validation=True, fault='session-revoked')
+        self.assertEqual(record['result'], 'blocked')
+        self.assert_fails_alone(record, 'identity')
+        self.assertEqual(rep['findings'], [])
+
+    def test_3_a_refusal_that_discloses_the_document_is_a_failure(self):
+        rep, record = self.only('leaky-denial', 'READ-same-tenant')
+        self.assertEqual(record['result'], 'failed')
+        self.assertEqual(self.assert_fails_alone(record, 'no_disclosure_or_change'), [True])
+        attempt = [ev for ev in record['evidence'] if ev['channel'] == 'actor'][-1]
+        self.assertEqual((attempt['identity_ref'], attempt['response']['status'], attempt['response']['rows']),
+                         ('same_tenant_non_owner', 403, None))  # a proper refusal by its status (TK-DYN-002)
+        before, after = (ev['observation'] for ev in record['evidence'] if ev['channel'] == 'observer')
+        self.assertEqual(before, after)
+        self.assertEqual([f['status'] for f in rep['findings']], ['confirmed'])
+
+    def test_3_the_same_sample_refuses_the_other_tenant_without_saying_anything(self):
+        rep, record = self.only('leaky-denial', 'READ-other-tenant')
+        self.assertEqual((record['result'], rep['findings']), ('passed', []))
+
+    def test_4_a_403_whose_request_changed_another_row_is_a_failure(self):
+        rep, record = self.only('side-effect-on-denial', 'UPDATE-same-tenant')
+        self.assertEqual(record['result'], 'failed')
+        self.assert_fails_alone(record, 'response_and_side_effects')
+        self.assertTrue(record['checks']['no_disclosure_or_change'])  # the target row is as it was
+        attempt = [ev for ev in record['evidence'] if ev['channel'] == 'actor'][-1]
+        self.assertEqual((attempt['request']['method'], attempt['response']['status']), ('PATCH', 403))
+        before, after = (ev['observation'] for ev in record['evidence'] if ev['channel'] == 'observer')
+        self.assertEqual(before['state_digest'], after['state_digest'])
+        self.assertNotEqual(before['table_digest'], after['table_digest'])
+        self.assertEqual([f['status'] for f in rep['findings']], ['confirmed'])
 
 
 class AScanInjectsNothing(unittest.TestCase):

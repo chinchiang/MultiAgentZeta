@@ -20,7 +20,8 @@ MODULES = {
         'evidence': ['migration file text'],
         'templates': ['nextjs-supabase-object-authz'],
         'judges': ['denial cases and allowed cases (spec chapter 7)'],
-        'self_acceptance': [f'samples/object-authz/{v}' for v in ('vulnerable', 'patched', 'legit', 'lax-update-policy')],
+        'self_acceptance': [f'samples/object-authz/{v}' for v in ('vulnerable', 'patched', 'legit', 'lax-update-policy',
+                                                                    'leaky-denial', 'side-effect-on-denial')],
         'limitations': [
             {'scope': 'rls-functions', 'reason': 'no template for functions (RPC, SECURITY DEFINER) yet; '
                                                  'includes writes whose response looks like a denial'},
