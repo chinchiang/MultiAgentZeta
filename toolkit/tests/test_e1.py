@@ -252,8 +252,9 @@ class PrepareVulnerableEnv(unittest.TestCase):
                                         "where n.nspname = 'public' and c.relkind = 'r' and not c.relrowsecurity") if t]
         self.assertEqual(without_rls, [])
         from toolkit import extract
-        files = {p.name: p.read_text(encoding='utf-8') for p in (SAMPLES / 'vulnerable' / 'supabase' / 'migrations').glob('*.sql')}
-        declared = sorted(f['name'] for f in extract.extract_facts(files)['facts'] if f['kind'] == 'policy')
+        declared = sorted(f['name'] for f in extract.extract_facts(extract.read_migrations(SAMPLES / 'vulnerable'))['facts']
+                          if f['kind'] == 'policy')
+        self.assertEqual(len(declared), 9)  # the migrations were read: an empty list would compare nothing
         in_database = sorted(p for p in query("select policyname from pg_policies where schemaname = 'public'") if p)
         self.assertEqual(in_database, declared)
         tracked = subprocess.run(['git', 'status', '--porcelain', '--untracked-files=no', '--', str(SAMPLES / 'vulnerable')],
